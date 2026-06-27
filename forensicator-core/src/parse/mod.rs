@@ -6,6 +6,7 @@ pub mod thread_list;
 pub mod memory;
 pub mod memory_info;
 pub mod exception;
+pub mod dump;
 
 #[cfg(test)]
 mod tests {
