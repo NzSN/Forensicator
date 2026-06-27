@@ -1,0 +1,8 @@
+[package]
+name = "forensicator-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+forensicator-core = { path = "../forensicator-core" }
+clap = { version = "4", features = ["derive"] }
