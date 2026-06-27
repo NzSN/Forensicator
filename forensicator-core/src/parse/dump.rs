@@ -35,10 +35,30 @@ pub fn from_bytes(data: &[u8]) -> Result<Dump, FatalError> {
         |bytes, prov| system_info::decode_system_info(bytes, prov).map_err(|a| vec![a]),
     );
 
-    let modules = decode_optional(
-        data, &dir, directory::stream_types::MODULE_LIST, &mut anomalies,
-        |bytes, prov| module_list::decode_module_list(bytes, prov).map_err(|a| vec![a]),
-    ).unwrap_or_default();
+    let modules = {
+        let entry = dir.find(directory::stream_types::MODULE_LIST);
+        match entry {
+            Some(e) => {
+                let start = e.rva as usize;
+                let end = start.saturating_add(e.size as usize);
+                if end > data.len() {
+                    anomalies.push(Anomaly {
+                        provenance: Provenance { stream_type: directory::stream_types::MODULE_LIST, file_offset: start as u64, rva: 0 },
+                        description: "ModuleList extends beyond file".into(),
+                    });
+                    vec![]
+                } else {
+                    let stream_bytes = &data[start..end];
+                    let prov = Provenance { stream_type: directory::stream_types::MODULE_LIST, file_offset: start as u64, rva: 0 };
+                    module_list::decode_module_list(stream_bytes, data, prov).unwrap_or_else(|err| {
+                        anomalies.push(err);
+                        vec![]
+                    })
+                }
+            }
+            None => vec![],
+        }
+    };
 
     let threads = decode_optional(
         data, &dir, directory::stream_types::THREAD_LIST, &mut anomalies,

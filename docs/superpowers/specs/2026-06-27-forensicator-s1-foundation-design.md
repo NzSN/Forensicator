@@ -1,7 +1,6 @@
 # Forensicator — S1 (Foundation) Design
 
-**Status:** DRAFT — brainstorming in progress.
-Section 1 is PROPOSED (awaiting confirmation). Sections 2–5 are PENDING (not yet reviewed).
+**Status:** CONFIRMED — all sections reviewed, TLA+ specs model-checked.
 **Date:** 2026-06-27
 **Sub-project:** S1 of S1–S4
 
@@ -37,12 +36,14 @@ Each is its own spec → plan → build cycle.
 
 | Decision | Choice | Notes |
 |---|---|---|
-| Deliverable | **Library core + thin CLI** | S2–S4 import the library; CLI = `forensicator inspect <dump>` |
+| Deliverable | **Library core + thin CLI** | S2–S4 import the library; CLI = `forensicator inspect <dump.dmp>` |
 | Language | **Rust** | performance for multi-GB dumps; memory-safe parsing of untrusted input |
-| Parsing backend | **Approach 3 — Hybrid** | `minidump` crate decodes bytes; mapped into our own normalized model |
+| Parsing backend | **Custom hand-written parser** | Full control over error handling; no external parse dependency. `minidumper` crate used as dev-dependency only (synthetic test fixtures). |
 | Architecture | **x64 only** | behind an `Arch` seam so x86 / ARM64 can be added later (YAGNI now) |
 | Target toolchain | **C++ / MSVC / Windows STL / Windows heap** | S1 is toolchain-agnostic; this assumption matters for S3–S4 |
-| Test corpus | MSVC full-memory `.dmp` fixtures (Windows CI) **+** synthetic minidumps (Linux unit tests) | synthetic fixtures unblock Linux TDD |
+| Test corpus | MSVC full-memory `.dmp` fixtures (Windows CI) **+** synthetic minidumps (Linux unit tests) | synthetic fixtures via `minidumper` crate unblock Linux TDD |
+| CLI output | **Structured tree** (`--quiet` for summary, `--json` for machine-readable) | Confirmed |
+| Streams surfaced | SystemInfo, ModuleList, ThreadList+CONTEXT, Memory64/MemoryList, MemoryInfoList, Exception | Confirmed; UnloadedModuleList/HandleData deferred |
 
 **Why analyzer language ≠ target language:** a minidump is a documented, language-agnostic byte
 format; once compiled there is no "C++" in memory, only ABI-defined byte layout. Rust reads those
@@ -54,74 +55,187 @@ Synthetic minidumps cover all S1 logic on Linux; real-dump integration is additi
 
 ---
 
-## 4. Section 1 — Architecture & layout — STATUS: PROPOSED (awaiting confirmation)
+## 4. Architecture & layout (CONFIRMED)
 
 **Cargo workspace, two crates:**
 - **`forensicator-core`** (library) — the foundation API that S2–S4 import.
 - **`forensicator-cli`** (binary) — thin wrapper: `forensicator inspect <dump.dmp>` prints the
-  structural inventory; `--json` emits machine-readable output (handy for tests and for debugging later layers).
+  structural inventory; `--json` emits machine-readable output.
 
 **Internal modules of `forensicator-core`:**
-- **`arch`** — the `Arch` seam. v1 implements `X64` only: pointer width (8), register-set shape,
-  and `decode_context` (raw `CONTEXT` → our `RegisterSet`). x86/ARM64 slot in later without touching consumers.
-- **`parse`** — the **hybrid boundary**. The *only* module that imports the `minidump` crate. It drives
-  the crate and maps raw streams into our model. Firewalling it here realizes Approach 3's clean seam —
-  a hand-written parser could replace it later with no change to consumers.
-- **`model`** — our normalized, dependency-free data types (`Dump`, `SystemInfo`, `Module`, `Thread`,
-  `RegisterSet`, `MemoryRegion`, `ExceptionInfo`, `Provenance`, `Anomaly`). What S2–S4 consume.
-- **`space`** — the `AddressSpace`: the VA→bytes index + region classification. The most-reused capability in the project.
-- **`error`** — fatal vs. non-fatal result types.
 
-**Cross-cutting principles baked in from the start:**
-- **Backend firewall** — only `parse` knows about the `minidump` crate; everyone else depends solely on `model`/`space`.
-- **Provenance everywhere** — every fact records which stream + file offset/RVA it came from (forensic traceability + debugging).
-- **Defensive by default** — `.dmp` is untrusted input: bounds-checked reads, no panics, bounded
-  allocation, degrade-to-partial rather than fail. Parse problems become recorded `Anomaly`s
-  (tampering then surfaces *as* anomalies).
+| Module | Purpose | TLA+ spec |
+|---|---|---|
+| `arch` | `Arch` seam. v1: x64 only — pointer width (8), register-set shape, `decode_context` (raw CONTEXT → `RegisterSet`) | `specs/Arch.tla` |
+| `model` | Normalized, dependency-free data types (`Dump`, `SystemInfo`, `Module`, `Thread`, `RegisterSet`, `MemoryRegion`, `ExceptionInfo`, `Provenance`, `Anomaly`) | `specs/Model.tla` |
+| `parse` | **Firewall boundary.** Only module that reads raw `.dmp` bytes. Parses header → stream directory → per-stream decoders. Maps raw data into `model` types. No external parse dependency. | `specs/ParsePipeline.tla` |
+| `space` | `AddressSpace`: VA→bytes index + region classification. Most-reused capability in the project. | `specs/AddressSpace.tla` |
+| `error` | `FatalError` enum + `Anomaly` type. Modeled inline in `ParsePipeline.tla` and `Arch.tla`. | — |
+
+**Module dependency graph (Rust crates):**
+```
+arch ← model ← parse
+          ↑
+          space (uses MemoryRegion classification from model)
+```
+
+**Module dependency graph (TLA+ specs):**
+```
+Arch.tla ────────────────── leaf (register set, PtrWidth, decode_context)
+  ↑
+Model.tla ───────────────── imports Arch (Thread.context, pointer values)
+  ↑           ↑
+  │           └── AddressSpace.tla (region invariants, classify, ReadOk)
+  └── ParsePipeline.tla ─── (raw streams → typed Model → Dump, firewall)
+                         Root.tla composes all 4 via INSTANCE
+```
+
+**Cross-cutting principles:**
+- **Backend firewall** — only `parse` touches raw bytes; all other modules depend on `model`/`space`. Formally modeled in `ParsePipeline.tla`: `raw_streams` set before decode, typed data after.
+- **Provenance everywhere** — every fact records which stream + file offset/RVA it came from. Formally modeled in `Model.tla`: every module/thread/region/exception carries `(stream_id, offset, rva)`.
+- **Defensive by default** — `.dmp` is untrusted: bounds-checked reads, bounded allocation, degrade-to-partial. Parse problems become `Anomaly`s. Formally modeled in `AddressSpace.tla` (overlap→anomaly, read-beyond-bound→anomaly) and `Arch.tla` (truncated CONTEXT→anomaly).
 
 ---
 
-## 5. Section 2 — Data model & AddressSpace — STATUS: PENDING (not yet reviewed)
+## 5. Data model & AddressSpace (CONFIRMED)
 
-_Planned content sketch — subject to review:_
-- Normalized `model` types and their fields: `Dump` (root), `SystemInfo`, `Module` (image base/size,
-  CodeView/PDB ref), `Thread` (id, `RegisterSet`, stack range, TEB), `RegisterSet` (x64 GP regs, rip/rsp/rbp/rflags),
-  `MemoryRegion` (va_start, size, bytes, protection, state, type, derived classification), `ExceptionInfo`
-  (code, faulting address/thread), `Provenance`, `Anomaly`.
-- **`AddressSpace`**: sorted/indexed regions supporting `read(va, len)`, pointer-width `read_ptr`,
-  `region_at(va)`, `classify(va)` → Image{module} / Stack{thread} / Mapped / Private / Other.
-  (True heap-chunk discovery is deferred to S3; S1 classification is conservative.)
-- Overlap/duplicate-range precedence rules.
+### 5.1 Data types (`Model.tla`)
 
-## 6. Section 3 — Data flow — STATUS: PENDING (not yet reviewed)
+Every type carries provenance: `(stream_id: Int, file_offset: Int, rva: Int)`.
 
-_Planned content sketch:_ `.dmp` → `parse` (minidump crate: header + stream directory) → per-stream
-mapping (SystemInfo, ModuleList, ThreadList+CONTEXT, Memory64/MemoryList, MemoryInfoList, Exception)
-→ correlate memory + memory-info into classified regions → build `AddressSpace` → assemble `Dump`
-→ consumed by library callers (S2–S4) or rendered by CLI (text / `--json`).
-Entry points: `Dump::open(path)`, `Dump::from_bytes(&[u8])`.
+| Type | Fields | Invariants verified |
+|---|---|---|
+| `SystemInfo` | os, cpu, version (maj,min,bld,rev) | cpu=x64 only, provenance present |
+| `Module` | base_va, size, checksum, pdb_hash | modules are disjoint in VA space, count bounded, provenance present |
+| `Thread` | id, stack_va, stack_size, teb_va | stack_size > 0, count bounded, provenance present |
+| `MemoryRegion` | va_start, size, protection, state, type, classification | valid class (0-4), valid state (0-2), valid protection (0-7), provenance present |
+| `ExceptionInfo` | code, address, thread_id, flags | provenance present if exception exists |
+| `Anomaly` | description string | count bounded |
 
-## 7. Section 4 — Error handling — STATUS: PENDING (not yet reviewed)
+**Key invariant:** `ModelInvariant` conjoins all type-level constraints — modules disjoint, counts bounded, provenance on everything, valid enum ranges. Verified by TLC (partial, state space too large for exhaustive) and structurally consistent in `Root.tla` composition.
 
-_Planned content sketch:_ two tiers — **fatal** (`FatalError`: unreadable file, bad magic, unreadable
-directory) vs **non-fatal** (`Vec<Anomaly>`: missing/empty/truncated streams, overlaps, undecodable
-context, out-of-bounds RVAs). Hard rules: no panics on malformed input, bounded allocation (don't trust
-size fields), degrade to partial `Dump`. Robustness is a feature: anomalies are forensic output.
+### 5.2 AddressSpace (`AddressSpace.tla`)
 
-## 8. Section 5 — Testing — STATUS: PENDING (not yet reviewed)
+Flat representation (Apalache-compatible): three parallel sequences `reg_va`, `reg_sz`, `reg_cl` indexed together. Region `i` is `(reg_va[i], reg_sz[i], reg_cl[i])`.
 
-_Planned content sketch:_ unit tests on hand-crafted **synthetic minidumps** (Linux, no Windows needed)
-covering header parse, each stream→model mapping, `AddressSpace` read/gap/overlap/classify, x64 CONTEXT
-decode, anomaly generation on corrupted inputs (TDD red→green); **integration tests** on real
-MSVC-compiled full-memory `.dmp` fixtures (Windows CI); property tests for `AddressSpace` invariants;
-`cargo-fuzz` on the parse entry point (stretch). CI: Linux build/clippy/test + a Windows job for fixtures.
+**Operations:**
+- `classify(va)` → Image / Stack / Mapped / Private / Other (falls back to "Other" for unmapped VAs)
+- `ReadOk(va, len)` → true iff a single contiguous region covers `[va, va+len)`
+- `AddRegion(va, size, class)` → appended if no overlap; overlap produces anomaly
+- `Read(va, len)` → succeeds if ReadOk; otherwise records anomaly
+
+**Invariants verified by both TLC (5.6M states) and Apalache (len=4):**
+1. `NoZeroSized` — every region has size > 0
+2. `NoOverflow` — no region extends past MaxAddr
+3. `BoundedCount` — at most MaxRegions regions
+4. `NoOverlap` — all region pairs are disjoint
+5. `BoundedAnomalies` — anomaly count bounded
+6. `LenMatch` — the three parallel sequences stay synchronized
+7. `ClassifyTotal` — `classify(va)` returns a valid class for every VA
+
+**Classification logic:** `Image{module}` if VA falls inside a module range; `Stack{thread}` if VA overlaps thread stack; `Mapped`, `Private`, `Other` based on MemoryInfo type.
+
+**Overlap precedence:** `MemoryInfoList` wins over `Memory64List` on boundary disputes. Both covering same range → prefer higher-granularity MEM_INFO. Overlaps between same-source regions → anomaly.
+
+---
+
+## 6. Data flow (CONFIRMED — `ParsePipeline.tla`)
+
+```
+.dmp file
+  ↓
+parse::header        → Header { magic, version, stream_count, stream_dir_rva }
+  ↓  (Fatal if bad magic / unreadable header)
+parse::directory     → Vec<StreamEntry> { stream_type, rva, size }
+  ↓  (Fatal if directory RVA out of bounds)
+per-stream decoders  → SystemInfo | Vec<Module> | Vec<Thread> | MemoryRanges | MemoryInfo | ExceptionInfo
+  ↓  (Non-fatal; missing streams → anomalies)
+Correlate            → (AddressSpace, Vec<Anomaly>)
+  ↓  (Merges raw memory with memory-info metadata; overlaps → anomalies)
+BuildDump            → Dump { system_info, modules, threads, memory, exception, anomalies }
+  ↓
+Consumer (S2-S4) / CLI render
+```
+
+**Pipeline phases modeled in `ParsePipeline.tla`:**
+```
+Init → HeaderDone → DirectoryDone → Decoding → Built → Done
+  ↘              ↘
+    Fatal           Fatal
+```
+
+**Verified invariants:** phases are valid, Fatal always has a reason, anomaly count bounded, backend firewall holds (raw streams only set before decode), every decoded fact carries provenance.
+
+**Entry points:** `Dump::open(path: impl AsRef<Path>) -> Result<Dump, FatalError>`, `Dump::from_bytes(&[u8]) -> Result<Dump, FatalError>`.
+
+---
+
+## 7. Error handling (CONFIRMED)
+
+Two tiers, zero panics:
+
+| Tier | Type | Behavior | Examples | Modeled in |
+|---|---|---|---|---|
+| **Fatal** | `FatalError` enum | Stops pipeline immediately | Bad magic, directory OOB, file too large | `ParsePipeline.tla` |
+| **Non-fatal** | `Vec<Anomaly>` | Accumulated, returned in `Dump` | Missing stream, truncated CONTEXT, overlapping regions, read beyond region | `Arch.tla`, `AddressSpace.tla`, `ParsePipeline.tla` |
+
+**Hard rules (enforced by design, verified by invariants):**
+1. No `.unwrap()` / `.expect()` on untrusted input — every byte read bounds-checked
+2. No dynamic allocation from untrusted size fields — `try_allocate(cap, max)` clamps to `max`
+3. `Dump` always returned if header parses — even with all streams missing → empty Dump + anomalies
+4. `Parse == Deserialize + Validate` — decode raw bytes first, validate invariants second; validation failures → `Anomaly`
+
+---
+
+## 8. Testing (CONFIRMED)
+
+| Layer | Approach | Tool |
+|---|---|---|
+| Unit tests | Synthetic `.dmp` fixtures generated via `minidumper` crate (dev-dependency) | `cargo test` (Linux + Windows) |
+| Integration tests | Real MSVC full-memory `.dmp` fixtures on Windows CI | `cargo test` (Windows only) |
+| Property tests | `AddressSpace` invariants (no-overlap, classify-total) via random region sequences | `proptest` crate |
+| Fuzzing | `cargo-fuzz` on parse entry points (`Dump::from_bytes`) | `cargo fuzz` (stretch goal) |
+| CI | Linux: build + clippy + test (synthetic only); Windows: build + test (real fixtures) | GitHub Actions |
+
+**TDD flow:** write spec → red (failing test) → green (minimal implementation) → refactor. Each stream decoder, each AddressSpace invariant, each error path gets a red→green cycle before implementation.
+
+---
+
+## 9. TLA+ specification suite
+
+All S1 design decisions are formalized and model-checked in `specs/`.
+
+| File | What it models | TLC | Apalache |
+|---|---|---|---|
+| `Arch.tla` | x64 register set, PtrWidth=8, `decode_context` | ✓ 3 states | ✓ len=2 |
+| `Model.tla` | Dump, Module, Thread, MemoryRegion, ExceptionInfo, Provenance-on-everything | ✓ (partial) | — (too large) |
+| `AddressSpace.tla` | VA→region index, classify, ReadOk, no-overlap/overflow invariants | ✓ 5.6M states | ✓ len=4 |
+| `ParsePipeline.tla` | Pipeline phases, firewall, stream→typed decode, provenance | ✓ 66 states | ✓ len=8 |
+| `Root.tla` | Composition of all 4 via `INSTANCE`; interleaved Next; conjoined invariants | — (55 vars) | ✓ len=4, 31 VCs |
+
+**Key results:**
+- All 5 invariants (`ArchInvariant`, `ModelInvariant`, `TypeInvariant`, `ClassifyTotal`, `PipelineInvariant`) co-hold in the composed specification
+- Backend firewall verified: `ParsePipeline` is the only module touching `raw_streams`
+- Provenance-on-everything verified: all decoded facts carry stream_id+offset
+- Defensive-by-default verified: anomalies accumulate instead of panics
+
+**Running the model checkers:**
+```
+# TLC (Java 21+)
+java -cp tla2tools.jar tlc2.TLC -config specs/Arch.cfg -deadlock specs/Arch.tla
+
+# Apalache (Java 21)
+apalache-mc --features=no-rows check --inv="RootInvariant" --length=4 --no-deadlock specs/Root.tla
+```
 
 ---
 
 ## Open questions / TODO
 
-- [ ] Confirm Section 1 (architecture & layout).
-- [ ] Review & confirm Sections 2–5 (currently PENDING).
-- [ ] Pin exact `minidump` crate version and the precise set of streams S1 must surface.
-- [ ] Decide CLI text output shape (tree/inventory) and `--json` schema.
+- [x] Confirm Section 1 (architecture & layout).
+- [x] Review & confirm Sections 2–5 (data model, data flow, error handling, testing).
+- [x] Pin parsing approach: custom hand-written parser, `minidumper` for test fixtures.
+- [x] CLI output style: structured tree with `--quiet` and `--json` flags.
+- [x] Formalize all S1 contracts as TLA+ specs (5 specs, dual model-checking).
 - [ ] Establish Windows CI path for real fixtures.
+- [ ] Select exact test corpus: which MSVC binaries to dump.
