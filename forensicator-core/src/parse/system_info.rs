@@ -40,9 +40,7 @@ pub fn decode_system_info(data: &[u8], prov: Provenance) -> Result<SystemInfo, A
     let maj = u32::from_le_bytes([data[8],  data[9],  data[10], data[11]]);
     let min = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
     let bld = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
-
-    let proc_rev = u16::from_le_bytes([data[4], data[5]]);
-    let rev = proc_rev as u32;
+    let rev = 0; // UBR not available in minidump — CDB reads it from live registry
 
     Ok(SystemInfo { os, cpu, version: (maj, min, bld, rev), provenance: prov })
 }
