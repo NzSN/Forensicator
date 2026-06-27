@@ -4,3 +4,4 @@
 pub mod error;
 pub mod arch;
 pub mod model;
+pub mod parse;
