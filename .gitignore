@@ -1,3 +1,7 @@
 /target
 **/target
-
+.vscode
+**/*.log
+**/specs/
+**/states/
+Cargo.lock
