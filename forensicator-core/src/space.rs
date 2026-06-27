@@ -159,4 +159,79 @@ mod tests {
         let vas: Vec<u64> = space.regions().iter().map(|r| r.va_start).collect();
         assert_eq!(vas, vec![0x1000, 0x2000, 0x3000]);
     }
+
+    #[test]
+    fn is_empty_and_len() {
+        let space = AddressSpace::new(4);
+        assert!(space.is_empty());
+        assert_eq!(space.len(), 0);
+    }
+
+    #[test]
+    fn len_after_insertion() {
+        let mut space = AddressSpace::new(4);
+        space.add_region(make_region(0, 100, RegionClass::Image)).unwrap();
+        assert!(!space.is_empty());
+        assert_eq!(space.len(), 1);
+    }
+
+    #[test]
+    fn gap_between_regions_returns_none() {
+        let mut space = AddressSpace::new(4);
+        space.add_region(make_region(0, 100, RegionClass::Image)).unwrap();
+        space.add_region(make_region(0x2000, 100, RegionClass::Stack)).unwrap();
+        assert!(space.region_at(0x1000).is_none());
+        assert_eq!(space.classify(0x1000), RegionClass::Other);
+    }
+
+    #[test]
+    fn exact_va_match() {
+        let mut space = AddressSpace::new(4);
+        space.add_region(make_region(0x400000, 0x1000, RegionClass::Image)).unwrap();
+        assert!(space.region_at(0x400000).is_some());
+        assert_eq!(space.classify(0x400000), RegionClass::Image);
+    }
+
+    #[test]
+    fn one_past_end_returns_none() {
+        let mut space = AddressSpace::new(4);
+        space.add_region(make_region(0x1000, 0x1000, RegionClass::Private)).unwrap();
+        assert!(space.region_at(0x2000).is_none());
+    }
+
+    #[test]
+    fn multiple_classifications() {
+        let mut space = AddressSpace::new(4);
+        space.add_region(make_region(0, 100, RegionClass::Image)).unwrap();
+        space.add_region(make_region(0x1000, 100, RegionClass::Stack)).unwrap();
+        space.add_region(make_region(0x2000, 100, RegionClass::Mapped)).unwrap();
+        space.add_region(make_region(0x3000, 100, RegionClass::Private)).unwrap();
+        assert_eq!(space.classify(0), RegionClass::Image);
+        assert_eq!(space.classify(0x1000), RegionClass::Stack);
+        assert_eq!(space.classify(0x2000), RegionClass::Mapped);
+        assert_eq!(space.classify(0x3000), RegionClass::Private);
+        assert_eq!(space.classify(0x4000), RegionClass::Other);
+    }
+
+    #[test]
+    fn read_at_region_start() {
+        let mut space = AddressSpace::new(4);
+        let mut data = vec![0u8; 100];
+        data[0] = 0xAB; data[1] = 0xCD;
+        let region = AddressRegion {
+            va_start: 0x1000, size: 100, data,
+            protection: 3, state: MemState::Commit, classification: RegionClass::Image,
+        };
+        space.add_region(region).unwrap();
+        let bytes = space.read(0x1000, 2).unwrap();
+        assert_eq!(bytes, &[0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn add_region_returns_err_message() {
+        let mut space = AddressSpace::new(1);
+        space.add_region(make_region(0, 100, RegionClass::Image)).unwrap();
+        let err = space.add_region(make_region(0x2000, 100, RegionClass::Stack)).unwrap_err();
+        assert!(err.description.contains("capacity"));
+    }
 }

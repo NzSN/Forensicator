@@ -123,4 +123,81 @@ mod tests {
         regs.set(999, 42);
         assert!(regs.values.iter().all(|&v| v == 0));
     }
+
+    #[test]
+    fn set_and_get_rsp() {
+        let mut regs = RegisterSet::new();
+        regs.set(x64_indices::RSP, 0x7FFE_0000);
+        assert_eq!(regs.rsp(), 0x7FFE_0000);
+    }
+
+    #[test]
+    fn set_and_get_rbp() {
+        let mut regs = RegisterSet::new();
+        regs.set(x64_indices::RBP, 0x7FFD_1000);
+        assert_eq!(regs.rbp(), 0x7FFD_1000);
+    }
+
+    #[test]
+    fn set_all_gprs() {
+        let mut regs = RegisterSet::new();
+        let gprs = [
+            x64_indices::RAX, x64_indices::RBX, x64_indices::RCX, x64_indices::RDX,
+            x64_indices::RSI, x64_indices::RDI, x64_indices::R8,  x64_indices::R9,
+            x64_indices::R10, x64_indices::R11, x64_indices::R12, x64_indices::R13,
+            x64_indices::R14, x64_indices::R15,
+        ];
+        for (i, &idx) in gprs.iter().enumerate() {
+            regs.set(idx, 0x1000 + i as u64);
+        }
+        assert_eq!(regs.get(x64_indices::RAX), 0x1000);
+        assert_eq!(regs.get(x64_indices::R15), 0x100D);
+    }
+
+    #[test]
+    fn set_segment_registers() {
+        let mut regs = RegisterSet::new();
+        regs.set(x64_indices::CS, 0x33);
+        regs.set(x64_indices::DS, 0x2B);
+        regs.set(x64_indices::SS, 0x2B);
+        assert_eq!(regs.get(x64_indices::CS), 0x33);
+        assert_eq!(regs.get(x64_indices::DS), 0x2B);
+        assert_eq!(regs.get(x64_indices::SS), 0x2B);
+    }
+
+    #[test]
+    fn set_debug_registers() {
+        let mut regs = RegisterSet::new();
+        regs.set(x64_indices::DR0, 0x7FFA_0000);
+        regs.set(x64_indices::DR7, 0x400);
+        assert_eq!(regs.get(x64_indices::DR0), 0x7FFA_0000);
+        assert_eq!(regs.get(x64_indices::DR7), 0x400);
+    }
+
+    #[test]
+    fn set_rflags() {
+        let mut regs = RegisterSet::new();
+        regs.set(x64_indices::RFLAGS, 0x246);
+        assert_eq!(regs.get(x64_indices::RFLAGS), 0x246);
+    }
+
+    #[test]
+    fn register_set_clone() {
+        let mut a = RegisterSet::new();
+        a.set(x64_indices::RIP, 0x7FFA_1000);
+        let b = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(b.rip(), 0x7FFA_1000);
+    }
+
+    #[test]
+    fn partial_register_update() {
+        let mut regs = RegisterSet::new();
+        regs.set(x64_indices::RAX, 0xDEADBEEF);
+        regs.set(x64_indices::RBX, 0xCAFEBABE);
+        // RAX should be set, RBX should be set, others zero
+        assert_eq!(regs.get(x64_indices::RAX), 0xDEADBEEF);
+        assert_eq!(regs.get(x64_indices::RBX), 0xCAFEBABE);
+        assert_eq!(regs.get(x64_indices::RCX), 0);
+    }
 }

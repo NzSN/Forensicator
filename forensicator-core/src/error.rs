@@ -70,4 +70,68 @@ mod tests {
         assert_eq!(a.provenance.stream_type, 7);
         assert_eq!(a.provenance.file_offset, 128);
     }
+
+    #[test]
+    fn io_error_display() {
+        let err = FatalError::Io("permission denied".into());
+        let msg = err.to_string();
+        assert!(msg.contains("I/O error"));
+        assert!(msg.contains("permission denied"));
+    }
+
+    #[test]
+    fn too_small_display() {
+        let err = FatalError::TooSmall { size: 16 };
+        let msg = err.to_string();
+        assert!(msg.contains("file too small"));
+        assert!(msg.contains("16"));
+        assert!(msg.contains("32"));
+    }
+
+    #[test]
+    fn directory_out_of_bounds_display() {
+        let err = FatalError::DirectoryOutOfBounds { rva: 0x1000, size: 4096, file_len: 512 };
+        let msg = err.to_string();
+        assert!(msg.contains("stream directory"));
+        assert!(msg.contains("4096"));
+        assert!(msg.contains("out of bounds"));
+    }
+
+    #[test]
+    fn stream_out_of_bounds_display() {
+        let err = FatalError::StreamOutOfBounds {
+            stream_type: 0x07, rva: 0x2000, size: 1024, file_len: 512,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("0x00000007"));
+        assert!(msg.contains("1024"));
+        assert!(msg.contains("out of bounds"));
+    }
+
+    #[test]
+    fn fatal_error_is_std_error() {
+        let err = FatalError::TooSmall { size: 10 };
+        let _: Box<dyn std::error::Error> = Box::new(err);
+    }
+
+    #[test]
+    fn fatal_error_equality() {
+        let a = FatalError::BadMagic { found: [0xDE, 0xAD, 0xBE, 0xEF] };
+        let b = FatalError::BadMagic { found: [0xDE, 0xAD, 0xBE, 0xEF] };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn provenance_default_stream_type() {
+        let prov = Provenance { stream_type: 0, file_offset: 0, rva: 0 };
+        assert_eq!(prov.stream_type, 0);
+    }
+
+    #[test]
+    fn anomaly_clone() {
+        let prov = Provenance { stream_type: 1, file_offset: 64, rva: 8 };
+        let a = Anomaly { provenance: prov, description: "test".into() };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
 }

@@ -195,4 +195,180 @@ mod tests {
         };
         assert_eq!(si.cpu, CpuArch::X64);
     }
+
+    #[test]
+    fn protection_execute_only() {
+        let p = Protection::new(Protection::EXECUTE);
+        assert!(!p.is_readable());
+        assert!(!p.is_writable());
+        assert!(p.is_executable());
+    }
+
+    #[test]
+    fn protection_guard_and_nocache() {
+        let p = Protection::new(Protection::GUARD | Protection::NO_CACHE);
+        assert!(!p.is_readable());
+    }
+
+    #[test]
+    fn mem_state_all_variants() {
+        assert_eq!(MemState::from_u32(0), Some(MemState::Commit));
+        assert_eq!(MemState::from_u32(1), Some(MemState::Reserve));
+        assert_eq!(MemState::from_u32(2), Some(MemState::Free));
+        assert_eq!(MemState::from_u32(99), None);
+    }
+
+    #[test]
+    fn mem_type_all_variants() {
+        assert_eq!(MemType::from_u32(0), Some(MemType::Private));
+        assert_eq!(MemType::from_u32(1), Some(MemType::Mapped));
+        assert_eq!(MemType::from_u32(2), Some(MemType::Image));
+        assert_eq!(MemType::from_u32(99), None);
+    }
+
+    #[test]
+    fn thread_construction() {
+        let registers = RegisterSet::new();
+        let t = Thread {
+            id: 1234,
+            registers,
+            stack_va: 0x7FFE_0000,
+            stack_size: 0x10000,
+            teb_va: 0x7FFD_E000,
+            provenance: dummy_prov(),
+        };
+        assert_eq!(t.id, 1234);
+        assert_eq!(t.stack_va, 0x7FFE_0000);
+        assert_eq!(t.stack_size, 0x10000);
+        assert_eq!(t.teb_va, 0x7FFD_E000);
+    }
+
+    #[test]
+    fn module_with_pdb() {
+        let mut guid = [0u8; 16];
+        guid[0] = 0xAB; guid[1] = 0xCD;
+        let m = Module {
+            name: "ntdll.dll".into(),
+            base_va: 0x7FFA_0000,
+            size: 0x200000,
+            checksum: 0x12345678,
+            codeview_guid: Some(guid),
+            pdb_name: Some("ntdll.pdb".into()),
+            provenance: dummy_prov(),
+        };
+        assert_eq!(m.name, "ntdll.dll");
+        assert!(m.codeview_guid.is_some());
+        assert_eq!(m.pdb_name.as_deref(), Some("ntdll.pdb"));
+    }
+
+    #[test]
+    fn module_without_pdb() {
+        let m = Module {
+            name: "unknown.dll".into(),
+            base_va: 0x10000000,
+            size: 0x5000,
+            checksum: 0,
+            codeview_guid: None,
+            pdb_name: None,
+            provenance: dummy_prov(),
+        };
+        assert!(m.codeview_guid.is_none());
+        assert!(m.pdb_name.is_none());
+    }
+
+    #[test]
+    fn exception_info_with_context() {
+        let ctx = RegisterSet::new();
+        let exc = ExceptionInfo {
+            code: 0xC0000005,
+            address: 0x7FFA_1234,
+            thread_id: 42,
+            flags: 0,
+            context: Some(ctx.clone()),
+            provenance: dummy_prov(),
+        };
+        assert_eq!(exc.code, 0xC0000005);
+        assert_eq!(exc.address, 0x7FFA_1234);
+        assert!(exc.context.is_some());
+    }
+
+    #[test]
+    fn exception_info_without_context() {
+        let exc = ExceptionInfo {
+            code: 0x80000003,
+            address: 0x1000,
+            thread_id: 1,
+            flags: 1,
+            context: None,
+            provenance: dummy_prov(),
+        };
+        assert!(exc.context.is_none());
+    }
+
+    #[test]
+    fn memory_region_info_construction() {
+        let mri = MemoryRegionInfo {
+            va_start: 0x400000,
+            size: 0x1000,
+            protection: Protection::new(Protection::READ),
+            state: MemState::Commit,
+            mem_type: MemType::Image,
+            provenance: dummy_prov(),
+        };
+        assert_eq!(mri.va_start, 0x400000);
+        assert_eq!(mri.size, 0x1000);
+        assert_eq!(mri.state, MemState::Commit);
+        assert_eq!(mri.mem_type, MemType::Image);
+        assert!(mri.protection.is_readable());
+    }
+
+    #[test]
+    fn dump_with_all_fields() {
+        let si = SystemInfo {
+            os: OsPlatform::Windows, cpu: CpuArch::X64,
+            version: (10, 0, 22000, 0), provenance: dummy_prov(),
+        };
+        let m = Module {
+            name: "test.exe".into(), base_va: 0x140000000, size: 0x1000,
+            checksum: 0, codeview_guid: None, pdb_name: None,
+            provenance: dummy_prov(),
+        };
+        let t = Thread {
+            id: 1, registers: RegisterSet::new(),
+            stack_va: 0x7FFE_0000, stack_size: 0x10000, teb_va: 0x7FFD_E000,
+            provenance: dummy_prov(),
+        };
+        let exc = ExceptionInfo {
+            code: 0xC0000005, address: 0, thread_id: 1, flags: 0,
+            context: None, provenance: dummy_prov(),
+        };
+        let d = Dump {
+            system_info: Some(si),
+            modules: vec![m],
+            threads: vec![t],
+            memory_regions: vec![],
+            exception: Some(exc),
+            anomalies: vec![],
+            file_size: 1024,
+        };
+        assert_eq!(d.modules.len(), 1);
+        assert_eq!(d.threads.len(), 1);
+        assert!(d.system_info.is_some());
+        assert!(d.exception.is_some());
+        assert_eq!(d.file_size, 1024);
+    }
+
+    #[test]
+    fn os_platform_discriminants() {
+        assert_eq!(OsPlatform::Windows as u32, 0);
+        assert_eq!(OsPlatform::Linux as u32, 1);
+        assert_eq!(OsPlatform::MacOs as u32, 2);
+    }
+
+    #[test]
+    fn cpu_arch_discriminants() {
+        assert_eq!(CpuArch::X86 as u32, 0);
+        assert_eq!(CpuArch::X64 as u32, 1);
+        assert_eq!(CpuArch::Arm64 as u32, 2);
+    }
 }
