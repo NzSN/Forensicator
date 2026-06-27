@@ -3,3 +3,4 @@
 
 pub mod error;
 pub mod arch;
+pub mod model;
