@@ -1,7 +1,7 @@
 use crate::error::Anomaly;
 use crate::model::{
     EdgeIndex, GraphEdge, GraphNode, NodeIndex, PointerGraph,
-    RegionClass, ScanResult, TargetContext,
+    RegionClass, ScanResult, SourceContext, TargetContext,
 };
 
 pub fn build_graph(scan_result: &ScanResult) -> Result<PointerGraph, Anomaly> {
@@ -26,6 +26,20 @@ pub fn build_graph(scan_result: &ScanResult) -> Result<PointerGraph, Anomaly> {
         };
         if let Some(&idx) = graph.va_to_node.get(&c.target_va) {
             graph.nodes[idx.0].region_class = class;
+        }
+    }
+
+    for c in &scan_result.candidates {
+        let class = match c.source_ctx {
+            SourceContext::Stack { .. } => RegionClass::Stack,
+            SourceContext::Heap { .. } => RegionClass::Private,
+            SourceContext::ModuleData { .. } => RegionClass::Image,
+            SourceContext::Register { .. } | SourceContext::AnyCommitted => RegionClass::Other,
+        };
+        if let Some(&idx) = graph.va_to_node.get(&c.source_va) {
+            if graph.nodes[idx.0].region_class == RegionClass::Other {
+                graph.nodes[idx.0].region_class = class;
+            }
         }
     }
 
