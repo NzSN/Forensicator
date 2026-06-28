@@ -181,4 +181,35 @@ mod tests {
         // Pipeline ran end-to-end without panics
         let _dist = query.degree_distribution();
     }
+
+    #[test]
+    fn full_s3_pipeline_on_synthetic_dump() {
+        let mut buf = vec![0u8; 256];
+        buf[0] = 0x4D; buf[1] = 0x44; buf[2] = 0x4D; buf[3] = 0x50;
+        buf[4] = 0x93; buf[5] = 0xA7;
+        buf[8] = 1; buf[9] = 0; buf[10] = 0; buf[11] = 0;
+        buf[12] = 64; buf[13] = 0; buf[14] = 0; buf[15] = 0;
+        buf[64] = 7; buf[68] = 56; buf[72] = 128;
+        buf[128] = 0; buf[129] = 0;
+        buf[136] = 9; buf[137] = 0;
+        buf[148] = 2;
+
+        let dump = crate::parse::dump::from_bytes(&buf).unwrap();
+        assert!(dump.system_info.is_some());
+
+        let space = crate::space::AddressSpace::new(1000);
+        let patterns = crate::pattern::PointerPattern::presets();
+        let reg_refs: Vec<(u32, &[(String, u64)])> = vec![];
+        let stack_ranges: Vec<(u32, u64, u64)> = vec![];
+
+        let scan_result = crate::scan::scan(&space, &reg_refs, &stack_ranges, &patterns).unwrap();
+        let graph = crate::graph::build_graph(&scan_result).unwrap();
+        let query = crate::query::GraphQuery::new(&graph);
+
+        let catalog = crate::recover::recover_all(&space, &graph, &query);
+        assert!(catalog.strings.is_empty());
+        assert!(catalog.vtables.is_empty());
+        assert!(catalog.linked_lists.is_empty());
+        assert!(catalog.arrays.is_empty());
+    }
 }
