@@ -10,3 +10,4 @@ pub mod pattern;
 pub mod scan;
 pub mod graph;
 pub mod query;
+pub mod recover;
