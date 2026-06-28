@@ -50,6 +50,19 @@ enum Commands {
         #[command(subcommand)]
         action: PatternsAction,
     },
+    /// Recover structures from a minidump.
+    Recover {
+        path: String,
+        #[arg(long)] strings: bool,
+        #[arg(long)] vtables: bool,
+        #[arg(long)] lists: bool,
+        #[arg(long)] arrays: bool,
+        #[arg(long)] chunks: bool,
+        #[arg(long)] shapes: bool,
+        #[arg(long)] all: bool,
+        #[arg(long)] json: bool,
+        #[arg(long)] pattern: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -89,6 +102,12 @@ fn main() {
             PatternsAction::List => cmd_patterns_list(),
             PatternsAction::Show { name } => cmd_patterns_show(&name),
         },
+        Commands::Recover { path, strings, vtables, lists, arrays, chunks, shapes, all, json, pattern } => {
+            if let Err(e) = cmd_recover(&path, strings, vtables, lists, arrays, chunks, shapes, all, json, pattern.as_deref()) {
+                eprintln!("error: {e}");
+                process::exit(1);
+            }
+        }
     }
 }
 
@@ -215,6 +234,48 @@ fn cmd_query(path: &str, reachable: Option<&str>, stats: bool) -> Result<(), Box
         for (deg, count) in query.degree_distribution() { println!("  {} -> {} nodes", deg, count); }
         println!("Confidence distribution:");
         for (bucket, count) in query.confidence_distribution() { println!("  bucket {} -> {} edges", bucket, count); }
+    }
+    Ok(())
+}
+
+fn cmd_recover(
+    path: &str, strings: bool, vtables: bool, lists: bool, arrays: bool, chunks: bool, shapes: bool,
+    all: bool, json: bool, pattern_name: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use forensicator_core::recover;
+    let dump = dump::open(path)?;
+    let space = forensicator_core::space::AddressSpace::new(1_000_000);
+    let patterns = if let Some(n) = pattern_name {
+        PointerPattern::presets().into_iter().filter(|p| p.name == n).collect()
+    } else { PointerPattern::presets() };
+    let registers: Vec<(u32, Vec<(String, u64)>)> = dump.threads.iter().map(|t| {
+        vec![("RIP".into(), t.registers.rip()), ("RSP".into(), t.registers.rsp()), ("RBP".into(), t.registers.rbp())]
+    }).enumerate().map(|(i, r)| (i as u32, r)).collect();
+    let stack_ranges: Vec<(u32, u64, u64)> = dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
+    let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
+    let scan_result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns)?;
+    let pointer_graph = graph::build_graph(&scan_result)?;
+    let query = GraphQuery::new(&pointer_graph);
+    let run_all = all || (!strings && !vtables && !lists && !arrays && !chunks && !shapes);
+    let catalog = recover::recover_all(&space, &pointer_graph, &query);
+    if json {
+        let output = serde_json::json!({
+            "strings": if run_all || strings { catalog.strings.len() } else { 0 },
+            "vtables": if run_all || vtables { catalog.vtables.len() } else { 0 },
+            "linked_lists": if run_all || lists { catalog.linked_lists.len() } else { 0 },
+            "arrays": if run_all || arrays { catalog.arrays.len() } else { 0 },
+            "chunks": if run_all || chunks { catalog.chunks.len() } else { 0 },
+            "shape_groups": catalog.shape_clusters.groups.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Structure recovery results:");
+        if run_all || strings { println!("  Strings: {}", catalog.strings.len()); }
+        if run_all || vtables { println!("  VTables: {}", catalog.vtables.len()); }
+        if run_all || lists { println!("  Linked lists: {}", catalog.linked_lists.len()); }
+        if run_all || arrays { println!("  Arrays: {}", catalog.arrays.len()); }
+        if run_all || chunks { println!("  Chunks: {}", catalog.chunks.len()); }
+        if run_all || shapes { println!("  Shape groups: {}", catalog.shape_clusters.groups.len()); }
     }
     Ok(())
 }
