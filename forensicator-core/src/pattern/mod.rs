@@ -39,7 +39,12 @@ impl PointerPattern {
     }
 
     pub fn with_min_confidence(mut self, c: f64) -> Self {
-        self.min_confidence = c;
+        self.min_confidence = 0.0_f64.max(c).min(1.0);
+        self
+    }
+
+    pub fn with_max_depth_from_root(mut self, d: usize) -> Self {
+        self.max_depth_from_root = Some(d);
         self
     }
 
@@ -174,5 +179,66 @@ mod tests {
         assert_eq!(p.min_confidence, 0.9);
         assert!(p.value_matches(0x1500));
         assert!(!p.value_matches(0x3000));
+    }
+
+    #[test]
+    fn with_source_stores_correctly() {
+        let p = PointerPattern::new("test")
+            .with_source(SourceContext::Heap { region_va: Some(0x1000) });
+        assert_eq!(p.source, SourceContext::Heap { region_va: Some(0x1000) });
+    }
+
+    #[test]
+    fn with_target_stores_correctly() {
+        let p = PointerPattern::new("test")
+            .with_target(TargetContext::Stack);
+        assert_eq!(p.target, TargetContext::Stack);
+    }
+
+    #[test]
+    fn preset_vtables() {
+        let p = PointerPattern::vtables();
+        assert_eq!(p.name, "vtables");
+        assert_eq!(p.source, SourceContext::ModuleData { module_name: None });
+        assert_eq!(p.target, TargetContext::Image);
+    }
+
+    #[test]
+    fn preset_heap_references() {
+        let p = PointerPattern::heap_references();
+        assert_eq!(p.name, "heap_references");
+        assert_eq!(p.source, SourceContext::Heap { region_va: None });
+        assert_eq!(p.target, TargetContext::Heap);
+    }
+
+    #[test]
+    fn with_max_depth_from_root_stores_correctly() {
+        let p = PointerPattern::new("test")
+            .with_max_depth_from_root(5);
+        assert_eq!(p.max_depth_from_root, Some(5));
+    }
+
+    #[test]
+    fn default_produces_expected_values() {
+        let p = PointerPattern::default();
+        assert_eq!(p.name, "default");
+        assert!(p.value_matchers.is_empty());
+        assert_eq!(p.source, SourceContext::AnyCommitted);
+        assert_eq!(p.target, TargetContext::AnyReadable);
+        assert_eq!(p.min_confidence, 0.0);
+        assert_eq!(p.max_depth_from_root, None);
+    }
+
+    #[test]
+    fn min_confidence_clamped() {
+        let p = PointerPattern::new("test")
+            .with_min_confidence(-0.5);
+        assert_eq!(p.min_confidence, 0.0);
+        let p = PointerPattern::new("test")
+            .with_min_confidence(1.5);
+        assert_eq!(p.min_confidence, 1.0);
+        let p = PointerPattern::new("test")
+            .with_min_confidence(0.7);
+        assert_eq!(p.min_confidence, 0.7);
     }
 }
