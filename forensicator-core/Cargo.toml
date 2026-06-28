@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+serde_json = "1"
 
 [dev-dependencies]
 minidumper = "0.9"
