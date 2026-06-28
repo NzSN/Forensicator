@@ -16,7 +16,7 @@ fn st(pairs: Vec<(&str, Value)>) -> State {
 }
 
 fn seq_to_value(seq: &[i64]) -> Value {
-    Value::Tuple(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
+    Value::Set(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
 }
 
 /// State computer mirroring Model.tla's state machine.
@@ -90,8 +90,12 @@ impl ModelComputer {
             ("mem_prov_off", seq_to_value(&self.mem_prov_off)),
             ("mem_prov_rva", seq_to_value(&self.mem_prov_rva)),
             ("exc_info", seq_to_value(&self.exc_info)),
-            ("anomalies", Value::Tuple(
-                self.anomalies.iter().map(|s| Value::Str(s.clone())).collect()
+            ("anomalies", Value::Set(
+                self.anomalies.iter().map(|s| {
+                    Value::Record(
+                        vec![("desc".to_string(), Value::Str(s.clone()))].into_iter().collect()
+                    )
+                }).collect()
             )),
         ])
     }
@@ -210,14 +214,16 @@ impl StateComputer for ModelComputer {
 }
 
 fn apalache_config() -> ApalacheConfig {
+    let spec_path = std::env::var("MBT_SPEC")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../specs/ModelMBT.tla").to_string());
     ApalacheConfig {
-        spec_path: "specs/ModelMBT.tla".into(),
+        spec_path,
         invariant: "ModelInvariant".into(),
         length_bound: 6,
-        const_init: Some("CfgInit".into()),
+        const_init: None,
         param_vars: Some("parameters".into()),
-        init_predicate: None,
-        next_predicate: None,
+        init_predicate: Some("MBTInit".into()),
+        next_predicate: Some("MBTNext".into()),
     }
 }
 

@@ -5,7 +5,9 @@ EXTENDS Model
 \* Extends Model.tla to track action names and expose state as a view.
 
 VARIABLES
+    \* @type: Str;
     action_taken,
+    \* @type: [os: Int, cpu: Int, maj: Int, min: Int, bld: Int, rev: Int, sid: Int, off: Int, rva: Int, va: Int, sz: Int, id: Int, sva: Int, ssz: Int, prot: Int, state: Int, typ: Int, cls: Int, code: Int, addr: Int, tid: Int, flg: Int, desc: Str];
     parameters
 
 ActionNames ==
