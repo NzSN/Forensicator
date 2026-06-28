@@ -131,4 +131,54 @@ mod tests {
         assert_eq!(ranges[0].va_start, 0x400000);
         assert_eq!(ranges[0].data.len(), 0x1000);
     }
+
+    #[test]
+    fn full_s2_pipeline_on_synthetic_dump() {
+        use crate::graph;
+        use crate::pattern::PointerPattern;
+        use crate::query::GraphQuery;
+        use crate::scan;
+        use crate::parse::dump;
+
+        // Construct a minimal synthetic minidump in-memory
+        let mut buf = vec![0u8; 256];
+        buf[0] = 0x4D; buf[1] = 0x44; buf[2] = 0x4D; buf[3] = 0x50;  // MDMP
+        buf[4] = 0x93; buf[5] = 0xA7; // version
+        buf[8] = 1; buf[9] = 0; buf[10] = 0; buf[11] = 0;  // stream_count = 1
+        buf[12] = 64; buf[13] = 0; buf[14] = 0; buf[15] = 0; // dir_rva = 64
+        buf[64] = 7;   // stream_type = SystemInfo
+        buf[68] = 56;  // size = 56
+        buf[72] = 128; // rva = 128
+        buf[128] = 0; buf[129] = 0; // ProcessorArchitecture = x86 (0)
+        buf[136] = 9; buf[137] = 0; // AMD64 override
+        buf[148] = 2;  // PlatformId = VER_PLATFORM_WIN32_NT
+
+        let dump_data = dump::from_bytes(&buf).unwrap();
+        assert!(dump_data.system_info.is_some());
+
+        let space = crate::space::AddressSpace::new(1000);
+        let patterns = PointerPattern::presets();
+        let registers: Vec<(u32, Vec<(String, u64)>)> = dump_data.threads.iter().map(|t| {
+            vec![("RIP".into(), t.registers.rip()),
+                 ("RSP".into(), t.registers.rsp()),
+                 ("RBP".into(), t.registers.rbp())]
+        }).enumerate().map(|(i, r)| (i as u32, r)).collect();
+        let stack_ranges: Vec<(u32, u64, u64)> = dump_data.threads.iter()
+            .enumerate()
+            .map(|(i, t)| (i as u32, t.stack_va, t.stack_size))
+            .collect();
+        let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter()
+            .map(|(tid, r)| (*tid, r.as_slice()))
+            .collect();
+
+        let scan_result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns).unwrap();
+        let pointer_graph = graph::build_graph(&scan_result).unwrap();
+        let query = GraphQuery::new(&pointer_graph);
+
+        let _dot = query.to_dot();
+        let _json = query.to_json();
+
+        // Pipeline ran end-to-end without panics
+        let _dist = query.degree_distribution();
+    }
 }
