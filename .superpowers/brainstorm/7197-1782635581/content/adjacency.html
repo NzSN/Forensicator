@@ -1,0 +1,41 @@
+<h2>adj_out & adj_in — Dual Adjacency Index</h2>
+<p class="subtitle">Two parallel vecs indexed by node. Each stores edge indices, not raw data.</p>
+
+<div style="display: flex; gap: 24px; margin: 24px 0; flex-wrap: wrap;">
+  <div style="flex: 1; min-width: 300px; background: var(--bg-secondary); padding: 20px; border-radius: 8px;">
+    <h3 style="color: #fab387;">adj_out</h3>
+    <p style="color: #6c7086; margin-bottom: 12px;">"What does this node point to?"</p>
+    <pre style="font-family: monospace; font-size: 0.9em; line-height: 1.6;">
+adj_out[<span style="color: #89b4fa;">n0</span>] = [e0, e1]    <span style="color: #6c7086;">n0 &#8594; n1, n0 &#8594; n2</span>
+adj_out[<span style="color: #89b4fa;">n1</span>] = [e2]       <span style="color: #6c7086;">n1 &#8594; n2</span>
+adj_out[<span style="color: #89b4fa;">n2</span>] = []          <span style="color: #6c7086;">n2 points nowhere</span>
+    </pre>
+  </div>
+  <div style="flex: 1; min-width: 300px; background: var(--bg-secondary); padding: 20px; border-radius: 8px;">
+    <h3 style="color: #a6e3a1;">adj_in</h3>
+    <p style="color: #6c7086; margin-bottom: 12px;">"Who points to this node?"</p>
+    <pre style="font-family: monospace; font-size: 0.9em; line-height: 1.6;">
+adj_in[<span style="color: #89b4fa;">n0</span>] = []          <span style="color: #6c7086;">nothing points to n0</span>
+adj_in[<span style="color: #89b4fa;">n1</span>] = [e0]       <span style="color: #6c7086;">n0 &#8594; n1</span>
+adj_in[<span style="color: #89b4fa;">n2</span>] = [e1, e2]    <span style="color: #6c7086;">n0 &#8594; n2, n1 &#8594; n2</span>
+    </pre>
+  </div>
+</div>
+
+<div style="background: var(--bg-secondary); padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
+  <pre style="font-family: monospace; font-size: 0.95em; line-height: 1.8;">
+  n0 &#x2500;&#x2500;&#x2500;&#x2500;&#x2500; n2
+   &#x2514;&#x2500;&#x2500;&#x2500;n1&#x2500;&#x2500;&#x2500;&#x2518;
+  </pre>
+</div>
+
+<div class="section">
+  <h3>Why both?</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr><td style="padding:8px 12px; border-bottom:1px solid #313244;"><strong>S3: "find all pointers to heap object X"</strong></td><td style="padding:8px 12px; border-bottom:1px solid #313244; color: #a6e3a1;">adj_in[x] &mdash; O(1)</td></tr>
+    <tr><td style="padding:8px 12px; border-bottom:1px solid #313244;"><strong>S3: "trace everything reachable from root R"</strong></td><td style="padding:8px 12px; border-bottom:1px solid #313244; color: #fab387;">BFS over adj_out &mdash; O(|V|+|E|)</td></tr>
+    <tr><td style="padding:8px 12px; border-bottom:1px solid #313244;"><strong>S3: "is there a back-pointer from Y to X?"</strong></td><td style="padding:8px 12px; border-bottom:1px solid #313244; color: #a6e3a1;">check adj_in[y] for edge with from=x &mdash; O(out_degree)</td></tr>
+    <tr><td style="padding:8px 12px;"><strong>S4: "what's the root set for this subgraph?"</strong></td><td style="padding:8px 12px; color: #fab387;">BFS backwards over adj_in &mdash; O(|V|+|E|)</td></tr>
+  </table>
+  <p style="margin-top:16px; color: #6c7086; font-size:0.9em;">Without adj_in, reverse queries would be O(|E|) full scan. Edge indices stored (not copies) — memory stays compact.</p>
+</div>

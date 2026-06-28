@@ -1,0 +1,83 @@
+<h2>PointerPattern — Three Independent Layers</h2>
+<p class="subtitle">Byte-level matching &bull; Source context &bull; Target context. All independent, all optional.</p>
+
+<div style="background: var(--bg-secondary); padding: 20px; border-radius: 8px; margin: 20px 0; font-family: monospace; font-size: 0.85em; line-height: 2;">
+<span style="color: #f38ba8;"><strong>Layer 1: ValueMatcher</strong> &mdash; what bytes look like a pointer</span><br>
+<span style="padding-left: 2em; color: #a6adc8;">Tests the 8-byte value itself, before any lookup</span><br>
+<br>
+<span style="color: #89b4fa;"><strong>Layer 2: Source filter</strong> &mdash; where the value was found</span><br>
+<span style="padding-left: 2em; color: #a6adc8;">Stack, heap, register, module data, any committed</span><br>
+<br>
+<span style="color: #a6e3a1;"><strong>Layer 3: Target filter</strong> &mdash; what does it point to</span><br>
+<span style="padding-left: 2em; color: #a6adc8;">Image, stack, heap, mapped, any readable &mdash; requires AddressSpace lookup</span>
+</div>
+
+<hr style="border-color: #313244; margin: 24px 0;">
+
+<h3>Layer 1 — ValueMatchers</h3>
+<p class="subtitle">Composable predicates on raw 8-byte values. All must match for a candidate to pass.</p>
+
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 16px 0;">
+  <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #f38ba8;">
+    <code style="color: #f38ba8;">AlignedTo(bytes: 8)</code>
+    <p style="margin:4px 0 0; font-size:0.85em; color:#6c7086;">LSB = 0 &bull; typical 8-byte pointer</p>
+  </div>
+  <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #f38ba8;">
+    <code style="color: #f38ba8;">BitMask { mask, expected }</code>
+    <p style="margin:4px 0 0; font-size:0.85em; color:#6c7086;">Arbitrary bit pattern check</p>
+  </div>
+  <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #f38ba8;">
+    <code style="color: #f38ba8;">CanonicalX64</code>
+    <p style="margin:4px 0 0; font-size:0.85em; color:#6c7086;">Bits 48&ndash;63 match bit 47</p>
+  </div>
+  <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #f38ba8;">
+    <code style="color: #f38ba8;">InRange(lo, hi)</code>
+    <p style="margin:4px 0 0; font-size:0.85em; color:#6c7086;">User-space filter</p>
+  </div>
+  <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #f38ba8;">
+    <code style="color: #f38ba8;">Modulo(div, rem)</code>
+    <p style="margin:4px 0 0; font-size:0.85em; color:#6c7086;">4-byte alignment in 64=bit dump</p>
+  </div>
+  <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #f38ba8;">
+    <code style="color: #f38ba8;">KnownVA(addr)</code>
+    <p style="margin:4px 0 0; font-size:0.85em; color:#6c7086;">Matches exact known address</p>
+  </div>
+  <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #f38ba8;">
+    <code style="color: #f38ba8;">BitZero(n)</code> / <code style="color: #f38ba8;">BitOne(n)</code>
+    <p style="margin:4px 0 0; font-size:0.85em; color:#6c7086;">Single bit test at position n</p>
+  </div>
+  <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #f38ba8;">
+    <code style="color: #f38ba8;">MatchSize(sz: 4 | 8)</code>
+    <p style="margin:4px 0 0; font-size:0.85em; color:#6c7086;">4-byte vs 8-byte pointer width</p>
+  </div>
+</div>
+
+<hr style="border-color: #313244; margin: 24px 0;">
+
+<h3>Example: user's LSB-0 pattern</h3>
+<div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+  PointerPattern {<br>
+  &nbsp;&nbsp;name: <span style="color: #a6e3a1;">"aligned_x64_pointers"</span>,<br>
+  &nbsp;&nbsp;value_matchers: vec![<span style="color: #f38ba8;">AlignedTo(8)</span>, <span style="color: #f38ba8;">CanonicalX64</span>],<br>
+  &nbsp;&nbsp;source: <span style="color: #89b4fa;">SourceContext::AnyCommitted</span>,<br>
+  &nbsp;&nbsp;target: <span style="color: #a6e3a1;">TargetContext::AnyReadable</span>,<br>
+  &nbsp;&nbsp;min_confidence: <span style="color: #fab387;">0.7</span>,<br>
+  &nbsp;&nbsp;..Default::default()<br>
+  }
+</div>
+<p style="margin-top:12px; font-size:0.85em; color:#6c7086;">Value matchers are <strong>AND-ed</strong> &mdash; all must pass. If any single source/target field is set, it narrows. Empty = unfiltered.</p>
+
+<hr style="border-color: #313244; margin: 24px 0;">
+
+<h3>Confidence scoring</h3>
+<p style="color:#6c7086;">When a candidate passes a pattern's value matchers, it gets a base score based on how much evidence supports it:</p>
+<table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+  <tr style="color: #6c7086; font-size:0.85em;"><th style="text-align:left; padding: 6px 8px; border-bottom: 1px solid #313244;">Evidence</th><th style="text-align:right; padding: 6px 8px; border-bottom: 1px solid #313244;">+Score</th></tr>
+  <tr style="font-size:0.9em;"><td style="padding:6px 8px;">Value is aligned (LSBs = 0)</td><td style="text-align:right; padding:6px 8px;">+0.15</td></tr>
+  <tr style="font-size:0.9em;"><td style="padding:6px 8px;">Value is canonical x64 address</td><td style="text-align:right; padding:6px 8px;">+0.20</td></tr>
+  <tr style="font-size:0.9em;"><td style="padding:6px 8px;">Target VA is readable+committed</td><td style="text-align:right; padding:6px 8px;">+0.25</td></tr>
+  <tr style="font-size:0.9em;"><td style="padding:6px 8px;">Target falls inside a known module</td><td style="text-align:right; padding:6px 8px;">+0.15</td></tr>
+  <tr style="font-size:0.9em;"><td style="padding:6px 8px;">Value lives in a register</td><td style="text-align:right; padding:6px 8px;">+0.15</td></tr>
+  <tr style="font-size:0.9em;"><td style="padding:6px 8px;">Value lives at stack offset used by call convention</td><td style="text-align:right; padding:6px 8px;">+0.10</td></tr>
+</table>
+</div>

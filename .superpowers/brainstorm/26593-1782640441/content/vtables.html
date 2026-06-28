@@ -1,0 +1,49 @@
+<h2>VTable Detector</h2>
+<p class="subtitle">Finds virtual method tables in module data — arrays of function pointers pointing into executable code</p>
+
+<div class="section">
+  <h3>What a vtable looks like in memory</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-family: monospace; font-size: 0.85em; line-height: 1.6;">
+    <span style="color: #6c7086;">VTable @ 0x4001000 (in .rdata section):</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">+0x00:</span> 0x4000500 <span style="color: #6c7086;">→ module code (.text)</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">+0x08:</span> 0x4000600 <span style="color: #6c7086;">→ module code (.text)</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">+0x10:</span> 0x4000700 <span style="color: #6c7086;">→ module code (.text)</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">+0x18:</span> 0x4000800 <span style="color: #6c7086;">→ module code (.text)</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">+0x20:</span> 0x0000000 <span style="color: #f38ba8;">← terminator (zero)</span><br>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Detection algorithm</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-size: 0.9em; line-height: 1.8;">
+    <p><strong>Phase 1 — Candidate scan:</strong> Walk module-data-typed committed regions. For each 8-byte-aligned word, check: is it a pointer into a known module's executable (.text) range?</p>
+    <p><strong>Phase 2 — Run formation:</strong> If N consecutive candidates are found (N ≥ min_methods), with each pointing to executable code in the same module → candidate vtable.</p>
+    <p><strong>Phase 3 — Termination check:</strong> End after a null entry or after a pointer to non-executable region. Validate minimum method count.</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>StructVTable</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <span style="color: #89b4fa;">va:</span> u64<br>
+    <span style="color: #89b4fa;">method_count:</span> usize<br>
+    <span style="color: #89b4fa;">methods:</span> Vec&lt;u64&gt;<span style="color: #6c7086;">   // list of function VAs</span><br>
+    <span style="color: #89b4fa;">module_name:</span> Option&lt;String&gt;<span style="color: #6c7086;">  // owner module if known</span><br>
+    <span style="color: #89b4fa;">confidence:</span> f64
+  </div>
+</div>
+
+<div class="section">
+  <h3>Parameters</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.85em; color:#6c7086;"><th style="text-align:left; padding:6px 8px;">Parameter</th><th style="text-align:left; padding:6px 8px;">Default</th><th style="text-align:left; padding:6px 8px;">Purpose</th></tr>
+    <tr><td style="padding:6px 8px;">min_methods</td><td style="padding:6px 8px;">3</td><td style="padding:6px 8px; color:#6c7086;">Minimum methods to count as vtable</td></tr>
+    <tr><td style="padding:6px 8px;">max_methods</td><td style="padding:6px 8px;">256</td><td style="padding:6px 8px; color:#6c7086;">Safety bound</td></tr>
+    <tr><td style="padding:6px 8px;">same_module_only</td><td style="padding:6px 8px;">true</td><td style="padding:6px 8px; color:#6c7086;">All methods must be in same module</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <h3>Testing</h3>
+  <p style="color: #6c7086;">Construct module data region with known function pointers followed by zero terminator. Test: exact match, too few methods, interleaved non-code pointers, empty region.</p>
+</div>

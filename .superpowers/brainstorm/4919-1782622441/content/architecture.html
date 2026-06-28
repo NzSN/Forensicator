@@ -1,0 +1,38 @@
+<h2>Three architectural approaches for S2</h2>
+<p class="subtitle">All build on S1. Pick the structure that feels right.</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Monolithic graph module</h3>
+      <p>Single <code>forensicator-core/src/graph.rs</code> — packs pointer classification, graph construction, and query API into one file.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Fast to implement</li><li>Everything visible in one place</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>~600+ line file</li><li>Hard to test in isolation</li><li>Would need fission later</li></ul></div>
+      </div>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Extend AddressSpace</h3>
+      <p>Add scan/graph/query methods directly onto the S1 <code>AddressSpace</code> type. Single unified memory model.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Single source of truth</li><li>No new types to thread through</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>AddressSpace becomes huge</li><li>Violates single responsibility</li><li>Hard to version/swap</li></ul></div>
+      </div>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Tiered pipeline (4 modules)</h3>
+      <p>Separate crates/modules for each concern: pattern definition, scanning, graph construction, and query API.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Each component testable independently</li><li>S3 imports only what it needs</li><li>Matches S1 modular style</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>More files to create</li><li>More trait/interface design upfront</li></ul></div>
+      </div>
+    </div>
+  </div>
+</div>

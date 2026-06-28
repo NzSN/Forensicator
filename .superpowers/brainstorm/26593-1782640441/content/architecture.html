@@ -1,0 +1,38 @@
+<h2>S3 Architecture — Three Approaches</h2>
+<p class="subtitle">How to organize 5 recovery tasks (strings, vtables, lists, arrays, chunks) + clustering</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Monolithic recover module</h3>
+      <p>Single <code>forensicator-core/src/recover.rs</code> with all 5 detectors as functions.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Fast to write</li><li>No trait design overhead</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>~800+ line file</li><li>Hard to test individually</li><li>Can't add detectors later without touching core file</li></ul></div>
+      </div>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Tiered by data source</h3>
+      <p>Two modules: <code>strings/</code> (reads raw bytes from AddressSpace) and <code>shapes/</code> (analyzes PointerGraph). Heap chunks split between them.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Clear data dependency</li><li>Strings simple, shapes complex</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Heap chunks straddles both</li><li>Arbitrary split — vtables could go either way</li></ul></div>
+      </div>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Detector trait + catalog</h3>
+      <p>Each recovery task is a module implementing a <code>StructureDetector</code> trait. Outputs collected into a <code>StructureCatalog</code>. New detectors can be added later.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Extensible — add detectors without touching existing code</li><li>Each detector testable in isolation</li><li>Matches S1/S2 modular pattern</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Trait design upfront</li><li>More files (5 detector modules + catalog)</li></ul></div>
+      </div>
+    </div>
+  </div>
+</div>

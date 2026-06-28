@@ -1,0 +1,47 @@
+<h2>Array Detector</h2>
+<p class="subtitle">Finds sequential graph nodes with identical structure — arrays of objects or pointers</p>
+
+<div class="section">
+  <h3>What an array looks like in the graph</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-family: monospace; font-size: 0.85em; line-height: 1.6;">
+    <span style="color: #6c7086;">Array of 4 elements @ 0x1000, stride 0x20:</span><br>
+    &nbsp;&nbsp;elem[0] @ 0x1000: out-degree=1, region=Heap, edge→0x2000<br>
+    &nbsp;&nbsp;elem[1] @ 0x1020: out-degree=1, region=Heap, edge→0x2100<br>
+    &nbsp;&nbsp;elem[2] @ 0x1040: out-degree=1, region=Heap, edge→null<br>
+    &nbsp;&nbsp;elem[3] @ 0x1060: out-degree=1, region=Heap, edge→0x2200<br><br>
+    <span style="color: #6c7086;">Key signature: constant stride, same out-degree, same region, sequential VAs</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Detection algorithm</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-size: 0.9em; line-height: 1.8;">
+    <p><strong>Phase 1 — Sort:</strong> Order all graph nodes by VA.</p>
+    <p><strong>Phase 2 — Span:</strong> Walk nodes in VA order. When two consecutive nodes share the same out-degree, same region class, and VA difference ≤ max_stride, begin an array candidate.</p>
+    <p><strong>Phase 3 — Extend:</strong> Continue as long as the next node matches the same pattern (degree, region, stride). End when stride changes or pattern breaks.</p>
+    <p><strong>Phase 4 — Filter:</strong> Arrays shorter than min_length are discarded.</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>StructArray</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <span style="color: #89b4fa;">start_va:</span> u64<br>
+    <span style="color: #89b4fa;">element_size:</span> u64<span style="color: #6c7086;">     // stride between elements</span><br>
+    <span style="color: #89b4fa;">count:</span> usize<br>
+    <span style="color: #89b4fa;">out_degree:</span> usize<span style="color: #6c7086;">       // per-element edge count</span><br>
+    <span style="color: #89b4fa;">region_class:</span> RegionClass<br>
+    <span style="color: #89b4fa;">elements:</span> Vec&lt;u64&gt;<span style="color: #6c7086;">      // ordered VAs of elements</span><br>
+    <span style="color: #89b4fa;">confidence:</span> f64<span style="color: #6c7086;">         // uniformity score</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Parameters</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.85em; color:#6c7086;"><th style="text-align:left; padding:6px 8px;">Parameter</th><th style="text-align:left; padding:6px 8px;">Default</th></tr>
+    <tr><td style="padding:6px 8px;">min_count</td><td style="padding:6px 8px;">3</td></tr>
+    <tr><td style="padding:6px 8px;">max_stride</td><td style="padding:6px 8px;">4096</td></tr>
+    <tr><td style="padding:6px 8px;">stride_tolerance</td><td style="padding:6px 8px;">0</td></tr>
+  </table>
+</div>

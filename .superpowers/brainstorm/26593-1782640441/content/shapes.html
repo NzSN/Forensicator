@@ -1,0 +1,55 @@
+<h2>Shape Clustering</h2>
+<p class="subtitle">Groups heap nodes by their outgoing edge pattern — structural type inference</p>
+
+<div class="section">
+  <h3>What a "shape" is</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-family: monospace; font-size: 0.85em; line-height: 1.6;">
+    <span style="color: #6c7086;">A shape is the vector of (offset, target_class) for all outgoing edges of a node:</span><br><br>
+    Node @ 0x1000: edges at <span style="color: #89b4fa;">+0x00→Heap</span>, <span style="color: #89b4fa;">+0x08→Stack</span><br>
+    Node @ 0x2000: edges at <span style="color: #89b4fa;">+0x00→Heap</span>, <span style="color: #89b4fa;">+0x08→Stack</span><br>
+    <span style="color: #a6e3a1;">→ Same shape (ShapeGroup #1)</span><br><br>
+    Node @ 0x3000: edges at <span style="color: #f38ba8;">+0x10→Image</span><br>
+    <span style="color: #a6e3a1;">→ Different shape (ShapeGroup #2) — likely a different C++ class</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Algorithm</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-size: 0.9em; line-height: 1.8;">
+    <p><strong>Phase 1 — Extract signatures:</strong> For each heap node in the graph, collect all outgoing edges. For each edge, compute the offset from the source VA (edge source VA − node VA). Build a signature: sorted vector of (offset, target_region_class).</p>
+    <p><strong>Phase 2 — Hash and group:</strong> Hash each signature into a ShapeGroup. Nodes with identical signatures get the same group. This is O(n) with a HashMap.</p>
+    <p><strong>Phase 3 — Rank:</strong> Sort groups by member count. Dominant shapes (most instances) are likely common classes.</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>ShapeGroup & ShapeSignature</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <span style="color: #89b4fa;">pub struct</span> <strong>ShapeSignature</strong> {<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">edges:</span> Vec&lt;(u64, RegionClass)&gt;<span style="color: #6c7086;">  // (offset, target_class) sorted by offset</span><br>
+    }<br><br>
+    <span style="color: #89b4fa;">pub struct</span> <strong>ShapeGroup</strong> {<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">id:</span> usize,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">signature:</span> ShapeSignature,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">member_count:</span> usize,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">members:</span> Vec&lt;u64&gt;<span style="color: #6c7086;">  // VAs of nodes in this group</span><br>
+    }<br><br>
+    <span style="color: #89b4fa;">pub struct</span> <strong>ShapeClusters</strong> {<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">groups:</span> Vec&lt;ShapeGroup&gt;<span style="color: #6c7086;">  // sorted by member_count desc</span><br>
+    }
+  </div>
+</div>
+
+<div class="section">
+  <h3>StructureCatalog — final aggregation</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <span style="color: #89b4fa;">pub struct</span> <strong>StructureCatalog</strong> {<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">strings:</span> Vec&lt;StructString&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">vtables:</span> Vec&lt;StructVTable&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">linked_lists:</span> Vec&lt;StructLinkedList&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">arrays:</span> Vec&lt;StructArray&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">chunks:</span> Vec&lt;StructChunk&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">shape_clusters:</span> ShapeClusters,<br>
+    }
+  </div>
+</div>

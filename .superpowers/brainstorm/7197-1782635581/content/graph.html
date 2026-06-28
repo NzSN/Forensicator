@@ -1,0 +1,61 @@
+<h2>Graph Module</h2>
+<p class="subtitle">Takes flat candidates + roots from scanner, builds an indexed pointer graph</p>
+
+<div class="section">
+  <h3>PointerGraph data structure</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+    <span style="color: #89b4fa;">nodes:</span> Vec&lt;GraphNode&gt;<br>
+    <span style="color: #89b4fa;">adj_out:</span> Vec&lt;Vec&lt;EdgeIndex&gt;&gt;&nbsp;&nbsp;<span style="color: #6c7086;">// outgoing edges per node</span><br>
+    <span style="color: #89b4fa;">adj_in:</span> Vec&lt;Vec&lt;EdgeIndex&gt;&gt;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">// incoming edges per node (reverse index)</span><br>
+    <span style="color: #89b4fa;">edges:</span> Vec&lt;GraphEdge&gt;<br>
+    <span style="color: #89b4fa;">va_to_node:</span> HashMap&lt;u64, NodeIndex&gt;<br>
+    <span style="color: #89b4fa;">roots:</span> Vec&lt;NodeIndex&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">// entry points for traversal</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Construction</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px; width:40px;"><strong>1</strong></td><td style="padding:6px 8px;"><strong>Insert nodes</strong> — for each unique source_va and target_va in candidates, create a node. Dedup by VA.</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><strong>2</strong></td><td style="padding:6px 8px;"><strong>Insert edges</strong> — for each candidate, add edge from source node to target node, carrying confidence + evidence.</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><strong>3</strong></td><td style="padding:6px 8px;"><strong>Merge duplicates</strong> — if two candidates produce the same (source, target) edge, merge confidences (max) and union evidence. Keep best score.</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><strong>4</strong></td><td style="padding:6px 8px;"><strong>Mark roots</strong> — resolve scanner Root[] to NodeIndex via va_to_node map.</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <h3>GraphNode & GraphEdge</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+    <strong style="color: #a6e3a1;">GraphNode</strong> {<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">va:</span> u64,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">region_class:</span> RegionClass, &nbsp;<span style="color: #6c7086;">// Image/Stack/Heap/Mapped/Other</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">out_degree:</span> usize, <span style="color: #89b4fa;">in_degree:</span> usize,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">is_root:</span> bool,<br>
+    }<br><br>
+    <strong style="color: #a6e3a1;">GraphEdge</strong> {<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">from:</span> NodeIndex,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">to:</span> NodeIndex,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">confidence:</span> f64,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">evidence:</span> Vec&lt;String&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">matched_by:</span> Vec&lt;String&gt;, &nbsp;<span style="color: #6c7086;">// pattern names</span><br>
+    }
+  </div>
+</div>
+
+<div class="section">
+  <h3>Public API (consumed by query module + S3)</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+    .node(va) → Option&lt;&amp;GraphNode&gt;<br>
+    .node_count() → usize<br>
+    .edge_count() → usize<br>
+    .root_nodes() → &amp;[NodeIndex]<br>
+    .edges_from(node) → &amp;[GraphEdge]<br>
+    .edges_to(node) → &amp;[GraphEdge]<br>
+    .iter_nodes() → impl Iterator&lt;Item = &amp;GraphNode&gt;
+  </div>
+</div>
+
+<div class="section">
+  <h3>TLA+ spec</h3>
+  <p style="color: #6c7086;">New <code style="color: #a6adc8;">PointerGraph.tla</code> models: finite set of VAs as nodes, each edge carries a confidence score and must connect nodes that exist. Traversal follows edges with confidence &ge; some threshold. Invariants: no self-loops on non-heap regions, all root nodes are reachable from themselves, edge confidence in [0,1].</p>
+</div>

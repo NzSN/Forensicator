@@ -1,0 +1,57 @@
+<h2>S2 Integration &mdash; Model Extensions & CLI</h2>
+<p class="subtitle">New types in model.rs, new subcommands in the CLI</p>
+
+<div class="section">
+  <h3>New model types (forensicator-core/src/model.rs)</h3>
+  <p style="color: #6c7086;">These live alongside S1's types. S2 modules depend on them; S1 types remain unchanged.</p>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <span style="color: #89b4fa;">pub struct</span> <strong>PointerGraph</strong> { nodes, adj_out, adj_in, edges, va_to_node, roots }<br>
+    <span style="color: #89b4fa;">pub struct</span> <strong>GraphNode</strong> { va, region_class, out_degree, in_degree, is_root }<br>
+    <span style="color: #89b4fa;">pub struct</span> <strong>GraphEdge</strong> { from, to, confidence, evidence, matched_by }<br>
+    <span style="color: #89b4fa;">pub struct</span> <strong>CandidatePointer</strong> { source_va, value, target_va, source_ctx, target_ctx, confidence, matched_by, evidence }<br>
+    <span style="color: #89b4fa;">pub struct</span> <strong>ScanResult</strong> { candidates: Vec&lt;CandidatePointer&gt;, roots: Vec&lt;Root&gt; }<br>
+    <span style="color: #89b4fa;">pub enum</span> <strong>Root</strong> { Register { thread_id: u32, reg_name: String, va: u64 }, Stack { thread_id: u32, source_va: u64, va: u64 }, ModuleData { mod_name: String, source_va: u64, va: u64 } }<br>
+    <span style="color: #89b4fa;">pub struct</span> <strong>EdgePredicate</strong> { min_confidence, max_confidence, source_region, target_region, max_depth, pattern_name }<br>
+    <span style="color: #89b4fa;">pub struct</span> <strong>EdgePath</strong> { nodes: Vec&lt;NodeIndex&gt;, edges: Vec&lt;EdgeIndex&gt;, total_confidence: f64 }
+  </div>
+</div>
+
+<div class="section">
+  <h3>lib.rs changes</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+    pub mod error;<br>
+    pub mod arch;<br>
+    pub mod model;<br>
+    pub mod parse;<br>
+    pub mod space;<br>
+    <span style="color: #a6e3a1;">pub mod pattern;   &larr; new</span><br>
+    <span style="color: #a6e3a1;">pub mod scan;      &larr; new</span><br>
+    <span style="color: #a6e3a1;">pub mod graph;     &larr; new</span><br>
+    <span style="color: #a6e3a1;">pub mod query;     &larr; new</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>CLI — new subcommands</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <strong>forensicator scan</strong> &lt;dump.dmp&gt; [--pattern &lt;name&gt;] [--json]<br>
+    <span style="color: #6c7086;">  Runs scanner only, prints candidates sorted by confidence</span><br><br>
+    <strong>forensicator graph</strong> &lt;dump.dmp&gt; [--pattern &lt;name&gt;] [--min-conf 0.5] [--dot | --json]<br>
+    <span style="color: #6c7086;">  Full scan + graph construction, exports DOT or JSON</span><br><br>
+    <strong>forensicator query</strong> &lt;dump.dmp&gt; [--reachable &lt;va&gt;] [--from &lt;va&gt;] [--path &lt;from&gt; &lt;to&gt;] [--stats]<br>
+    <span style="color: #6c7086;">  Interactive graph queries without re-scanning</span><br><br>
+    <strong>forensicator patterns</strong><br>
+    <span style="color: #6c7086;">  &nbsp;&nbsp;list &mdash; show all built-in + user patterns</span><br>
+    <span style="color: #6c7086;">  &nbsp;&nbsp;show &lt;name&gt; &mdash; inspect a pattern's configuration</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Dependency graph (full workspace, S1+S2)</h3>
+  <div style="background: var(--bg-secondary); padding: 20px; border-radius: 8px; margin: 12px 0; font-family: monospace; font-size: 0.85em; line-height: 1.6; text-align: center;">
+    error &larr; arch &larr; model &larr; parse &larr; <span style="color: #a6e3a1;">pattern &larr; scan &larr; graph &larr; query</span> &larr; CLI<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↑&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↑&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↑<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">space</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">space</span>&nbsp;&nbsp;<span style="color: #6c7086;">space</span>
+  </div>
+  <p style="margin-top: 8px; color: #6c7086; font-size: 0.85em;"><em>pattern</em> depends on model only. <em>scan</em> depends on pattern + model + space. <em>graph</em> depends on scan + model. <em>query</em> depends on graph + model. S3 only needs graph + query.</p>
+</div>

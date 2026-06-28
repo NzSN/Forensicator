@@ -1,0 +1,61 @@
+<h2>Scan Module</h2>
+<p class="subtitle">Iterates AddressSpace, applies patterns, extracts root sets, emits ranked candidates</p>
+
+<div class="section">
+  <h3>Input / Output</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 2;">
+    <strong>Input:</strong><br>
+    &nbsp;&nbsp;&amp;AddressSpace &nbsp; <span style="color: #6c7086;">// from S1 space.rs</span><br>
+    &nbsp;&nbsp;&amp;Dump &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">// registers, modules, stacks for root extraction</span><br>
+    &nbsp;&nbsp;&amp;[PointerPattern] &nbsp;<span style="color: #6c7086;">// user-configured patterns</span><br>
+    <strong>Output:</strong><br>
+    &nbsp;&nbsp;ScanResult { candidates: Vec&lt;CandidatePointer&gt;, roots: Vec&lt;Root&gt; }
+  </div>
+</div>
+
+<div class="section">
+  <h3>CandidatePointer</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+    <span style="color: #89b4fa;">source_va:</span> u64 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">// where the pointer value lives in memory</span><br>
+    <span style="color: #89b4fa;">value:</span> u64 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">// the raw 8-byte value read</span><br>
+    <span style="color: #89b4fa;">target_va:</span> u64 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">// where it points (== value if valid VA)</span><br>
+    <span style="color: #89b4fa;">source_ctx:</span> SourceContext &nbsp;<span style="color: #6c7086;">// stack/heap/register/module</span><br>
+    <span style="color: #89b4fa;">target_ctx:</span> TargetContext &nbsp;<span style="color: #6c7086;">// what region it points into</span><br>
+    <span style="color: #89b4fa;">confidence:</span> f64 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #6c7086;">// 0.0..1.0</span><br>
+    <span style="color: #89b4fa;">matched_by:</span> Vec&lt;String&gt; <span style="color: #6c7086;">// which pattern(s) matched</span><br>
+    <span style="color: #89b4fa;">evidence:</span> Vec&lt;String&gt; <span style="color: #6c7086;">// human-readable: "aligned", "canonical", "target is image"</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Scan strategy</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0;">
+    <p>Two-phase scan for performance on large dumps:</p>
+    <p><strong>Phase 1 &mdash; Value scan:</strong> Linear walk of committed regions at <code>match_size</code> stride. For each word, test all patterns' value matchers. Keep passing candidates in a small buffer. Value-only tests are cheap (no AddressSpace lookup).</p>
+    <p><strong>Phase 2 &mdash; Target resolution:</strong> For each value-passing candidate, do the AddressSpace lookup (target classification). Apply source+target filters, compute confidence. This phase is I/O-heavy so candidates are batched.</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Root extraction</h3>
+  <p style="color: #6c7086;">Roots are the starting points for graph traversal. Three sources:</p>
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 12px 0;">
+    <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #89b4fa;">
+      <h4>Register roots</h4>
+      <p style="margin:4px 0 0; font-size:0.85em; color:#a6adc8;">Every non-zero register in each thread's CONTEXT. RIP, RSP, RBP, plus GPRs. Small set (~dozens).</p>
+    </div>
+    <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #89b4fa;">
+      <h4>Stack roots</h4>
+      <p style="margin:4px 0 0; font-size:0.85em; color:#a6adc8;">Every candidate pointer found in thread stack regions. Typically hundreds to thousands.</p>
+    </div>
+    <div style="background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border-left: 3px solid #89b4fa;">
+      <h4>Module data roots</h4>
+      <p style="margin:4px 0 0; font-size:0.85em; color:#a6adc8;">Pointers in module .data/.rdata/.bss sections. Globals, vtables, function pointers. Large set.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Boundaries</h3>
+  <p style="color: #6c7086;">Scanner does NOT build edges or resolve duplicate pointers. That's the graph module's job. Scanner produces a flat list of candidates + root set. No deduplication, no graph construction.</p>
+</div>

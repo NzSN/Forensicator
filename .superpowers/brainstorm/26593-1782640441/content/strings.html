@@ -1,0 +1,37 @@
+<h2>String Detector</h2>
+<p class="subtitle">Scans AddressSpace for null-terminated byte sequences. Most reliable detection — validation is simple.</p>
+
+<div class="section">
+  <h3>Detection algorithm</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-size: 0.9em; line-height: 1.8;">
+    <p><strong>Phase 1 — Walk:</strong> Scan committed readable regions byte-by-byte. When a printable ASCII or valid UTF-16 lead byte is found, begin buffering.</p>
+    <p><strong>Phase 2 — Buffer:</strong> Continue until null terminator or boundary. Reject if length &lt; min_len (e.g. 4). Reject if non-printable chars exceed ratio threshold.</p>
+    <p><strong>Phase 3 — Classify:</strong> Tag encoding (ASCII, UTF-16 LE, UTF-16 BE). Record VA + byte length + confidence.</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>StructString</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <span style="color: #89b4fa;">va:</span> u64<br>
+    <span style="color: #89b4fa;">byte_len:</span> usize<br>
+    <span style="color: #89b4fa;">encoding:</span> StringEncoding <span style="color: #6c7086;">// Ascii | Utf16Le | Utf16Be</span><br>
+    <span style="color: #89b4fa;">content:</span> String<span style="color: #6c7086;">   // decoded readable text</span><br>
+    <span style="color: #89b4fa;">confidence:</span> f64<span style="color: #6c7086;">  // 1.0 minus non-printable ratio</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Parameters (tunable)</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.85em; color:#6c7086;"><th style="text-align:left; padding:6px 8px;">Parameter</th><th style="text-align:left; padding:6px 8px;">Default</th><th style="text-align:left; padding:6px 8px;">Purpose</th></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;">min_len</td><td style="padding:6px 8px;">4</td><td style="padding:6px 8px; color:#6c7086;">Ignore noise</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;">max_len</td><td style="padding:6px 8px;">65536</td><td style="padding:6px 8px; color:#6c7086;">Safety bound</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;">max_nonprintable_ratio</td><td style="padding:6px 8px;">0.2</td><td style="padding:6px 8px; color:#6c7086;">Allow some control chars</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <h3>Testing</h3>
+  <p style="color: #6c7086;">Construct synthetic AddressSpace with known ASCII/UTF-16 strings at specific VAs, including edge cases (empty region, single char, max length, 100% non-printable, mixed encodings).</p>
+</div>

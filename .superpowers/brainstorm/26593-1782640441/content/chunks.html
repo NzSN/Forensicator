@@ -1,0 +1,40 @@
+<h2>Heap Chunk Detector</h2>
+<p class="subtitle">Identifies heap allocation boundaries using MemoryInfo regions and pointer density</p>
+
+<div class="section">
+  <h3>Approach</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-size: 0.9em; line-height: 1.8;">
+    <p>Heap chunks are inferred rather than directly parsed from the dump. Since minidumps lack allocation metadata (unlike a full memory dump), we use heuristics:</p>
+    <p><strong>Phase 1 — Region partitioning:</strong> For each committed private heap region, identify boundaries: region start/end from MemoryInfo, pointer density valleys (gaps between dense clusters), and zero-filled runs.</p>
+    <p><strong>Phase 2 — Density clustering:</strong> Graph nodes in the heap region are grouped by pointer density. Dense clusters with gaps between them suggest separate allocations.</p>
+    <p><strong>Phase 3 — Boundary refinement:</strong> Align start/end to round allocation sizes (16-byte aligned typically for Windows heap).</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>StructChunk</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <span style="color: #89b4fa;">va_start:</span> u64<br>
+    <span style="color: #89b4fa;">size:</span> u64<br>
+    <span style="color: #89b4fa;">is_free:</span> bool<span style="color: #6c7086;">          // inferred from all-zeros content</span><br>
+    <span style="color: #89b4fa;">node_count:</span> usize<span style="color: #6c7086;">      // graph nodes inside this chunk</span><br>
+    <span style="color: #89b4fa;">pointer_density:</span> f64<span style="color: #6c7086;">  // nodes per KB</span><br>
+    <span style="color: #89b4fa;">confidence:</span> f64
+  </div>
+</div>
+
+<div class="section">
+  <h3>Parameters</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.85em; color:#6c7086;"><th style="text-align:left; padding:6px 8px;">Parameter</th><th style="text-align:left; padding:6px 8px;">Default</th><th style="text-align:left; padding:6px 8px;">Purpose</th></tr>
+    <tr><td style="padding:6px 8px;">min_chunk_size</td><td style="padding:6px 8px;">16</td><td style="padding:6px 8px; color:#6c7086;">Minimum allocation</td></tr>
+    <tr><td style="padding:6px 8px;">alignment</td><td style="padding:6px 8px;">16</td><td style="padding:6px 8px; color:#6c7086;">Chunk alignment boundary</td></tr>
+    <tr><td style="padding:6px 8px;">density_gap_threshold</td><td style="padding:6px 8px;">64</td><td style="padding:6px 8px; color:#6c7086;">Max gap between nodes to consider same chunk</td></tr>
+    <tr><td style="padding:6px 8px;">zero_run_for_free</td><td style="padding:6px 8px;">32</td><td style="padding:6px 8px; color:#6c7086;">Consecutive zero bytes to flag as free</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <h3>Testing</h3>
+  <p style="color: #6c7086;">Synthetic heap region with known node clusters separated by gaps. Verify chunk boundaries, free detection on zero-filled ranges, alignment enforcement.</p>
+</div>

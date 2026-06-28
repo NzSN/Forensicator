@@ -1,0 +1,46 @@
+<h2>List Detector</h2>
+<p class="subtitle">Finds linked lists — recurring edge patterns where each node points to the next at a consistent offset</p>
+
+<div class="section">
+  <h3>What a linked list looks like in the graph</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-family: monospace; font-size: 0.85em; line-height: 1.6;">
+    <span style="color: #6c7086;">Singly-linked list (3 nodes):</span><br>
+    &nbsp;&nbsp;nodeA <span style="color: #fab387;">→ (offset +0x08, conf 0.9)</span> nodeB<br>
+    &nbsp;&nbsp;nodeB <span style="color: #fab387;">→ (offset +0x08, conf 0.9)</span> nodeC<br>
+    &nbsp;&nbsp;nodeC → <em>null or absent</em><br><br>
+    <span style="color: #6c7086;">Key signature: same offset, same source region class, chain continues</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Detection algorithm</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0; font-size: 0.9em; line-height: 1.8;">
+    <p><strong>Phase 1 — Pattern discovery:</strong> For each node in the graph that has ≥ 1 outgoing edge, compute the offset from the source VA to the next-pointer location. Group nodes by (offset, source_region_class). This identifies candidate "next pointer" offsets.</p>
+    <p><strong>Phase 2 — Chain walking:</strong> Starting from unvisited nodes, follow edges at the discovered offset. Continue while the edge exists, confidence ≥ threshold, and the chain hasn't looped. Track visited nodes to avoid double-counting.</p>
+    <p><strong>Phase 3 — Filter:</strong> Chains shorter than min_length are discarded. Chains that loop (circular lists) are tagged as circular.</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>StructLinkedList</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <span style="color: #89b4fa;">head_va:</span> u64<br>
+    <span style="color: #89b4fa;">length:</span> usize<br>
+    <span style="color: #89b4fa;">stride:</span> u64<span style="color: #6c7086;">         // VA difference between consecutive nodes</span><br>
+    <span style="color: #89b4fa;">next_offset:</span> u64<span style="color: #6c7086;">     // offset of next-pointer within node</span><br>
+    <span style="color: #89b4fa;">is_circular:</span> bool<br>
+    <span style="color: #89b4fa;">nodes:</span> Vec&lt;u64&gt;<span style="color: #6c7086;">      // ordered VAs from head to tail</span><br>
+    <span style="color: #89b4fa;">avg_confidence:</span> f64
+  </div>
+</div>
+
+<div class="section">
+  <h3>Parameters</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.85em; color:#6c7086;"><th style="text-align:left; padding:6px 8px;">Parameter</th><th style="text-align:left; padding:6px 8px;">Default</th><th style="text-align:left; padding:6px 8px;">Purpose</th></tr>
+    <tr><td style="padding:6px 8px;">min_length</td><td style="padding:6px 8px;">3</td><td style="padding:6px 8px; color:#6c7086;">Minimum nodes to count as list</td></tr>
+    <tr><td style="padding:6px 8px;">min_confidence</td><td style="padding:6px 8px;">0.4</td><td style="padding:6px 8px; color:#6c7086;">Edge confidence threshold</td></tr>
+    <tr><td style="padding:6px 8px;">stride_tolerance</td><td style="padding:6px 8px;">0</td><td style="padding:6px 8px; color:#6c7086;">Allowed VA stride variance (0 = exact)</td></tr>
+    <tr><td style="padding:6px 8px;">max_chain_length</td><td style="padding:6px 8px;">10000</td><td style="padding:6px 8px; color:#6c7086;">Safety bound</td></tr>
+  </table>
+</div>

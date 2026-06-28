@@ -1,0 +1,62 @@
+<h2>Query Module</h2>
+<p class="subtitle">Traversal, filtering, statistics, and export API on PointerGraph</p>
+
+<div class="section">
+  <h3>GraphQuery &mdash; the public handle</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+    <span style="color: #89b4fa;">graph:</span> &amp;PointerGraph<br>
+    <span style="color: #89b4fa;">config:</span> QueryConfig
+  </div>
+  <p style="margin-top: 8px; color: #6c7086; font-size: 0.9em;">QueryConfig carries defaults: min_confidence, max_depth, region_filters. Queries can override per-call.</p>
+</div>
+
+<div class="section">
+  <h3>Traversal API</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.85em; color:#6c7086;"><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #313244;">Method</th><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #313244;">Returns</th><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #313244;">S3 use case</th></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>is_reachable(va)</code></td><td style="padding:6px 8px;">bool</td><td style="padding:6px 8px; color:#6c7086;">Dead object detection</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>path_to_root(va)</code></td><td style="padding:6px 8px;">Vec&lt;EdgePath&gt;</td><td style="padding:6px 8px; color:#6c7086;">Ownership chains</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>all_paths(from, to, max_depth)</code></td><td style="padding:6px 8px;">Vec&lt;Vec&lt;EdgePath&gt;&gt;</td><td style="padding:6px 8px; color:#6c7086;">Multiple reference paths</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>reachable_from(va, pred)</code></td><td style="padding:6px 8px;">Vec&lt;NodeIndex&gt;</td><td style="padding:6px 8px; color:#6c7086;">Subgraph extraction</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>who_points_to(va, pred)</code></td><td style="padding:6px 8px;">Vec&lt;NodeIndex&gt;</td><td style="padding:6px 8px; color:#6c7086;">Reverse references</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>neighbors(va)</code></td><td style="padding:6px 8px;">(Vec&lt;NodeIndex&gt;, Vec&lt;NodeIndex&gt;)</td><td style="padding:6px 8px; color:#6c7086;">In/out neighborhood</td></tr>
+  </table>
+  <p style="color: #6c7086; font-size: 0.85em;">Each traversal accepts an optional <code>EdgePredicate</code> to filter by confidence, depth, source/target region class.</p>
+</div>
+
+<div class="section">
+  <h3>EdgePredicate — composable filters</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+    <span style="color: #89b4fa;">min_confidence:</span> f64<br>
+    <span style="color: #89b4fa;">max_confidence:</span> f64<br>
+    <span style="color: #89b4fa;">source_region:</span> Option&lt;RegionClass&gt;<br>
+    <span style="color: #89b4fa;">target_region:</span> Option&lt;RegionClass&gt;<br>
+    <span style="color: #89b4fa;">max_depth:</span> Option&lt;usize&gt;<br>
+    <span style="color: #89b4fa;">matched_by_pattern:</span> Option&lt;String&gt;
+  </div>
+</div>
+
+<div class="section">
+  <h3>Statistics API</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.85em; color:#6c7086;"><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #313244;">Method</th><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #313244;">Description</th></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>pointer_density(va, size)</code></td><td style="padding:6px 8px; color:#6c7086;">Candidates per KB in a memory range</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>degree_distribution()</code></td><td style="padding:6px 8px; color:#6c7086;">Histogram of out-degrees</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>region_breakdown()</code></td><td style="padding:6px 8px; color:#6c7086;">Node/edge counts by region class</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>confidence_distribution()</code></td><td style="padding:6px 8px; color:#6c7086;">Histogram of edge confidence scores</td></tr>
+    <tr style="font-size:0.9em;"><td style="padding:6px 8px;"><code>largest_component()</code></td><td style="padding:6px 8px; color:#6c7086;">Size of largest weakly connected component</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <h3>Export</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; margin: 12px 0;">
+    <p><code style="color: #89b4fa;">to_dot(filter)</code> &mdash; Graphviz DOT output. S3/S4 or CLI use this for debugging. Edges colored by confidence (green=high, yellow=mid, red=low). Nodes shaped by region class (box=image, oval=heap, diamond=stack).</p>
+    <p><code style="color: #89b4fa;">to_json(filter)</code> &mdash; Machine-readable export. Nodes with VA+class, edges with confidence+evidence.</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>TLA+ spec</h3>
+  <p style="color: #6c7086;">Extension of PointerGraph.tla: models BFS reachability as transitive closure of edges above confidence threshold. Invariants: <code>is_reachable</code> is transitive, <code>path_to_root</code> paths are valid edge sequences, <code>who_points_to</code> is the inverse of edge direction.</p>
+</div>

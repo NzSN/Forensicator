@@ -1,0 +1,55 @@
+<h2>S3 — CLI & Testing</h2>
+
+<div class="section">
+  <h3>CLI — new subcommand</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8; margin: 12px 0;">
+    <strong>forensicator recover</strong> &lt;dump.dmp&gt; [flags]<br><br>
+    <span style="color: #a6adc8;">Flags:</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--strings</span> <span style="color: #6c7086;">// run string detector only</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--vtables</span> <span style="color: #6c7086;">// run vtable detector only</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--lists</span> <span style="color: #6c7086;">// run list detector only</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--arrays</span> <span style="color: #6c7086;">// run array detector only</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--chunks</span> <span style="color: #6c7086;">// run chunk detector only</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--shapes</span> <span style="color: #6c7086;">// run shape clustering only</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--all</span> <span style="color: #6c7086;">// run everything (default)</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--json</span> <span style="color: #6c7086;">// JSON export of StructureCatalog</span><br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">--pattern &lt;name&gt;</span> <span style="color: #6c7086;">// S2 pattern for pointer scan (default: all presets)</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Testing strategy</h3>
+  <table style="width:100%; border-collapse: collapse; margin: 12px 0;">
+    <tr style="font-size:0.85em; color:#6c7086;"><th style="text-align:left; padding:6px 8px;">Layer</th><th style="text-align:left; padding:6px 8px;">Approach</th></tr>
+    <tr><td style="padding:6px 8px;">strings</td><td style="padding:6px 8px;">Synthetic AddressSpace with known ASCII/UTF-16 strings at specific VAs. Edge: empty region, non-printable sequences, max length.</td></tr>
+    <tr><td style="padding:6px 8px;">vtables</td><td style="padding:6px 8px;">Synthetic module data region with known function pointers + zero terminator. Edge: too few methods, interleaved garbage.</td></tr>
+    <tr><td style="padding:6px 8px;">lists</td><td style="padding:6px 8px;">Construct PointerGraph with known linked list pattern (nodes at known VAs, edges at fixed offsets). Edge: singleton, long chain, circular.</td></tr>
+    <tr><td style="padding:6px 8px;">arrays</td><td style="padding:6px 8px;">Construct PointerGraph with repeating node pattern at constant stride. Edge: varying stride, mixed degrees.</td></tr>
+    <tr><td style="padding:6px 8px;">chunks</td><td style="padding:6px 8px;">Synthetic heap region with clustered nodes + gaps. Edge: single-node clusters, zero-filled ranges.</td></tr>
+    <tr><td style="padding:6px 8px;">shapes</td><td style="padding:6px 8px;">Graph with multiple nodes sharing identical edge patterns + distinct patterns. Edge: empty graph, single-node graph.</td></tr>
+    <tr><td style="padding:6px 8px;">integration</td><td style="padding:6px 8px;">Full pipeline: synthetic dump → S1 parse → S2 scan+graph → S3 recover → verify catalog contents.</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <h3>Dependencies</h3>
+  <div style="background: var(--bg-secondary); padding: 16px; border-radius: 8px; margin: 12px 0; text-align: center; font-family: monospace; font-size: 0.85em;">
+    S3 depends on S2's <span style="color: #fab387;">PointerGraph</span> + <span style="color: #cba6f7;">GraphQuery</span> + S1's <span style="color: #94e2d5;">AddressSpace</span>.<br>
+    S3 adds <strong>0 external dependencies</strong>. All detectors use existing infrastructure.
+  </div>
+</div>
+
+<div class="section">
+  <h3>Module layout</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.85em; line-height: 1.8;">
+    forensicator-core/src/<br>
+    &nbsp;&nbsp;<span style="color: #a6e3a1;">recover/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #89b4fa;">mod.rs</span> <span style="color: #6c7086;">// StructureCatalog, StructureDetector trait, recover_all()</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #89b4fa;">strings.rs</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #89b4fa;">vtables.rs</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #89b4fa;">lists.rs</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #89b4fa;">arrays.rs</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #89b4fa;">chunks.rs</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #89b4fa;">shapes.rs</span>
+  </div>
+</div>

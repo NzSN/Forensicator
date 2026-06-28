@@ -1,0 +1,68 @@
+<h2>S3 — Detector Trait & StructureCatalog</h2>
+<p class="subtitle">Each recovery task is a module implementing StructureDetector. Output unified into StructureCatalog.</p>
+
+<div style="background: var(--bg-secondary); padding: 20px; border-radius: 8px; margin: 16px 0; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+<strong style="color: #a6e3a1;">pub trait StructureDetector</strong> {<br>
+&nbsp;&nbsp;<span style="color: #89b4fa;">type Item;</span><br>
+&nbsp;&nbsp;<span style="color: #89b4fa;">fn name(&self) -> &str;</span><br>
+&nbsp;&nbsp;<span style="color: #89b4fa;">fn detect(</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&amp;self,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;space: &amp;AddressSpace,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;graph: &amp;PointerGraph,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;query: &amp;GraphQuery,<br>
+&nbsp;&nbsp;<span style="color: #89b4fa;">) -> Vec&lt;Self::Item&gt;;</span><br>
+}
+</div>
+
+<div class="section">
+  <h3>5 detector modules</h3>
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; margin: 12px 0;">
+    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; border-left: 3px solid #f38ba8;">
+      <strong>strings/</strong>
+      <p style="margin:4px 0 0; font-size:0.85em;">Scans AddressSpace for null-terminated ASCII/UTF-16 byte sequences. Output: StructString { va, len, encoding }</p>
+    </div>
+    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; border-left: 3px solid #f38ba8;">
+      <strong>vtables/</strong>
+      <p style="margin:4px 0 0; font-size:0.85em;">Finds arrays of function pointers in module data — each entry points to executable code. Output: StructVTable { va, method_count, methods: Vec&lt;u64&gt; }</p>
+    </div>
+    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; border-left: 3px solid #f38ba8;">
+      <strong>lists/</strong>
+      <p style="margin:4px 0 0; font-size:0.85em;">Uses GraphQuery to find consistent edge patterns — node → next at fixed offset. Output: StructLinkedList { head_va, length, stride, next_offset }</p>
+    </div>
+    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; border-left: 3px solid #f38ba8;">
+      <strong>arrays/</strong>
+      <p style="margin:4px 0 0; font-size:0.85em;">Finds sequences of graph nodes with identical structure and sequential VAs. Output: StructArray { start_va, element_size, count, element_type }</p>
+    </div>
+    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; border-left: 3px solid #f38ba8;">
+      <strong>chunks/</strong>
+      <p style="margin:4px 0 0; font-size:0.85em;">Identifies heap allocation boundaries via MemoryInfo + pointer density. Output: StructChunk { va_start, size, is_free }</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Unified output: StructureCatalog</h3>
+  <div style="background: var(--bg-secondary); padding: 16px 20px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.8;">
+    <span style="color: #89b4fa;">pub struct</span> <strong style="color: #a6e3a1;">StructureCatalog</strong> {<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">strings:</span> Vec&lt;StructString&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">vtables:</span> Vec&lt;StructVTable&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">linked_lists:</span> Vec&lt;StructLinkedList&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">arrays:</span> Vec&lt;StructArray&gt;,<br>
+    &nbsp;&nbsp;<span style="color: #89b4fa;">chunks:</span> Vec&lt;StructChunk&gt;,<br>
+    }<br><br>
+    <span style="color: #6c7086;">// Built by running all detectors:</span><br>
+    <span style="color: #89b4fa;">pub fn recover_all(space, graph, query) -> StructureCatalog</span>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Dependency chain</h3>
+  <div style="background: var(--bg-secondary); padding: 16px; border-radius: 8px; margin: 12px 0; text-align: center; font-family: monospace; font-size: 0.85em;">
+    model &larr; pattern &larr; scan &larr; graph &larr; query<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↑<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #a6e3a1;">strings &nbsp; vtables &nbsp; lists &nbsp; arrays &nbsp; chunks</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↓<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #fab387;">catalog</span> &larr; CLI<br>
+  </div>
+  <p style="color: #6c7086; font-size:0.85em;">S4 consumes StructureCatalog. Each detector depends only on AddressSpace + PointerGraph + GraphQuery (already built in S1+S2).</p>
+</div>

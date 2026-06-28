@@ -12,7 +12,9 @@ impl ShapeClusterer {
             if node.region_class != RegionClass::Private || node.out_degree == 0 { continue; }
             let idx = graph.va_to_node[&node.va];
             let edges = graph.edges_from(idx);
-            let mut sig_edges: Vec<(u64, RegionClass)> = edges.iter().map(|e| {
+            let meaningful_edges: Vec<_> = edges.iter().filter(|e| graph.nodes[e.to.0].va != 0).collect();
+            if meaningful_edges.is_empty() { continue; }
+            let mut sig_edges: Vec<(u64, RegionClass)> = meaningful_edges.iter().map(|e| {
                 let source_va = graph.nodes[e.from.0].va;
                 let offset = source_va.wrapping_sub(node.va);
                 let target_class = graph.nodes[e.to.0].region_class;
