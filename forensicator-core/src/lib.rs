@@ -7,3 +7,4 @@ pub mod model;
 pub mod parse;
 pub mod space;
 pub mod pattern;
+pub mod scan;
