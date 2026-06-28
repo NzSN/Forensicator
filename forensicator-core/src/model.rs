@@ -256,6 +256,16 @@ pub enum Root {
     ModuleData { mod_name: String, source_va: u64, va: u64 },
 }
 
+impl Root {
+    pub fn va(&self) -> u64 {
+        match *self {
+            Root::Register { va, .. } => va,
+            Root::Stack { va, .. } => va,
+            Root::ModuleData { va, .. } => va,
+        }
+    }
+}
+
 /// A node in the pointer graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphNode {

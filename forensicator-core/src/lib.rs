@@ -8,3 +8,4 @@ pub mod parse;
 pub mod space;
 pub mod pattern;
 pub mod scan;
+pub mod graph;
