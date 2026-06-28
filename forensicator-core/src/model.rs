@@ -405,6 +405,101 @@ pub struct EdgePath {
     pub total_confidence: f64,
 }
 
+/// String encoding detected by the string scanner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringEncoding {
+    Ascii,
+    Utf16Le,
+    Utf16Be,
+}
+
+/// A null-terminated string found in memory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructString {
+    pub va: u64,
+    pub byte_len: usize,
+    pub encoding: StringEncoding,
+    pub content: String,
+    pub confidence: f64,
+}
+
+/// A virtual method table found in module data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructVTable {
+    pub va: u64,
+    pub method_count: usize,
+    pub methods: Vec<u64>,
+    pub module_name: Option<String>,
+    pub confidence: f64,
+}
+
+/// A linked list detected in the pointer graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructLinkedList {
+    pub head_va: u64,
+    pub length: usize,
+    pub stride: u64,
+    pub next_offset: u64,
+    pub is_circular: bool,
+    pub nodes: Vec<u64>,
+    pub avg_confidence: f64,
+}
+
+/// An array of structurally identical objects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructArray {
+    pub start_va: u64,
+    pub element_size: u64,
+    pub count: usize,
+    pub out_degree: usize,
+    pub region_class: RegionClass,
+    pub elements: Vec<u64>,
+    pub confidence: f64,
+}
+
+/// An inferred heap allocation chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructChunk {
+    pub va_start: u64,
+    pub size: u64,
+    pub is_free: bool,
+    pub node_count: usize,
+    pub pointer_density: f64,
+    pub confidence: f64,
+}
+
+/// A structural signature: ordered list of (offset, target_class) edges.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ShapeSignature {
+    pub edges: Vec<(u64, RegionClass)>,
+}
+
+/// A group of heap nodes sharing the same shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapeGroup {
+    pub id: usize,
+    pub signature: ShapeSignature,
+    pub member_count: usize,
+    pub members: Vec<u64>,
+}
+
+/// All shape groups found, sorted by member_count descending.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapeClusters {
+    pub groups: Vec<ShapeGroup>,
+}
+
+/// Aggregated output of all S3 detectors.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructureCatalog {
+    pub strings: Vec<StructString>,
+    pub vtables: Vec<StructVTable>,
+    pub linked_lists: Vec<StructLinkedList>,
+    pub arrays: Vec<StructArray>,
+    pub chunks: Vec<StructChunk>,
+    pub shape_clusters: ShapeClusters,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,5 +862,74 @@ mod tests {
     fn edge_path_total_confidence() {
         let path = EdgePath { nodes: vec![NodeIndex(0), NodeIndex(1)], edges: vec![EdgeIndex(0)], total_confidence: 0.72 };
         assert_eq!(path.total_confidence, 0.72);
+    }
+
+    #[test]
+    fn string_encoding_variants() {
+        assert!(matches!(StringEncoding::Ascii, StringEncoding::Ascii));
+        assert!(matches!(StringEncoding::Utf16Le, StringEncoding::Utf16Le));
+        assert!(matches!(StringEncoding::Utf16Be, StringEncoding::Utf16Be));
+    }
+
+    #[test]
+    fn struct_string_construction() {
+        let s = StructString { va: 0x1000, byte_len: 12, encoding: StringEncoding::Ascii, content: "hello".into(), confidence: 0.95 };
+        assert_eq!(s.va, 0x1000);
+        assert_eq!(s.byte_len, 12);
+        assert_eq!(s.content, "hello");
+        assert!(s.confidence <= 1.0);
+    }
+
+    #[test]
+    fn struct_vtable_construction() {
+        let v = StructVTable { va: 0x400000, method_count: 3, methods: vec![0x401000, 0x402000, 0x403000], module_name: Some("test.dll".into()), confidence: 0.9 };
+        assert_eq!(v.method_count, 3);
+        assert_eq!(v.methods.len(), 3);
+    }
+
+    #[test]
+    fn struct_linked_list_construction() {
+        let l = StructLinkedList { head_va: 0x1000, length: 5, stride: 0x20, next_offset: 0x08, is_circular: false, nodes: vec![0x1000, 0x1020], avg_confidence: 0.8 };
+        assert_eq!(l.length, 5);
+        assert!(!l.is_circular);
+    }
+
+    #[test]
+    fn struct_array_construction() {
+        let a = StructArray { start_va: 0x2000, element_size: 0x10, count: 4, out_degree: 1, region_class: RegionClass::Private, elements: vec![0x2000, 0x2010, 0x2020, 0x2030], confidence: 0.85 };
+        assert_eq!(a.count, 4);
+        assert_eq!(a.element_size, 0x10);
+    }
+
+    #[test]
+    fn struct_chunk_construction() {
+        let c = StructChunk { va_start: 0x10000, size: 0x1000, is_free: false, node_count: 12, pointer_density: 0.75, confidence: 0.6 };
+        assert_eq!(c.size, 0x1000);
+        assert!(!c.is_free);
+    }
+
+    #[test]
+    fn shape_signature_construction() {
+        let sig = ShapeSignature { edges: vec![(0x00, RegionClass::Image), (0x08, RegionClass::Private)] };
+        assert_eq!(sig.edges.len(), 2);
+    }
+
+    #[test]
+    fn shape_group_construction() {
+        let sig = ShapeSignature { edges: vec![(0x00, RegionClass::Private)] };
+        let g = ShapeGroup { id: 0, signature: sig, member_count: 5, members: vec![] };
+        assert_eq!(g.member_count, 5);
+    }
+
+    #[test]
+    fn shape_clusters_empty() {
+        let sc = ShapeClusters { groups: vec![] };
+        assert!(sc.groups.is_empty());
+    }
+
+    #[test]
+    fn structure_catalog_empty() {
+        let cat = StructureCatalog { strings: vec![], vtables: vec![], linked_lists: vec![], arrays: vec![], chunks: vec![], shape_clusters: ShapeClusters { groups: vec![] } };
+        assert!(cat.strings.is_empty());
     }
 }
