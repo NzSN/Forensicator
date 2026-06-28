@@ -105,7 +105,7 @@ impl MemType {
 }
 
 /// High-level classification of a memory region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegionClass {
     Image,
     Stack,

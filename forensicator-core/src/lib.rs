@@ -9,3 +9,4 @@ pub mod space;
 pub mod pattern;
 pub mod scan;
 pub mod graph;
+pub mod query;
