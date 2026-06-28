@@ -51,6 +51,15 @@ pub struct Anomaly {
     pub description: String,
 }
 
+impl fmt::Display for Anomaly {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[stream 0x{:08X} @ +0x{:X}] {}",
+            self.provenance.stream_type, self.provenance.file_offset, self.description)
+    }
+}
+
+impl std::error::Error for Anomaly {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
