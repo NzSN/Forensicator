@@ -160,7 +160,7 @@ pub struct EdgeIndex(pub usize);
 /// All matchers in a pattern are AND-ed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValueMatcher {
-    /// Value's least-significant N bytes are zero (alignment check).
+    /// Value is aligned to N bytes (N must be a power of 2).
     AlignedTo(u8),
     /// Value passes bitmask test: (value & mask) == expected.
     BitMask { mask: u64, expected: u64 },
@@ -185,7 +185,7 @@ impl ValueMatcher {
     pub fn eval(&self, value: u64) -> bool {
         match *self {
             ValueMatcher::AlignedTo(n) => {
-                let mask = (1u64 << (n as u32)) - 1;
+                let mask = (n as u64).wrapping_sub(1);
                 (value & mask) == 0
             }
             ValueMatcher::BitMask { mask, expected } => (value & mask) == expected,
