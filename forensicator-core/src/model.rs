@@ -310,6 +310,8 @@ impl PointerGraph {
     pub fn node_count(&self) -> usize { self.nodes.len() }
     pub fn edge_count(&self) -> usize { self.edges.len() }
     pub fn root_nodes(&self) -> &[NodeIndex] { &self.roots }
+    pub fn max_nodes(&self) -> usize { self.max_nodes }
+    pub fn max_edges(&self) -> usize { self.max_edges }
 
     pub fn node(&self, va: u64) -> Option<&GraphNode> {
         self.va_to_node.get(&va).map(|&idx| &self.nodes[idx.0])
@@ -321,22 +323,52 @@ impl Default for PointerGraph {
 }
 
 /// Predicate for filtering graph edges during traversal.
-#[derive(Debug, Clone)]
+///
+/// `source_region`, `target_region`, and `max_depth` are checked by
+/// `matches_with_nodes()` (or by the query module's BFS logic) — they
+/// require access to `GraphNode` data that the basic `matches()` does
+/// not have.
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgePredicate {
     pub min_confidence: f64,
     pub max_confidence: f64,
+    /// Checked by `matches_with_nodes()` / GraphQuery — requires source node ref.
     pub source_region: Option<RegionClass>,
+    /// Checked by `matches_with_nodes()` / GraphQuery — requires target node ref.
     pub target_region: Option<RegionClass>,
+    /// Checked by the query module's BFS traversal, not by `matches()`.
     pub max_depth: Option<usize>,
     pub matched_by_pattern: Option<String>,
 }
 
 impl EdgePredicate {
+    /// Check edge-level fields (confidence, matched_by_pattern) only.
     pub fn matches(&self, edge: &GraphEdge) -> bool {
         if edge.confidence < self.min_confidence { return false; }
         if edge.confidence > self.max_confidence { return false; }
         if let Some(ref pat) = self.matched_by_pattern {
             if !edge.matched_by.iter().any(|m| m == pat) { return false; }
+        }
+        true
+    }
+
+    /// Full check including region and depth filters that require node references.
+    pub fn matches_with_nodes(
+        &self,
+        edge: &GraphEdge,
+        source_node: &GraphNode,
+        target_node: &GraphNode,
+        current_depth: usize,
+    ) -> bool {
+        if !self.matches(edge) { return false; }
+        if let Some(ref region) = self.source_region {
+            if source_node.region_class != *region { return false; }
+        }
+        if let Some(ref region) = self.target_region {
+            if target_node.region_class != *region { return false; }
+        }
+        if let Some(max) = self.max_depth {
+            if current_depth > max { return false; }
         }
         true
     }
