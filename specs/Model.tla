@@ -193,28 +193,29 @@ SetSysInfo(os, cpu, maj, min, bld, rev, sid, off, rva) ==
                    mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
                    mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies>>
 
-\* Add a module
+\* Add a module (deterministic: overlap -> anomaly, else -> append)
 AddModule(va, sz, sid, off, rva) ==
     /\ ModuleCount < MaxModules
     /\ sz > 0
     /\ sid > 0
-    /\ \/ /\ \A i \in 1..MaxModules:
-              i <= ModuleCount => ~(mod_va[i] < va + sz /\ va < mod_va[i] + mod_sz[i])
-          /\ mod_va'   = Append(mod_va, va)
-          /\ mod_sz'   = Append(mod_sz, sz)
-          /\ mod_prov_sid' = Append(mod_prov_sid, sid)
-          /\ mod_prov_off' = Append(mod_prov_off, off)
-          /\ mod_prov_rva' = Append(mod_prov_rva, rva)
-          /\ UNCHANGED <<sysinfo, thr_id, thr_stack_va, thr_stack_sz,
-                         thr_prov_sid, thr_prov_off, thr_prov_rva,
-                         mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                         mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies>>
-       \/ /\ Len(anomalies) < MaxAnomalies
-          /\ anomalies' = Append(anomalies, [desc |-> "overlapping module"])
-          /\ UNCHANGED <<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
-                         thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
-                         mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                         mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info>>
+    /\ LET NoOverlap == \A i \in 1..MaxModules:
+                         i <= ModuleCount => ~(mod_va[i] < va + sz /\ va < mod_va[i] + mod_sz[i])
+       IN IF NoOverlap
+          THEN /\ mod_va'   = Append(mod_va, va)
+               /\ mod_sz'   = Append(mod_sz, sz)
+               /\ mod_prov_sid' = Append(mod_prov_sid, sid)
+               /\ mod_prov_off' = Append(mod_prov_off, off)
+               /\ mod_prov_rva' = Append(mod_prov_rva, rva)
+               /\ UNCHANGED <<sysinfo, thr_id, thr_stack_va, thr_stack_sz,
+                              thr_prov_sid, thr_prov_off, thr_prov_rva,
+                              mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
+                              mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies>>
+          ELSE /\ Len(anomalies) < MaxAnomalies
+               /\ anomalies' = Append(anomalies, [desc |-> "overlapping module"])
+               /\ UNCHANGED <<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
+                              thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
+                              mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
+                              mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info>>
 
 AddThread(id, sva, ssz, sid, off, rva) ==
     /\ ThreadCount < MaxThreads

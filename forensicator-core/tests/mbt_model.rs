@@ -49,6 +49,7 @@ struct ModelComputer {
 const MAX_MODULES: usize = 2;
 const MAX_THREADS: usize = 2;
 const MAX_REGIONS: usize = 2;
+const MAX_ANOMALIES: usize = 4;
 
 impl ModelComputer {
     fn new() -> Self {
@@ -109,6 +110,17 @@ impl ModelComputer {
             })
             .unwrap_or(0)
     }
+
+    fn has_module_overlap(&self, va: i64, sz: i64) -> bool {
+        for i in 0..self.mod_va.len() {
+            let mva = self.mod_va[i];
+            let msz = self.mod_sz[i];
+            if mva < va + sz && va < mva + msz {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl StateComputer for ModelComputer {
@@ -138,11 +150,15 @@ impl StateComputer for ModelComputer {
                 let off = Self::get_int_param(params, "off");
                 let rva = Self::get_int_param(params, "rva");
                 if self.mod_va.len() < MAX_MODULES && sz > 0 && sid > 0 {
-                    self.mod_va.push(va);
-                    self.mod_sz.push(sz);
-                    self.mod_prov_sid.push(sid);
-                    self.mod_prov_off.push(off);
-                    self.mod_prov_rva.push(rva);
+                    if !self.has_module_overlap(va, sz) {
+                        self.mod_va.push(va);
+                        self.mod_sz.push(sz);
+                        self.mod_prov_sid.push(sid);
+                        self.mod_prov_off.push(off);
+                        self.mod_prov_rva.push(rva);
+                    } else if self.anomalies.len() < MAX_ANOMALIES {
+                        self.anomalies.push("overlapping module".to_string());
+                    }
                 }
             }
             "AddThread" => {
