@@ -2,7 +2,7 @@
 EXTENDS Integers, Sequences, FiniteSets
 
 \* Model-checking bounds (edit these for larger state spaces)
-MaxAddr      == 4
+CONSTANT MaxAddr
 MaxRegions   == 2
 MaxAnomalies == 2
 

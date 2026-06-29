@@ -116,7 +116,7 @@ VARIABLES
     p_anomalies
 
 A == INSTANCE Arch WITH regs <- a_regs, anomalies <- a_anomalies
-S == INSTANCE AddressSpace WITH reg_va <- s_reg_va, reg_sz <- s_reg_sz, reg_cl <- s_reg_cl, anomalies <- s_anomalies
+S == INSTANCE AddressSpace WITH reg_va <- s_reg_va, reg_sz <- s_reg_sz, reg_cl <- s_reg_cl, anomalies <- s_anomalies, MaxAddr <- 256
 \* ParsePipeline carries Model via internal INSTANCE — no separate M needed.
 P == INSTANCE ParsePipeline WITH
     phase <- p_phase, fatal_error <- p_fatal_error, raw_streams <- p_raw_streams,
@@ -130,11 +130,47 @@ P == INSTANCE ParsePipeline WITH
     mem_prov_sid <- p_mem_prov_sid, mem_prov_off <- p_mem_prov_off, mem_prov_rva <- p_mem_prov_rva,
     exc_info <- p_exc_info, dump_built <- p_dump_built, anomalies <- p_anomalies
 
+\* ---- Helpers ----
+
+\* Map Model.tla classification integer (0=Image..4=Other) to AddressSpace string.
+ClassToStr(cls) ==
+    CASE cls = 0 -> "Image"
+      [] cls = 1 -> "Stack"
+      [] cls = 2 -> "Mapped"
+      [] cls = 3 -> "Private"
+      [] OTHER  -> "Other"
+
+\* ---- Address Space construction from parsed dump ----
+\* Transfers memory regions from ParsePipeline's output (p_mem_*) to
+\* AddressSpace's region variables (s_reg_*) after the dump is built.
+
+BuildAddressSpace ==
+    /\ p_phase = "Built"
+    /\ LET n == Len(p_mem_va)
+        no_overlap == \A i \in 1..n:
+                        \A j \in 1..n:
+                          (i # j) => ~(p_mem_va[i] < p_mem_va[j] + p_mem_sz[j] /\ p_mem_va[j] < p_mem_va[i] + p_mem_sz[i])
+    IN  /\ s_reg_va' = p_mem_va
+        /\ s_reg_sz' = p_mem_sz
+        /\ s_reg_cl' = [i \in 1..n |-> ClassToStr(p_mem_cls[i])]
+        /\ IF no_overlap
+           THEN /\ s_anomalies' = <<>>
+           ELSE /\ s_anomalies' = <<[desc |-> "overlapping memory regions"]>>
+        /\ p_phase' = "Done"
+        /\ UNCHANGED <<a_regs, a_anomalies,
+                       p_fatal_error, p_raw_streams, p_sysinfo_out,
+                       p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva,
+                       p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva,
+                       p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls,
+                       p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva,
+                       p_exc_info, p_dump_built, p_anomalies>>
+
 Init == A!Init /\ S!Init /\ P!Init
 
 Next == \/ A!Next /\ UNCHANGED <<s_reg_va, s_reg_sz, s_reg_cl, s_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies>>
         \/ S!Next /\ UNCHANGED <<a_regs, a_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies>>
         \/ P!Next /\ UNCHANGED <<a_regs, a_anomalies, s_reg_va, s_reg_sz, s_reg_cl, s_anomalies>>
+        \/ BuildAddressSpace
 
 Vars == <<a_regs, a_anomalies, s_reg_va, s_reg_sz, s_reg_cl, s_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies>>
 
