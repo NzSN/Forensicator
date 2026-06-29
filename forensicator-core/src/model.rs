@@ -54,6 +54,7 @@ pub struct Thread {
 pub struct Protection(u32);
 
 impl Protection {
+    pub fn bits(&self) -> u32 { self.0 }
     pub const READ: u32 = 1;
     pub const WRITE: u32 = 2;
     pub const EXECUTE: u32 = 4;
@@ -123,6 +124,7 @@ pub struct MemoryRegionInfo {
     pub state: MemState,
     pub mem_type: MemType,
     pub provenance: Provenance,
+    pub region_class: Option<RegionClass>,
 }
 
 /// Exception information from the dump.
@@ -146,6 +148,136 @@ pub struct Dump {
     pub exception: Option<ExceptionInfo>,
     pub anomalies: Vec<Anomaly>,
     pub file_size: u64,
+}
+
+/// State‑transition constants mirroring Model.tla.
+impl Dump {
+    pub const MAX_MODULES: usize = 2;
+    pub const MAX_THREADS: usize = 2;
+    pub const MAX_REGIONS: usize = 2;
+    pub const MAX_ANOMALIES: usize = 4;
+
+    /// Set system information — once‑only, requires provenance.
+    pub fn set_sys_info(
+        &mut self,
+        os: OsPlatform,
+        cpu: CpuArch,
+        version: (u32, u32, u32, u32),
+        provenance: Provenance,
+    ) {
+        if self.system_info.is_some() { return; }
+        if provenance.stream_type == 0 { return; }
+        self.system_info = Some(SystemInfo {
+            os, cpu, version, provenance,
+        });
+    }
+
+    /// Add a module.  If the new module overlaps an existing one, records an
+    /// "overlapping module" anomaly instead (matching Model.tla).
+    pub fn add_module(&mut self, base_va: u64, size: u64, provenance: Provenance) {
+        if self.modules.len() >= Self::MAX_MODULES { return; }
+        if size == 0 || provenance.stream_type == 0 { return; }
+        if self.has_module_overlap(base_va, size) {
+            if self.anomalies.len() < Self::MAX_ANOMALIES {
+                self.anomalies.push(Anomaly {
+                    provenance: Provenance { stream_type: 0, file_offset: 0, rva: 0 },
+                    description: "overlapping module".into(),
+                });
+            }
+            return;
+        }
+        self.modules.push(Module {
+            name: String::new(),
+            base_va,
+            size,
+            checksum: 0,
+            codeview_guid: None,
+            pdb_name: None,
+            provenance,
+        });
+    }
+
+    fn has_module_overlap(&self, va: u64, sz: u64) -> bool {
+        for m in &self.modules {
+            let mva = m.base_va;
+            let msz = m.size;
+            if mva < va + sz && va < mva + msz {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Add a thread.
+    pub fn add_thread(
+        &mut self,
+        id: u32,
+        stack_va: u64,
+        stack_size: u64,
+        provenance: Provenance,
+    ) {
+        if self.threads.len() >= Self::MAX_THREADS { return; }
+        if stack_size == 0 || provenance.stream_type == 0 { return; }
+        self.threads.push(Thread {
+            id,
+            registers: RegisterSet::new(),
+            stack_va,
+            stack_size,
+            teb_va: 0,
+            provenance,
+        });
+    }
+
+    /// Add a memory region with its classification.
+    pub fn add_region(
+        &mut self,
+        va_start: u64,
+        size: u64,
+        protection: Protection,
+        state: MemState,
+        mem_type: MemType,
+        class: RegionClass,
+        provenance: Provenance,
+    ) {
+        if self.memory_regions.len() >= Self::MAX_REGIONS { return; }
+        if size == 0 || provenance.stream_type == 0 { return; }
+        self.memory_regions.push(MemoryRegionInfo {
+            va_start,
+            size,
+            protection,
+            state,
+            mem_type,
+            provenance,
+            region_class: Some(class),
+        });
+    }
+
+    /// Set exception information — once‑only, requires provenance.
+    pub fn set_exception(
+        &mut self,
+        code: u32,
+        address: u64,
+        thread_id: u32,
+        flags: u32,
+        provenance: Provenance,
+    ) {
+        if self.exception.is_some() { return; }
+        if provenance.stream_type == 0 { return; }
+        self.exception = Some(ExceptionInfo {
+            code, address, thread_id, flags,
+            context: None,
+            provenance,
+        });
+    }
+
+    /// Record a non‑fatal anomaly.
+    pub fn add_anomaly(&mut self, description: &str) {
+        if self.anomalies.len() >= Self::MAX_ANOMALIES { return; }
+        self.anomalies.push(Anomaly {
+            provenance: Provenance { stream_type: 0, file_offset: 0, rva: 0 },
+            description: description.to_string(),
+        });
+    }
 }
 
 /// Index into a PointerGraph's node array.
@@ -666,6 +798,7 @@ mod tests {
             state: MemState::Commit,
             mem_type: MemType::Image,
             provenance: dummy_prov(),
+            region_class: None,
         };
         assert_eq!(mri.va_start, 0x400000);
         assert_eq!(mri.size, 0x1000);

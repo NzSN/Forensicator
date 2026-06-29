@@ -62,13 +62,30 @@ impl AddressSpace {
         Some(&r.data[offset..end])
     }
 
-    /// Add a region. Returns Err if at capacity.
+    /// Add a region. Returns Err on zero size, capacity exceeded, or overlap.
+    /// Mirrors AddressSpace.tla `AddRegion`.
     pub fn add_region(&mut self, region: AddressRegion) -> Result<(), Anomaly> {
+        if region.size == 0 {
+            return Err(Anomaly {
+                provenance: crate::error::Provenance { stream_type: 0, file_offset: 0, rva: 0 },
+                description: "zero-sized region".into(),
+            });
+        }
         if self.regions.len() >= self.max_regions {
             return Err(Anomaly {
                 provenance: crate::error::Provenance { stream_type: 0, file_offset: 0, rva: 0 },
                 description: "AddressSpace at capacity".into(),
             });
+        }
+        let va = region.va_start;
+        let end = va.checked_add(region.size).unwrap_or(u64::MAX);
+        for r in &self.regions {
+            if va < r.va_start + r.size && r.va_start < end {
+                return Err(Anomaly {
+                    provenance: crate::error::Provenance { stream_type: 0, file_offset: 0, rva: 0 },
+                    description: "overlap".into(),
+                });
+            }
         }
         let idx = self.regions.binary_search_by_key(&region.va_start, |r| r.va_start)
             .unwrap_or_else(|i| i);

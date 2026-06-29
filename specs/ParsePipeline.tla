@@ -78,6 +78,17 @@ VARIABLES
     \* @type: Seq([desc: Str]);
     anomalies
 
+M == INSTANCE Model WITH
+    sysinfo <- sysinfo_out,
+    mod_va <- mod_va, mod_sz <- mod_sz,
+    mod_prov_sid <- mod_prov_sid, mod_prov_off <- mod_prov_off, mod_prov_rva <- mod_prov_rva,
+    thr_id <- thr_id, thr_stack_va <- thr_stack_va, thr_stack_sz <- thr_stack_sz,
+    thr_prov_sid <- thr_prov_sid, thr_prov_off <- thr_prov_off, thr_prov_rva <- thr_prov_rva,
+    mem_va <- mem_va, mem_sz <- mem_sz, mem_prot <- mem_prot,
+    mem_state <- mem_state, mem_type <- mem_type, mem_cls <- mem_cls,
+    mem_prov_sid <- mem_prov_sid, mem_prov_off <- mem_prov_off, mem_prov_rva <- mem_prov_rva,
+    exc_info <- exc_info, anomalies <- anomalies
+
 \* ---- Helpers ----
 
 StreamPresent(sid) == \E i \in 1..MaxStreams: i <= Len(raw_streams) /\ raw_streams[i] = sid
@@ -110,6 +121,7 @@ RegionProvOk  == \A i \in 1..MaxStreams: i <= Len(mem_prov_sid) => mem_prov_sid[
 ExcProvOk     == (Len(exc_info) = 7) => exc_info[5] > 0
 
 PipelineInvariant ==
+    /\ M!ModelInvariant
     /\ PhaseValid
     /\ FatalHasReason
     /\ AnomaliesBounded
@@ -301,33 +313,11 @@ Finish ==
 
 \* ---- Init ----
 Init ==
+    /\ M!Init
     /\ phase        = "Init"
     /\ fatal_error  = "NULL"
     /\ raw_streams  = <<>>
-    /\ sysinfo_out  = <<>>
-    /\ mod_va       = <<>>
-    /\ mod_sz       = <<>>
-    /\ mod_prov_sid = <<>>
-    /\ mod_prov_off = <<>>
-    /\ mod_prov_rva = <<>>
-    /\ thr_id       = <<>>
-    /\ thr_stack_va = <<>>
-    /\ thr_stack_sz = <<>>
-    /\ thr_prov_sid = <<>>
-    /\ thr_prov_off = <<>>
-    /\ thr_prov_rva = <<>>
-    /\ mem_va       = <<>>
-    /\ mem_sz       = <<>>
-    /\ mem_prot     = <<>>
-    /\ mem_state    = <<>>
-    /\ mem_type     = <<>>
-    /\ mem_cls      = <<>>
-    /\ mem_prov_sid = <<>>
-    /\ mem_prov_off = <<>>
-    /\ mem_prov_rva = <<>>
-    /\ exc_info     = <<>>
     /\ dump_built   = <<>>
-    /\ anomalies    = <<>>
 
 \* ---- Next (phases must proceed in order) ----
 Next ==

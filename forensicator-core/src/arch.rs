@@ -76,6 +76,71 @@ impl RegisterSet {
 
     /// The frame pointer (RBP).
     pub fn rbp(&self) -> u64 { self.get(x64_indices::RBP) }
+
+    /// Minimum bytes for a full x64 CONTEXT (through RIP at offset 0xF8).
+    pub const MIN_CONTEXT_SIZE: usize = 256;
+
+    /// Raw byte-offset → (register_index, size) mapping for the x64 CONTEXT layout.
+    /// Segment regs are u16, EFlags is u32, everything else is u64 (little-endian).
+    const CONTEXT_LAYOUT: &[(usize, usize, u8)] = &[
+        (0x38, 17, 2), (0x3A, 18, 2), (0x3C, 19, 2),
+        (0x3E, 20, 2), (0x40, 21, 2), (0x42, 22, 2),
+        (0x44, 23, 4),
+        (0x48, 24, 8), (0x50, 25, 8), (0x58, 26, 8),
+        (0x60, 27, 8), (0x68, 28, 8), (0x70, 29, 8),
+        (0x78,  0, 8), (0x80,  2, 8), (0x88,  3, 8),
+        (0x90,  1, 8), (0x98, 15, 8), (0xA0, 14, 8),
+        (0xA8,  4, 8), (0xB0,  5, 8), (0xB8,  6, 8),
+        (0xC0,  7, 8), (0xC8,  8, 8), (0xD0,  9, 8),
+        (0xD8, 10, 8), (0xE0, 11, 8), (0xE8, 12, 8),
+        (0xF0, 13, 8), (0xF8, 16, 8),
+    ];
+
+    fn read_le(data: &[u8], offset: usize, size: u8) -> Option<u64> {
+        let end = offset + size as usize;
+        if end > data.len() { return None; }
+        let mut v: u64 = 0;
+        for (i, &b) in data[offset..end].iter().enumerate() {
+            v |= (b as u64) << (i * 8);
+        }
+        Some(v)
+    }
+
+    /// Decode registers from an x64 CONTEXT byte stream (mirrors Arch.tla
+    /// `DecodeContextSuccess` / `DecodeContextTruncated`).
+    ///
+    /// Returns `Ok(regs)` when enough bytes are present for the full 32‑register
+    /// layout.  Returns `Err("truncated CONTEXT")` when the data is too short —
+    /// only the 16 GPRs (RAX‑R15) are decoded in that case.
+    pub fn decode_context(data: &[u8]) -> Result<Self, &'static str> {
+        let mut regs = RegisterSet::new();
+        // Always decode the 16 GPRs (RAX through R15) plus RBP/RSP/RIP.
+        // These span CONTEXT offsets 0x78 – 0xFF.
+        let gpr_entries: &[(usize, usize, u8)] = &[
+            (0x78,  0, 8), (0x80,  2, 8), (0x88,  3, 8), (0x90,  1, 8),
+            (0x98, 15, 8), (0xA0, 14, 8), (0xA8,  4, 8), (0xB0,  5, 8),
+            (0xB8,  6, 8), (0xC0,  7, 8), (0xC8,  8, 8), (0xD0,  9, 8),
+            (0xD8, 10, 8), (0xE0, 11, 8), (0xE8, 12, 8), (0xF0, 13, 8),
+            (0xF8, 16, 8),
+        ];
+        let truncated = data.len() < Self::MIN_CONTEXT_SIZE;
+        if truncated {
+            // Decode whatever GPRs the available bytes cover.
+            for &(off, idx, sz) in gpr_entries {
+                if let Some(val) = Self::read_le(data, off, sz) {
+                    regs.set(idx, val);
+                }
+            }
+            return Err("truncated CONTEXT");
+        }
+        // Full decode — all 32 register slots.
+        for &(off, idx, sz) in Self::CONTEXT_LAYOUT {
+            if let Some(val) = Self::read_le(data, off, sz) {
+                regs.set(idx, val);
+            }
+        }
+        Ok(regs)
+    }
 }
 
 impl Default for RegisterSet {
@@ -199,5 +264,59 @@ mod tests {
         assert_eq!(regs.get(x64_indices::RAX), 0xDEADBEEF);
         assert_eq!(regs.get(x64_indices::RBX), 0xCAFEBABE);
         assert_eq!(regs.get(x64_indices::RCX), 0);
+    }
+
+    #[test]
+    fn decode_context_full_parses_all_regs() {
+        let mut data = [0u8; 256];
+        // Write known values at RAX (offset 0x78) and RIP (offset 0xF8)
+        data[0x78..0x80].copy_from_slice(&0xDEADBEEF_CAFEBABEu64.to_le_bytes());
+        data[0xF8..0x100].copy_from_slice(&0x7FFA_1000u64.to_le_bytes());
+        let regs = RegisterSet::decode_context(&data).expect("full context should succeed");
+        assert_eq!(regs.get(x64_indices::RAX), 0xDEADBEEF_CAFEBABE);
+        assert_eq!(regs.get(x64_indices::RIP), 0x7FFA_1000);
+    }
+
+    #[test]
+    fn decode_context_truncated_returns_err() {
+        let data = [0u8; 16];
+        let result = RegisterSet::decode_context(&data);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "truncated CONTEXT");
+    }
+
+    #[test]
+    fn decode_context_truncated_still_parses_gprs() {
+        let mut data = [0u8; 200];
+        data[0x78..0x80].copy_from_slice(&0x1234567890ABCDEFu64.to_le_bytes());
+        assert!(RegisterSet::decode_context(&data).is_err());
+    }
+
+    #[test]
+    fn decode_context_segment_regs() {
+        let mut data = [0u8; 256];
+        data[0x3A..0x3C].copy_from_slice(&0x002Bu16.to_le_bytes()); // DS at 0x3A
+        data[0x3C..0x3E].copy_from_slice(&0x0033u16.to_le_bytes()); // ES at 0x3C
+        let regs = RegisterSet::decode_context(&data).expect("full context");
+        assert_eq!(regs.get(x64_indices::DS), 0x2B);
+        assert_eq!(regs.get(x64_indices::ES), 0x33);
+    }
+
+    #[test]
+    fn decode_context_rflags() {
+        let mut data = [0u8; 256];
+        data[0x44..0x48].copy_from_slice(&0x246u32.to_le_bytes());
+        let regs = RegisterSet::decode_context(&data).expect("full context");
+        assert_eq!(regs.get(x64_indices::RFLAGS), 0x246);
+    }
+
+    #[test]
+    fn decode_context_debug_regs() {
+        let mut data = [0u8; 256];
+        data[0x48..0x50].copy_from_slice(&0x7FFA0000u64.to_le_bytes()); // DR0
+        data[0x70..0x78].copy_from_slice(&0x400u64.to_le_bytes()); // DR7
+        let regs = RegisterSet::decode_context(&data).expect("full context");
+        assert_eq!(regs.get(x64_indices::DR0), 0x7FFA0000);
+        assert_eq!(regs.get(x64_indices::DR7), 0x400);
     }
 }

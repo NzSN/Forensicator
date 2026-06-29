@@ -1,9 +1,14 @@
 //! Model-Based Testing for Forensicator S1 using MirrorRust.
-//! Validates the Rust Dump model against the TLA+ Model.tla spec via trace replay.
+//! Validates the Rust Dump model (model.rs) against the TLA+ Model.tla spec via trace replay.
 //!
 //! Requires ModelMirros binary. Set MIRROR_BIN env var to run.
-//!   e.g. MIRROR_BIN=/path/to/ModelMirros cargo test --test mbt_model -- --nocapture
+//! Requires apalache. Set APALACHE_MC env var. Use wrapper with --features=no-rows.
+//!   e.g. MIRROR_BIN=D:\Tools\ModelMirrors.exe APALACHE_MC=...\wrapper.bat cargo test --test mbt_model -- --nocapture
 
+use forensicator_core::error::Provenance;
+use forensicator_core::model::{
+    CpuArch, Dump, MemState, MemType, OsPlatform, Protection, RegionClass,
+};
 use mirrorrust::{
     as_int, as_str, get_param, run_client, ApalacheConfig, State, StateComputer,
     TraceGenerationConfig, Value,
@@ -19,85 +24,146 @@ fn seq_to_value(seq: &[i64]) -> Value {
     Value::Set(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
 }
 
-/// State computer mirroring Model.tla's state machine.
-struct ModelComputer {
-    sysinfo: Vec<i64>,
-    mod_va: Vec<i64>,
-    mod_sz: Vec<i64>,
-    mod_prov_sid: Vec<i64>,
-    mod_prov_off: Vec<i64>,
-    mod_prov_rva: Vec<i64>,
-    thr_id: Vec<i64>,
-    thr_stack_va: Vec<i64>,
-    thr_stack_sz: Vec<i64>,
-    thr_prov_sid: Vec<i64>,
-    thr_prov_off: Vec<i64>,
-    thr_prov_rva: Vec<i64>,
-    mem_va: Vec<i64>,
-    mem_sz: Vec<i64>,
-    mem_prot: Vec<i64>,
-    mem_state: Vec<i64>,
-    mem_type: Vec<i64>,
-    mem_cls: Vec<i64>,
-    mem_prov_sid: Vec<i64>,
-    mem_prov_off: Vec<i64>,
-    mem_prov_rva: Vec<i64>,
-    exc_info: Vec<i64>,
-    anomalies: Vec<String>,
+fn anomalies_to_value(dump: &Dump) -> Value {
+    Value::Set(
+        dump.anomalies
+            .iter()
+            .map(|a| {
+                Value::Record(
+                    vec![("desc".to_string(), Value::Str(a.description.clone()))]
+                        .into_iter()
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
 }
 
-const MAX_MODULES: usize = 2;
-const MAX_THREADS: usize = 2;
-const MAX_REGIONS: usize = 2;
-const MAX_ANOMALIES: usize = 4;
+/// Mirrors the TLA+ `State` produced by Model.tla.
+struct ModelComputer {
+    dump: Dump,
+}
 
 impl ModelComputer {
     fn new() -> Self {
         ModelComputer {
-            sysinfo: vec![],
-            mod_va: vec![], mod_sz: vec![],
-            mod_prov_sid: vec![], mod_prov_off: vec![], mod_prov_rva: vec![],
-            thr_id: vec![], thr_stack_va: vec![], thr_stack_sz: vec![],
-            thr_prov_sid: vec![], thr_prov_off: vec![], thr_prov_rva: vec![],
-            mem_va: vec![], mem_sz: vec![], mem_prot: vec![],
-            mem_state: vec![], mem_type: vec![], mem_cls: vec![],
-            mem_prov_sid: vec![], mem_prov_off: vec![], mem_prov_rva: vec![],
-            exc_info: vec![],
-            anomalies: vec![],
+            dump: Dump {
+                system_info: None,
+                modules: vec![],
+                threads: vec![],
+                memory_regions: vec![],
+                exception: None,
+                anomalies: vec![],
+                file_size: 0,
+            },
         }
     }
 
     fn to_state(&self) -> State {
+        let sysinfo: Vec<i64> = self
+            .dump
+            .system_info
+            .as_ref()
+            .map(|si| {
+                vec![
+                    si.os as i64,
+                    si.cpu as i64,
+                    si.version.0 as i64,
+                    si.version.1 as i64,
+                    si.version.2 as i64,
+                    si.version.3 as i64,
+                    si.provenance.stream_type as i64,
+                    si.provenance.file_offset as i64,
+                    si.provenance.rva as i64,
+                ]
+            })
+            .unwrap_or_default();
+
+        let mod_va: Vec<i64> = self.dump.modules.iter().map(|m| m.base_va as i64).collect();
+        let mod_sz: Vec<i64> = self.dump.modules.iter().map(|m| m.size as i64).collect();
+        let mod_prov_sid: Vec<i64> =
+            self.dump.modules.iter().map(|m| m.provenance.stream_type as i64).collect();
+        let mod_prov_off: Vec<i64> =
+            self.dump.modules.iter().map(|m| m.provenance.file_offset as i64).collect();
+        let mod_prov_rva: Vec<i64> =
+            self.dump.modules.iter().map(|m| m.provenance.rva as i64).collect();
+
+        let thr_id: Vec<i64> = self.dump.threads.iter().map(|t| t.id as i64).collect();
+        let thr_stack_va: Vec<i64> =
+            self.dump.threads.iter().map(|t| t.stack_va as i64).collect();
+        let thr_stack_sz: Vec<i64> =
+            self.dump.threads.iter().map(|t| t.stack_size as i64).collect();
+        let thr_prov_sid: Vec<i64> =
+            self.dump.threads.iter().map(|t| t.provenance.stream_type as i64).collect();
+        let thr_prov_off: Vec<i64> =
+            self.dump.threads.iter().map(|t| t.provenance.file_offset as i64).collect();
+        let thr_prov_rva: Vec<i64> =
+            self.dump.threads.iter().map(|t| t.provenance.rva as i64).collect();
+
+        let mem_va: Vec<i64> =
+            self.dump.memory_regions.iter().map(|mr| mr.va_start as i64).collect();
+        let mem_sz: Vec<i64> =
+            self.dump.memory_regions.iter().map(|mr| mr.size as i64).collect();
+        let mem_prot: Vec<i64> =
+            self.dump.memory_regions.iter().map(|mr| mr.protection.bits() as i64).collect();
+        let mem_state: Vec<i64> =
+            self.dump.memory_regions.iter().map(|mr| mr.state as i64).collect();
+        let mem_type: Vec<i64> =
+            self.dump.memory_regions.iter().map(|mr| mr.mem_type as i64).collect();
+        let mem_cls: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.region_class.map(|rc| rc as i64).unwrap_or(0))
+            .collect();
+        let mem_prov_sid: Vec<i64> =
+            self.dump.memory_regions.iter().map(|mr| mr.provenance.stream_type as i64).collect();
+        let mem_prov_off: Vec<i64> =
+            self.dump.memory_regions.iter().map(|mr| mr.provenance.file_offset as i64).collect();
+        let mem_prov_rva: Vec<i64> =
+            self.dump.memory_regions.iter().map(|mr| mr.provenance.rva as i64).collect();
+
+        let exc_info: Vec<i64> = self
+            .dump
+            .exception
+            .as_ref()
+            .map(|exc| {
+                vec![
+                    exc.code as i64,
+                    exc.address as i64,
+                    exc.thread_id as i64,
+                    exc.flags as i64,
+                    exc.provenance.stream_type as i64,
+                    exc.provenance.file_offset as i64,
+                    exc.provenance.rva as i64,
+                ]
+            })
+            .unwrap_or_default();
+
         st(vec![
-            ("sysinfo", seq_to_value(&self.sysinfo)),
-            ("mod_va", seq_to_value(&self.mod_va)),
-            ("mod_sz", seq_to_value(&self.mod_sz)),
-            ("mod_prov_sid", seq_to_value(&self.mod_prov_sid)),
-            ("mod_prov_off", seq_to_value(&self.mod_prov_off)),
-            ("mod_prov_rva", seq_to_value(&self.mod_prov_rva)),
-            ("thr_id", seq_to_value(&self.thr_id)),
-            ("thr_stack_va", seq_to_value(&self.thr_stack_va)),
-            ("thr_stack_sz", seq_to_value(&self.thr_stack_sz)),
-            ("thr_prov_sid", seq_to_value(&self.thr_prov_sid)),
-            ("thr_prov_off", seq_to_value(&self.thr_prov_off)),
-            ("thr_prov_rva", seq_to_value(&self.thr_prov_rva)),
-            ("mem_va", seq_to_value(&self.mem_va)),
-            ("mem_sz", seq_to_value(&self.mem_sz)),
-            ("mem_prot", seq_to_value(&self.mem_prot)),
-            ("mem_state", seq_to_value(&self.mem_state)),
-            ("mem_type", seq_to_value(&self.mem_type)),
-            ("mem_cls", seq_to_value(&self.mem_cls)),
-            ("mem_prov_sid", seq_to_value(&self.mem_prov_sid)),
-            ("mem_prov_off", seq_to_value(&self.mem_prov_off)),
-            ("mem_prov_rva", seq_to_value(&self.mem_prov_rva)),
-            ("exc_info", seq_to_value(&self.exc_info)),
-            ("anomalies", Value::Set(
-                self.anomalies.iter().map(|s| {
-                    Value::Record(
-                        vec![("desc".to_string(), Value::Str(s.clone()))].into_iter().collect()
-                    )
-                }).collect()
-            )),
+            ("sysinfo", seq_to_value(&sysinfo)),
+            ("mod_va", seq_to_value(&mod_va)),
+            ("mod_sz", seq_to_value(&mod_sz)),
+            ("mod_prov_sid", seq_to_value(&mod_prov_sid)),
+            ("mod_prov_off", seq_to_value(&mod_prov_off)),
+            ("mod_prov_rva", seq_to_value(&mod_prov_rva)),
+            ("thr_id", seq_to_value(&thr_id)),
+            ("thr_stack_va", seq_to_value(&thr_stack_va)),
+            ("thr_stack_sz", seq_to_value(&thr_stack_sz)),
+            ("thr_prov_sid", seq_to_value(&thr_prov_sid)),
+            ("thr_prov_off", seq_to_value(&thr_prov_off)),
+            ("thr_prov_rva", seq_to_value(&thr_prov_rva)),
+            ("mem_va", seq_to_value(&mem_va)),
+            ("mem_sz", seq_to_value(&mem_sz)),
+            ("mem_prot", seq_to_value(&mem_prot)),
+            ("mem_state", seq_to_value(&mem_state)),
+            ("mem_type", seq_to_value(&mem_type)),
+            ("mem_cls", seq_to_value(&mem_cls)),
+            ("mem_prov_sid", seq_to_value(&mem_prov_sid)),
+            ("mem_prov_off", seq_to_value(&mem_prov_off)),
+            ("mem_prov_rva", seq_to_value(&mem_prov_rva)),
+            ("exc_info", seq_to_value(&exc_info)),
+            ("anomalies", anomalies_to_value(&self.dump)),
         ])
     }
 
@@ -105,21 +171,42 @@ impl ModelComputer {
         get_param(params, "parameters")
             .and_then(|p| p.get(key))
             .and_then(as_int)
-            .and_then(|n| {
-                n.to_i64()
-            })
+            .and_then(|n| n.to_i64())
             .unwrap_or(0)
     }
+}
 
-    fn has_module_overlap(&self, va: i64, sz: i64) -> bool {
-        for i in 0..self.mod_va.len() {
-            let mva = self.mod_va[i];
-            let msz = self.mod_sz[i];
-            if mva < va + sz && va < mva + msz {
-                return true;
-            }
-        }
-        false
+fn os_from_i64(v: i64) -> OsPlatform {
+    match v {
+        1 => OsPlatform::Linux,
+        2 => OsPlatform::MacOs,
+        _ => OsPlatform::Windows,
+    }
+}
+
+fn mem_state_from_i64(v: i64) -> MemState {
+    match v {
+        1 => MemState::Reserve,
+        2 => MemState::Free,
+        _ => MemState::Commit,
+    }
+}
+
+fn mem_type_from_i64(v: i64) -> MemType {
+    match v {
+        1 => MemType::Mapped,
+        2 => MemType::Image,
+        _ => MemType::Private,
+    }
+}
+
+fn region_class_from_i64(v: i64) -> RegionClass {
+    match v {
+        1 => RegionClass::Stack,
+        2 => RegionClass::Mapped,
+        3 => RegionClass::Private,
+        4 => RegionClass::Other,
+        _ => RegionClass::Image,
     }
 }
 
@@ -130,18 +217,20 @@ impl StateComputer for ModelComputer {
                 *self = ModelComputer::new();
             }
             "SetSysInfo" => {
-                if self.sysinfo.is_empty() {
-                    let os = Self::get_int_param(params, "os");
-                    let cpu = 1i64; // x64 only
-                    let maj = Self::get_int_param(params, "maj");
-                    let min = Self::get_int_param(params, "min");
-                    let bld = Self::get_int_param(params, "bld");
-                    let rev = Self::get_int_param(params, "rev");
-                    let sid = Self::get_int_param(params, "sid");
-                    let off = Self::get_int_param(params, "off");
-                    let rva = Self::get_int_param(params, "rva");
-                    self.sysinfo = vec![os, cpu, maj, min, bld, rev, sid, off, rva];
-                }
+                let os = Self::get_int_param(params, "os");
+                let maj = Self::get_int_param(params, "maj");
+                let min = Self::get_int_param(params, "min");
+                let bld = Self::get_int_param(params, "bld");
+                let rev = Self::get_int_param(params, "rev");
+                let sid = Self::get_int_param(params, "sid");
+                let off = Self::get_int_param(params, "off");
+                let rva = Self::get_int_param(params, "rva");
+                self.dump.set_sys_info(
+                    os_from_i64(os),
+                    CpuArch::X64,
+                    (maj as u32, min as u32, bld as u32, rev as u32),
+                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                );
             }
             "AddModule" => {
                 let va = Self::get_int_param(params, "va");
@@ -149,17 +238,11 @@ impl StateComputer for ModelComputer {
                 let sid = Self::get_int_param(params, "sid");
                 let off = Self::get_int_param(params, "off");
                 let rva = Self::get_int_param(params, "rva");
-                if self.mod_va.len() < MAX_MODULES && sz > 0 && sid > 0 {
-                    if !self.has_module_overlap(va, sz) {
-                        self.mod_va.push(va);
-                        self.mod_sz.push(sz);
-                        self.mod_prov_sid.push(sid);
-                        self.mod_prov_off.push(off);
-                        self.mod_prov_rva.push(rva);
-                    } else if self.anomalies.len() < MAX_ANOMALIES {
-                        self.anomalies.push("overlapping module".to_string());
-                    }
-                }
+                self.dump.add_module(
+                    va as u64,
+                    sz as u64,
+                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                );
             }
             "AddThread" => {
                 let id = Self::get_int_param(params, "id");
@@ -168,14 +251,12 @@ impl StateComputer for ModelComputer {
                 let sid = Self::get_int_param(params, "sid");
                 let off = Self::get_int_param(params, "off");
                 let rva = Self::get_int_param(params, "rva");
-                if self.thr_id.len() < MAX_THREADS && ssz > 0 && sid > 0 {
-                    self.thr_id.push(id);
-                    self.thr_stack_va.push(sva);
-                    self.thr_stack_sz.push(ssz);
-                    self.thr_prov_sid.push(sid);
-                    self.thr_prov_off.push(off);
-                    self.thr_prov_rva.push(rva);
-                }
+                self.dump.add_thread(
+                    id as u32,
+                    sva as u64,
+                    ssz as u64,
+                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                );
             }
             "AddRegion" => {
                 let va = Self::get_int_param(params, "va");
@@ -187,40 +268,38 @@ impl StateComputer for ModelComputer {
                 let sid = Self::get_int_param(params, "sid");
                 let off = Self::get_int_param(params, "off");
                 let rva = Self::get_int_param(params, "rva");
-                if self.mem_va.len() < MAX_REGIONS && sz > 0 && sid > 0
-                    && (0..=4).contains(&cls) && (0..=2).contains(&state) && prot <= 7
-                {
-                    self.mem_va.push(va);
-                    self.mem_sz.push(sz);
-                    self.mem_prot.push(prot);
-                    self.mem_state.push(state);
-                    self.mem_type.push(typ);
-                    self.mem_cls.push(cls);
-                    self.mem_prov_sid.push(sid);
-                    self.mem_prov_off.push(off);
-                    self.mem_prov_rva.push(rva);
-                }
+                self.dump.add_region(
+                    va as u64,
+                    sz as u64,
+                    Protection::new(prot as u32),
+                    mem_state_from_i64(state),
+                    mem_type_from_i64(typ),
+                    region_class_from_i64(cls),
+                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                );
             }
             "SetException" => {
-                if self.exc_info.is_empty() {
-                    let code = Self::get_int_param(params, "code");
-                    let addr = Self::get_int_param(params, "addr");
-                    let tid = Self::get_int_param(params, "tid");
-                    let flg = Self::get_int_param(params, "flg");
-                    let sid = Self::get_int_param(params, "sid");
-                    let off = Self::get_int_param(params, "off");
-                    let rva = Self::get_int_param(params, "rva");
-                    if sid > 0 {
-                        self.exc_info = vec![code, addr, tid, flg, sid, off, rva];
-                    }
-                }
+                let code = Self::get_int_param(params, "code");
+                let addr = Self::get_int_param(params, "addr");
+                let tid = Self::get_int_param(params, "tid");
+                let flg = Self::get_int_param(params, "flg");
+                let sid = Self::get_int_param(params, "sid");
+                let off = Self::get_int_param(params, "off");
+                let rva = Self::get_int_param(params, "rva");
+                self.dump.set_exception(
+                    code as u32,
+                    addr as u64,
+                    tid as u32,
+                    flg as u32,
+                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                );
             }
             "AddAnomaly" => {
                 if let Some(desc) = get_param(params, "parameters")
                     .and_then(|p| p.get("desc"))
                     .and_then(as_str)
                 {
-                    self.anomalies.push(desc.to_string());
+                    self.dump.add_anomaly(desc);
                 }
             }
             _ => {}
@@ -244,7 +323,10 @@ fn apalache_config() -> ApalacheConfig {
 }
 
 fn trace_config() -> TraceGenerationConfig {
-    TraceGenerationConfig { num_traces: 100, view: Some("View".into()) }
+    TraceGenerationConfig {
+        num_traces: 100,
+        view: Some("View".into()),
+    }
 }
 
 #[test]

@@ -39,22 +39,23 @@ ArchInvariant ==
 
 \* ---- Operations ----
 
-\* decode_context: populate register file from raw bytes, or fail with anomaly
-\* decode_context: populate register file from raw bytes, or fail with anomaly
-DecodeContext ==
+DecodeContextSuccess ==
     /\ Len(regs) = 0
-    /\ \/ /\ regs' = <<0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-                        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0>>
-          /\ anomalies' = anomalies
-       \/ /\ regs' = <<0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0>>
-          /\ Len(anomalies) < 4
-          /\ anomalies' = Append(anomalies, [desc |-> "truncated CONTEXT"])
+    /\ regs' = <<0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0>>
+    /\ anomalies' = anomalies
+
+DecodeContextTruncated ==
+    /\ Len(regs) = 0
+    /\ regs' = <<0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0>>
+    /\ Len(anomalies) < 4
+    /\ anomalies' = Append(anomalies, [desc |-> "truncated CONTEXT"])
+
+Next == DecodeContextSuccess \/ DecodeContextTruncated
 
 Init ==
     /\ regs      = <<>>
     /\ anomalies = <<>>
-
-Next == DecodeContext
 
 Spec == Init /\ [][Next]_<<regs, anomalies>>
 
