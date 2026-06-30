@@ -1,4 +1,4 @@
----- MODULE Root ----
+---- MODULE Forensicator ----
 EXTENDS Integers, Sequences, FiniteSets
 
 VARIABLES
