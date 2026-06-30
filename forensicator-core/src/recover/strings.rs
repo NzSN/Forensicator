@@ -7,11 +7,12 @@ pub struct StringDetector {
     pub min_len: usize,
     pub max_len: usize,
     pub max_nonprintable_ratio: f64,
+    pub max_scan_per_region: usize,
 }
 
 impl Default for StringDetector {
     fn default() -> Self {
-        StringDetector { min_len: 4, max_len: 65536, max_nonprintable_ratio: 0.2 }
+        StringDetector { min_len: 4, max_len: 1024, max_nonprintable_ratio: 0.2, max_scan_per_region: 4096 }
     }
 }
 
@@ -25,8 +26,9 @@ impl StructureDetector for StringDetector {
                 continue;
             }
             let data = &region.data;
+            let scan_len = data.len().min(self.max_scan_per_region);
             let mut i = 0usize;
-            while i < data.len() {
+            while i < scan_len {
                 if let Some(s) = self.try_ascii(data, region.va_start, i) {
                     let blen = s.byte_len;
                     if blen >= self.min_len {

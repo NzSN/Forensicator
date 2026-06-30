@@ -78,6 +78,16 @@ struct PipelineComputer {
     p_mem_va: Vec<i64>,
     p_mem_sz: Vec<i64>,
     p_mem_cls: Vec<i64>,
+    /// S3 recover outputs
+    r_vtable_va: Vec<i64>,
+    r_vtable_cnt: Vec<i64>,
+    r_list_head: Vec<i64>,
+    r_list_len: Vec<i64>,
+    r_str_va: Vec<i64>,
+    r_str_enc: Vec<i64>,
+    r_arr_start: Vec<i64>,
+    r_arr_esz: Vec<i64>,
+    r_arr_cnt: Vec<i64>,
 }
 
 impl PipelineComputer {
@@ -94,6 +104,15 @@ impl PipelineComputer {
             p_mem_va: vec![],
             p_mem_sz: vec![],
             p_mem_cls: vec![],
+            r_vtable_va: vec![],
+            r_vtable_cnt: vec![],
+            r_list_head: vec![],
+            r_list_len: vec![],
+            r_str_va: vec![],
+            r_str_enc: vec![],
+            r_arr_start: vec![],
+            r_arr_esz: vec![],
+            r_arr_cnt: vec![],
         }
     }
 
@@ -129,6 +148,15 @@ impl PipelineComputer {
             ("p_mod_sz", seq_to_value(&[])),
             ("p_exc_info", seq_to_value(&[])),
             ("p_anomalies", seq_to_value(&[])),
+            ("r_vtable_va", seq_to_value(&self.r_vtable_va)),
+            ("r_vtable_cnt", seq_to_value(&self.r_vtable_cnt)),
+            ("r_list_head", seq_to_value(&self.r_list_head)),
+            ("r_list_len", seq_to_value(&self.r_list_len)),
+            ("r_str_va", seq_to_value(&self.r_str_va)),
+            ("r_str_enc", seq_to_value(&self.r_str_enc)),
+            ("r_arr_start", seq_to_value(&self.r_arr_start)),
+            ("r_arr_esz", seq_to_value(&self.r_arr_esz)),
+            ("r_arr_cnt", seq_to_value(&self.r_arr_cnt)),
         ])
     }
 
@@ -200,6 +228,30 @@ impl StateComputer for PipelineComputer {
             "GraphDone" => {
                 self.phase = "Done".into();
             }
+            "AddVTable" => {
+                let va = Self::get_int_param(params, "va");
+                let conf = Self::get_int_param(params, "conf");
+                self.r_vtable_va.push(va);
+                self.r_vtable_cnt.push(conf);
+            }
+            "AddList" => {
+                let va = Self::get_int_param(params, "va");
+                self.r_list_head.push(va);
+                self.r_list_len.push(Self::get_int_param(params, "conf"));
+            }
+            "AddString" => {
+                let va = Self::get_int_param(params, "va");
+                self.r_str_va.push(va);
+                self.r_str_enc.push(0);
+            }
+            "AddArray" => {
+                let va = Self::get_int_param(params, "va");
+                let sz = Self::get_int_param(params, "sz");
+                self.r_arr_start.push(va);
+                self.r_arr_esz.push(sz);
+                self.r_arr_cnt.push(3);
+            }
+            "RecoverDone" => {}
             _ => {}
         }
         self.to_state()

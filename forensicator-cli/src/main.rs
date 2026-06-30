@@ -271,6 +271,21 @@ fn cmd_recover(
     } else {
         println!("Structure recovery results:");
         if run_all || strings { println!("  Strings: {}", catalog.strings.len()); }
+        if strings && !run_all {
+            let path = format!("{path}.strings");
+            let mut out = String::new();
+            for s in &catalog.strings {
+                let enc = match s.encoding {
+                    forensicator_core::model::StringEncoding::Ascii => "ASCII",
+                    forensicator_core::model::StringEncoding::Utf16Le => "UTF16",
+                    forensicator_core::model::StringEncoding::Utf16Be => "BE",
+                };
+                use std::fmt::Write;
+                let _ = writeln!(out, "0x{:016X} [{enc}] c{:.2} {}", s.va, s.confidence, s.content);
+            }
+            std::fs::write(&path, out.as_bytes())?;
+            println!("  -> written {} strings to {path}", catalog.strings.len());
+        }
         if run_all || vtables { println!("  VTables: {}", catalog.vtables.len()); }
         if run_all || lists { println!("  Linked lists: {}", catalog.linked_lists.len()); }
         if run_all || arrays { println!("  Arrays: {}", catalog.arrays.len()); }

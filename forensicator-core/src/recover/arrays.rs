@@ -26,7 +26,7 @@ impl StructureDetector for ArrayDetector {
             let mut j = i + 2;
             while j < indices.len() {
                 let cur = &graph.nodes[indices[j]];
-                if cur.va != *elements.last().unwrap() + stride { break; }
+                if cur.va != elements.last().unwrap().wrapping_add(stride) { break; }
                 if cur.out_degree != a.out_degree || cur.region_class != a.region_class { break; }
                 elements.push(cur.va);
                 j += 1;
