@@ -27,6 +27,8 @@ Rust workspace (edition 2024) for forensic analysis of Windows x64 minidumps. Cu
 5. **Query** — `GraphQuery` provides BFS reachability, path-to-root, DOT/JSON export, degree/confidence distributions
 6. **Recover** — 6 trait-based detectors: StringDetector, VTableDetector, ListDetector, ArrayDetector, ChunkDetector, ShapeClusterer → unified `StructureCatalog`
 
+**`pipeline` module** — global workflow orchestrator (`Forensicator` struct) mirroring `specs/Forensicator.tla`. Composes all stages into `open()` → `s2()` → `s3()` → `run_full()`.
+
 ## Key conventions
 
 - **No external parse crate** — minidump parser is hand-written in `forensicator-core/src/parse/`
@@ -55,7 +57,7 @@ forensicator recover <dump.dmp>        # structure recovery (--strings, --vtable
 
 `specs/` contains TLA+ specs (AddressSpace, Arch, Model, etc.) with corresponding `forensicator-core/tests/mbt_*.rs` integration tests via `mirrorrust`. MBT tests are **opt-in** (require `MIRROR_BIN` + `APALACHE_MC` env vars). State traces in `states/` are TLA+ model-checking output, excluded from git.
 
-MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`. Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
+MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`. Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
 
 ## Development approach
 

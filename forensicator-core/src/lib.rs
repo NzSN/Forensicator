@@ -1,5 +1,5 @@
-//! Forensicator core library — S1 foundation.
-//! Parses Windows x64 minidumps into a typed `Dump` with provenance.
+//! Forensicator core library — S1→S2→S3 pipeline.
+//! Parses Windows x64 minidumps, builds pointer graphs, recovers structures.
 
 pub mod error;
 pub mod arch;
@@ -11,3 +11,4 @@ pub mod scan;
 pub mod graph;
 pub mod query;
 pub mod recover;
+pub mod pipeline;
