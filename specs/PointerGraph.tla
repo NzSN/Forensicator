@@ -93,6 +93,9 @@ Next ==
     \/ \E n \in 1..MaxNodes:
          MarkRoot(n)
 
-Spec == Init /\ [][Next]_<<node_va, node_cls, node_root, edge_from, edge_to, edge_conf>>
+\* @type: <<Seq(Int), Seq(Int), Seq(Int), Seq(Int), Seq(Int), Seq(Int)>>;
+Vars == <<node_va, node_cls, node_root, edge_from, edge_to, edge_conf>>
+
+Spec == Init /\ [][Next]_Vars
 
 ====

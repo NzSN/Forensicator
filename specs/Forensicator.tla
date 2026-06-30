@@ -7,52 +7,6 @@ VARIABLES
     \* @type: Seq([desc: Str]);
     a_anomalies,
     \* @type: Seq(Int);
-    m_sysinfo,
-    \* @type: Seq(Int);
-    m_mod_va,
-    \* @type: Seq(Int);
-    m_mod_sz,
-    \* @type: Seq(Int);
-    m_mod_prov_sid,
-    \* @type: Seq(Int);
-    m_mod_prov_off,
-    \* @type: Seq(Int);
-    m_mod_prov_rva,
-    \* @type: Seq(Int);
-    m_thr_id,
-    \* @type: Seq(Int);
-    m_thr_stack_va,
-    \* @type: Seq(Int);
-    m_thr_stack_sz,
-    \* @type: Seq(Int);
-    m_thr_prov_sid,
-    \* @type: Seq(Int);
-    m_thr_prov_off,
-    \* @type: Seq(Int);
-    m_thr_prov_rva,
-    \* @type: Seq(Int);
-    m_mem_va,
-    \* @type: Seq(Int);
-    m_mem_sz,
-    \* @type: Seq(Int);
-    m_mem_prot,
-    \* @type: Seq(Int);
-    m_mem_state,
-    \* @type: Seq(Int);
-    m_mem_type,
-    \* @type: Seq(Int);
-    m_mem_cls,
-    \* @type: Seq(Int);
-    m_mem_prov_sid,
-    \* @type: Seq(Int);
-    m_mem_prov_off,
-    \* @type: Seq(Int);
-    m_mem_prov_rva,
-    \* @type: Seq(Int);
-    m_exc_info,
-    \* @type: Seq([desc: Str]);
-    m_anomalies,
-    \* @type: Seq(Int);
     s_reg_va,
     \* @type: Seq(Int);
     s_reg_sz,
@@ -113,7 +67,25 @@ VARIABLES
     \* @type: Seq(Int);
     p_dump_built,
     \* @type: Seq([desc: Str]);
-    p_anomalies
+    p_anomalies,
+    \* @type: Seq(Int);
+    g_node_va,
+    \* @type: Seq(Int);
+    g_node_cls,
+    \* @type: Seq(Int);
+    g_node_root,
+    \* @type: Seq(Int);
+    g_edge_from,
+    \* @type: Seq(Int);
+    g_edge_to,
+    \* @type: Seq(Int);
+    g_edge_conf,
+    \* @type: Str;
+    g_phase
+
+G == INSTANCE PointerGraph WITH
+    node_va <- g_node_va, node_cls <- g_node_cls, node_root <- g_node_root,
+    edge_from <- g_edge_from, edge_to <- g_edge_to, edge_conf <- g_edge_conf
 
 A == INSTANCE Arch WITH regs <- a_regs, anomalies <- a_anomalies
 S == INSTANCE AddressSpace WITH reg_va <- s_reg_va, reg_sz <- s_reg_sz, reg_cl <- s_reg_cl, anomalies <- s_anomalies, MaxAddr <- 256
@@ -141,38 +113,112 @@ ClassToStr(cls) ==
       [] OTHER  -> "Other"
 
 \* ---- Address Space construction from parsed dump ----
-\* Transfers memory regions from ParsePipeline's output (p_mem_*) to
-\* AddressSpace's region variables (s_reg_*) after the dump is built.
+\* Adds memory regions one at a time from ParsePipeline output (p_mem_*)
+\* into AddressSpace (s_reg_*) via S!AddRegion. Once all are transferred,
+\* sets p_phase to "Done".
 
 BuildAddressSpace ==
-    /\ p_phase = "Built"
-    /\ LET n == Len(p_mem_va)
-        no_overlap == \A i \in 1..n:
-                        \A j \in 1..n:
-                          (i # j) => ~(p_mem_va[i] < p_mem_va[j] + p_mem_sz[j] /\ p_mem_va[j] < p_mem_va[i] + p_mem_sz[i])
-    IN  /\ s_reg_va' = p_mem_va
-        /\ s_reg_sz' = p_mem_sz
-        /\ s_reg_cl' = [i \in 1..n |-> ClassToStr(p_mem_cls[i])]
-        /\ IF no_overlap
-           THEN /\ s_anomalies' = <<>>
-           ELSE /\ s_anomalies' = <<[desc |-> "overlapping memory regions"]>>
-        /\ p_phase' = "Done"
-        /\ UNCHANGED <<a_regs, a_anomalies,
-                       p_fatal_error, p_raw_streams, p_sysinfo_out,
-                       p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva,
-                       p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva,
-                       p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls,
-                       p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva,
-                       p_exc_info, p_dump_built, p_anomalies>>
+    \/ /\ p_phase = "Built"
+       /\ Len(s_reg_va) < Len(p_mem_va)
+       /\ LET i == Len(s_reg_va) + 1
+           IN S!AddRegion(p_mem_va[i], p_mem_sz[i], ClassToStr(p_mem_cls[i]))
+       /\ UNCHANGED <<p_phase,
+                      a_regs, a_anomalies,
+                      p_fatal_error, p_raw_streams, p_sysinfo_out,
+                      p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva,
+                      p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva,
+                      p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls,
+                      p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva,
+                      p_exc_info, p_dump_built, p_anomalies,
+                      g_node_va, g_node_cls, g_node_root, g_edge_from, g_edge_to, g_edge_conf,
+                      g_phase>>
+    \/ /\ p_phase = "Built"
+       /\ Len(s_reg_va) = Len(p_mem_va)
+       /\ p_phase' = "Done"
+       /\ UNCHANGED <<s_reg_va, s_reg_sz, s_reg_cl, s_anomalies,
+                      a_regs, a_anomalies,
+                      p_fatal_error, p_raw_streams, p_sysinfo_out,
+                      p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva,
+                      p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva,
+                      p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls,
+                      p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva,
+                      p_exc_info, p_dump_built, p_anomalies,
+                       g_node_va, g_node_cls, g_node_root, g_edge_from, g_edge_to, g_edge_conf,
+                      g_phase>>
 
-Init == A!Init /\ S!Init /\ P!Init
+\* ---- Pointer Graph construction from parsed dump ----
+\* Transfers nodes from model (p_mem_*) into the pointer graph one at a
+\* time via G!AddNode, then non-deterministically adds edges between nodes
+\* via G!AddEdge, then finalizes by marking g_phase = "Done".
 
-Next == \/ A!Next /\ UNCHANGED <<s_reg_va, s_reg_sz, s_reg_cl, s_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies>>
-        \/ S!Next /\ UNCHANGED <<a_regs, a_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies>>
-        \/ P!Next /\ UNCHANGED <<a_regs, a_anomalies, s_reg_va, s_reg_sz, s_reg_cl, s_anomalies>>
+BuildPointerGraph ==
+    \/ /\ p_phase = "Done"
+       /\ g_phase = "Idle"
+       /\ Len(g_node_va) < Len(p_mem_va)
+       /\ LET i == Len(g_node_va) + 1
+           IN G!AddNode(p_mem_va[i], p_mem_cls[i], 0)
+       /\ UNCHANGED <<g_phase,
+                      a_regs, a_anomalies,
+                      s_reg_va, s_reg_sz, s_reg_cl, s_anomalies,
+                      p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out,
+                      p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva,
+                      p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva,
+                      p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls,
+                      p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva,
+                      p_exc_info, p_dump_built, p_anomalies>>
+    \/ /\ p_phase = "Done"
+       /\ g_phase = "Idle"
+       /\ Len(g_node_va) = Len(p_mem_va)
+       /\ g_phase' = "Edges"
+       /\ UNCHANGED <<g_node_va, g_node_cls, g_node_root, g_edge_from, g_edge_to, g_edge_conf,
+                      a_regs, a_anomalies,
+                      s_reg_va, s_reg_sz, s_reg_cl, s_anomalies,
+                      p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out,
+                      p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva,
+                      p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva,
+                      p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls,
+                      p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva,
+                      p_exc_info, p_dump_built, p_anomalies>>
+    \/ /\ p_phase = "Done"
+       /\ g_phase = "Edges"
+       /\ Len(g_node_va) = Len(p_mem_va) /\ Len(g_node_va) > 0
+        /\ Len(g_edge_from) < G!MaxEdges
+       /\ \E src \in 1..Len(g_node_va):
+          \E tgt \in 1..Len(g_node_va):
+          \E conf \in 0..10:
+            G!AddEdge(src, tgt, conf)
+       /\ UNCHANGED <<g_phase,
+                      a_regs, a_anomalies,
+                      s_reg_va, s_reg_sz, s_reg_cl, s_anomalies,
+                      p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out,
+                      p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva,
+                      p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva,
+                      p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls,
+                      p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva,
+                      p_exc_info, p_dump_built, p_anomalies>>
+    \/ /\ p_phase = "Done"
+       /\ g_phase = "Edges"
+       /\ g_phase' = "Done"
+       /\ UNCHANGED <<g_node_va, g_node_cls, g_node_root, g_edge_from, g_edge_to, g_edge_conf,
+                      a_regs, a_anomalies,
+                      s_reg_va, s_reg_sz, s_reg_cl, s_anomalies,
+                      p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out,
+                      p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva,
+                      p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva,
+                      p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls,
+                      p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva,
+                      p_exc_info, p_dump_built, p_anomalies>>
+
+Init == A!Init /\ S!Init /\ P!Init /\ G!Init /\ g_phase = "Idle"
+
+Next == \/ A!Next /\ UNCHANGED <<s_reg_va, s_reg_sz, s_reg_cl, s_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies, g_node_va, g_node_cls, g_node_root, g_edge_from, g_edge_to, g_edge_conf, g_phase>>
+        \/ S!Next /\ UNCHANGED <<a_regs, a_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies, g_node_va, g_node_cls, g_node_root, g_edge_from, g_edge_to, g_edge_conf, g_phase>>
+        \/ P!Next /\ UNCHANGED <<a_regs, a_anomalies, s_reg_va, s_reg_sz, s_reg_cl, s_anomalies, g_node_va, g_node_cls, g_node_root, g_edge_from, g_edge_to, g_edge_conf, g_phase>>
+        \/ G!Next /\ UNCHANGED <<a_regs, a_anomalies, s_reg_va, s_reg_sz, s_reg_cl, s_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies, g_phase>>
         \/ BuildAddressSpace
+        \/ BuildPointerGraph
 
-Vars == <<a_regs, a_anomalies, s_reg_va, s_reg_sz, s_reg_cl, s_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies>>
+Vars == <<a_regs, a_anomalies, s_reg_va, s_reg_sz, s_reg_cl, s_anomalies, p_phase, p_fatal_error, p_raw_streams, p_sysinfo_out, p_mod_va, p_mod_sz, p_mod_prov_sid, p_mod_prov_off, p_mod_prov_rva, p_thr_id, p_thr_stack_va, p_thr_stack_sz, p_thr_prov_sid, p_thr_prov_off, p_thr_prov_rva, p_mem_va, p_mem_sz, p_mem_prot, p_mem_state, p_mem_type, p_mem_cls, p_mem_prov_sid, p_mem_prov_off, p_mem_prov_rva, p_exc_info, p_dump_built, p_anomalies, g_node_va, g_node_cls, g_node_root, g_edge_from, g_edge_to, g_edge_conf, g_phase>>
 
 Spec == Init /\ [][Next]_Vars
 
@@ -181,5 +227,6 @@ RootInvariant ==
     /\ S!TypeInvariant
     /\ S!ClassifyTotal
     /\ P!PipelineInvariant
+    /\ G!PointerGraphInvariant
 
 ====
