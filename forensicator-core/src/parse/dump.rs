@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::{Anomaly, FatalError, Provenance};
-use crate::model::Dump;
+use crate::model::{Dump, MemState, MemType, MemoryRegionInfo, Protection, RegionClass};
 use crate::parse::{
     directory,
     exception,
@@ -65,17 +65,48 @@ pub fn from_bytes(data: &[u8]) -> Result<Dump, FatalError> {
         |bytes, prov| thread_list::decode_thread_list(bytes, prov).map_err(|a| vec![a]),
     ).unwrap_or_default();
 
-    let _memory_ranges = decode_optional(
-        data, &dir, directory::stream_types::MEMORY_64_LIST, &mut anomalies,
-        |bytes, prov| memory::decode_memory64(bytes, prov).map_err(|a| vec![a]),
-    ).unwrap_or_default();
+    let memory_ranges: Vec<memory::RawMemoryRange> = {
+        let mut ranges = decode_optional(
+            data, &dir, directory::stream_types::MEMORY_64_LIST, &mut anomalies,
+            |bytes, prov| memory::decode_memory64(bytes, prov).map_err(|a| vec![a]),
+        ).unwrap_or_default();
+        if ranges.is_empty() {
+            let entry = dir.find(directory::stream_types::MEMORY_LIST);
+            if let Some(e) = entry {
+                let start = e.rva as usize;
+                let end = start.saturating_add(e.size as usize);
+                if end <= data.len() {
+                    let stream_bytes = &data[start..end];
+                    let prov = Provenance { stream_type: directory::stream_types::MEMORY_LIST, file_offset: start as u64, rva: 0 };
+                    ranges = memory::decode_memory_list(data, stream_bytes, prov)
+                        .unwrap_or_else(|err| { anomalies.push(err); vec![] });
+                }
+            }
+        }
+        ranges
+    };
 
-    let _memory_info_entries = decode_optional(
+    let memory_info_entries: Vec<memory_info::RawMemoryInfoEntry> = decode_optional(
         data, &dir, directory::stream_types::MEMORY_INFO_LIST, &mut anomalies,
         |bytes, prov| memory_info::decode_memory_info_list(bytes, prov).map_err(|a| vec![a]),
     ).unwrap_or_default();
 
-    let memory_regions = vec![];
+    let memory_regions: Vec<MemoryRegionInfo> = memory_ranges
+        .into_iter()
+        .map(|mr| {
+            let info = memory_info_entries.iter().find(|mi| mi.va_start == mr.va_start);
+            MemoryRegionInfo {
+                va_start: mr.va_start,
+                size: mr.data.len() as u64,
+                data: mr.data,
+                protection: Protection::new(info.map(|i| i.protection).unwrap_or(0)),
+                state: info.and_then(|i| MemState::from_u32(i.state)).unwrap_or(MemState::Commit),
+                mem_type: info.and_then(|i| MemType::from_u32(i.mem_type)).unwrap_or(MemType::Private),
+                provenance: mr.provenance,
+                region_class: info.and_then(|i| classify_region(i.state, i.mem_type, i.protection)),
+            }
+        })
+        .collect();
 
     let exception = decode_optional(
         data, &dir, directory::stream_types::EXCEPTION, &mut anomalies,
@@ -91,6 +122,16 @@ pub fn from_bytes(data: &[u8]) -> Result<Dump, FatalError> {
         anomalies,
         file_size,
     })
+}
+
+fn classify_region(state: u32, mem_type: u32, _protection: u32) -> Option<RegionClass> {
+    if state == 2 { return None; }
+    match mem_type {
+        2 => Some(RegionClass::Image),
+        1 => Some(RegionClass::Mapped),
+        0 => Some(RegionClass::Private),
+        _ => Some(RegionClass::Other),
+    }
 }
 
 fn decode_optional<T>(

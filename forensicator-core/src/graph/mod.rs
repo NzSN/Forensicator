@@ -5,7 +5,11 @@ use crate::model::{
 };
 
 pub fn build_graph(scan_result: &ScanResult) -> Result<PointerGraph, Anomaly> {
-    let mut graph = PointerGraph::new();
+    build_graph_with_capacity(scan_result, 1_000_000, 10_000_000)
+}
+
+pub fn build_graph_with_capacity(scan_result: &ScanResult, max_nodes: usize, max_edges: usize) -> Result<PointerGraph, Anomaly> {
+    let mut graph = PointerGraph::with_capacity(max_nodes, max_edges);
 
     for c in &scan_result.candidates {
         insert_or_get_node(&mut graph, c.source_va, RegionClass::Other)?;

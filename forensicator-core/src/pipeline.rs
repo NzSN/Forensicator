@@ -96,13 +96,13 @@ impl Forensicator {
 
     /// Build an AddressSpace from the parsed dump's memory region metadata.
     /// Corresponds to TLA+ BuildAddressSpace: transfers p_mem_* → s_reg_*.
-    fn build_address_space(dump: &Dump) -> AddressSpace {
+    pub fn build_address_space(dump: &Dump) -> AddressSpace {
         let mut space = AddressSpace::new(1_000_000);
         for region in &dump.memory_regions {
             let ar = crate::space::AddressRegion {
                 va_start: region.va_start,
                 size: region.size,
-                data: vec![0u8; region.size as usize],
+                data: region.data.clone(),
                 protection: region.protection.bits(),
                 state: region.state,
                 classification: region.region_class.unwrap_or(crate::model::RegionClass::Other),

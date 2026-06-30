@@ -162,7 +162,7 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
 
 fn cmd_scan(path: &str, pattern_name: Option<&str>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dump = dump::open(path)?;
-    let space = forensicator_core::space::AddressSpace::new(1_000_000);
+    let space = forensicator_core::pipeline::Forensicator::build_address_space(&dump);
     let patterns = select_patterns(pattern_name);
     let registers: Vec<(u32, Vec<(String, u64)>)> = dump.threads.iter().map(|t| {
         vec![("RIP".into(), t.registers.rip()), ("RSP".into(), t.registers.rsp()), ("RBP".into(), t.registers.rbp())]
@@ -189,7 +189,7 @@ fn cmd_scan(path: &str, pattern_name: Option<&str>, json: bool) -> Result<(), Bo
 
 fn cmd_graph(path: &str, pattern_name: Option<&str>, _min_conf: f64, dot: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dump = dump::open(path)?;
-    let space = forensicator_core::space::AddressSpace::new(1_000_000);
+    let space = forensicator_core::pipeline::Forensicator::build_address_space(&dump);
     let patterns = select_patterns(pattern_name);
     let registers: Vec<(u32, Vec<(String, u64)>)> = dump.threads.iter().map(|t| {
         vec![("RIP".into(), t.registers.rip()), ("RSP".into(), t.registers.rsp()), ("RBP".into(), t.registers.rbp())]
@@ -197,7 +197,7 @@ fn cmd_graph(path: &str, pattern_name: Option<&str>, _min_conf: f64, dot: bool, 
     let stack_ranges: Vec<(u32, u64, u64)> = dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
     let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
     let scan_result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns)?;
-    let pointer_graph = graph::build_graph(&scan_result)?;
+    let pointer_graph = graph::build_graph_with_capacity(&scan_result, 10_000_000, 100_000_000)?;
     let query = GraphQuery::new(&pointer_graph);
     if dot { println!("{}", query.to_dot()); }
     else if json { println!("{}", serde_json::to_string_pretty(&query.to_json())?); }
@@ -213,7 +213,7 @@ fn cmd_graph(path: &str, pattern_name: Option<&str>, _min_conf: f64, dot: bool, 
 
 fn cmd_query(path: &str, reachable: Option<&str>, stats: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dump = dump::open(path)?;
-    let space = forensicator_core::space::AddressSpace::new(1_000_000);
+    let space = forensicator_core::pipeline::Forensicator::build_address_space(&dump);
     let patterns = PointerPattern::presets();
     let registers: Vec<(u32, Vec<(String, u64)>)> = dump.threads.iter().map(|t| {
         vec![("RIP".into(), t.registers.rip()), ("RSP".into(), t.registers.rsp()), ("RBP".into(), t.registers.rbp())]
@@ -221,7 +221,7 @@ fn cmd_query(path: &str, reachable: Option<&str>, stats: bool) -> Result<(), Box
     let stack_ranges: Vec<(u32, u64, u64)> = dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
     let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
     let scan_result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns)?;
-    let pointer_graph = graph::build_graph(&scan_result)?;
+    let pointer_graph = graph::build_graph_with_capacity(&scan_result, 10_000_000, 100_000_000)?;
     let query = GraphQuery::new(&pointer_graph);
     if let Some(va_str) = reachable {
         let va = u64::from_str_radix(va_str.trim_start_matches("0x"), 16)?;
@@ -244,7 +244,7 @@ fn cmd_recover(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use forensicator_core::recover;
     let dump = dump::open(path)?;
-    let space = forensicator_core::space::AddressSpace::new(1_000_000);
+    let space = forensicator_core::pipeline::Forensicator::build_address_space(&dump);
     let patterns = if let Some(n) = pattern_name {
         PointerPattern::presets().into_iter().filter(|p| p.name == n).collect()
     } else { PointerPattern::presets() };
@@ -254,7 +254,7 @@ fn cmd_recover(
     let stack_ranges: Vec<(u32, u64, u64)> = dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
     let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
     let scan_result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns)?;
-    let pointer_graph = graph::build_graph(&scan_result)?;
+    let pointer_graph = graph::build_graph_with_capacity(&scan_result, 10_000_000, 100_000_000)?;
     let query = GraphQuery::new(&pointer_graph);
     let run_all = all || (!strings && !vtables && !lists && !arrays && !chunks && !shapes);
     let catalog = recover::recover_all(&space, &pointer_graph, &query);

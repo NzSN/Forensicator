@@ -120,6 +120,7 @@ pub enum RegionClass {
 pub struct MemoryRegionInfo {
     pub va_start: u64,
     pub size: u64,
+    pub data: Vec<u8>,
     pub protection: Protection,
     pub state: MemState,
     pub mem_type: MemType,
@@ -244,6 +245,7 @@ impl Dump {
         self.memory_regions.push(MemoryRegionInfo {
             va_start,
             size,
+            data: vec![],
             protection,
             state,
             mem_type,
@@ -794,6 +796,7 @@ mod tests {
         let mri = MemoryRegionInfo {
             va_start: 0x400000,
             size: 0x1000,
+            data: vec![],
             protection: Protection::new(Protection::READ),
             state: MemState::Commit,
             mem_type: MemType::Image,
