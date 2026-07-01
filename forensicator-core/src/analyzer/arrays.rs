@@ -1,6 +1,6 @@
 use crate::analyzer::scan::pointer_scan;
 use crate::analyzer::{Analyzer, AnalyzerOutput};
-use crate::model::{CandidatePointer, Dump, RegionClass, StructArray};
+use crate::model::{CandidatePointer, Dump, StructArray};
 use crate::pattern::PointerPattern;
 use crate::space::AddressSpace;
 
@@ -116,7 +116,7 @@ impl ArrayAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MemState, SourceContext, TargetContext};
+    use crate::model::{MemState, RegionClass, SourceContext, TargetContext};
     use crate::space::{AddressRegion, AddressSpace};
 
     #[test]

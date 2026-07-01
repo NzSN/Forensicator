@@ -144,5 +144,4 @@ mod tests {
         assert_eq!(ranges[0].va_start, 0x400000);
         assert_eq!(ranges[0].data.len(), 0x1000);
     }
-
 }

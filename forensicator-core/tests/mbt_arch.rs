@@ -85,7 +85,7 @@ impl StateComputer for ArchComputer {
                     && self.anomalies.len() < MAX_ANOMALIES
                 {
                     let data = [0u8; 16];
-                    if let Err(_) = RegisterSet::decode_context(&data) {
+                    if RegisterSet::decode_context(&data).is_err() {
                         self.decode = DecodeState::Truncated(RegisterSet::new());
                         self.anomalies.push("truncated CONTEXT".to_string());
                     }

@@ -19,13 +19,17 @@ struct Cli {
 enum Commands {
     Inspect {
         path: String,
-        #[arg(long)] json: bool,
-        #[arg(long)] quiet: bool,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        quiet: bool,
     },
     Analyze {
         path: String,
-        #[arg(long)] plugin: Option<String>,
-        #[arg(long)] json: bool,
+        #[arg(long)]
+        plugin: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     ListPlugins,
 }
@@ -132,7 +136,11 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-fn cmd_analyze(path: &str, plugin: Option<&str>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_analyze(
+    path: &str,
+    plugin: Option<&str>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let s1 = Forensicator::open(path)?;
     let pipeline = Pipeline::default_pipeline();
     let filter: Vec<&str> = plugin
@@ -201,7 +209,10 @@ fn cmd_analyze(path: &str, plugin: Option<&str>, json: bool) -> Result<(), Box<d
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "plugins": outputs }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "plugins": outputs }))?
+        );
     } else {
         println!("Analysis results:");
         for output in &catalog.outputs {

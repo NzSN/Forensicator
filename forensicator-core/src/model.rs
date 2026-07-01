@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn value_matcher_canonical_x64() {
         assert!(ValueMatcher::CanonicalX64.eval(0x00007FFA_00001000));
-        assert!(!ValueMatcher::CanonicalX64.eval(0x0000_8000_00001000));
+        assert!(!ValueMatcher::CanonicalX64.eval(0x0000_8000_0000_1000));
     }
 
     #[test]

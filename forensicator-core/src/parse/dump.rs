@@ -179,10 +179,7 @@ fn decode_optional<T>(
     decoder: impl FnOnce(&[u8], Provenance) -> Result<T, Vec<Anomaly>>,
 ) -> Option<T> {
     let entry = dir.find(stream_type);
-    let entry = match entry {
-        Some(e) => e,
-        None => return None,
-    };
+    let entry = entry?;
 
     let start = entry.rva as usize;
     let end = start.saturating_add(entry.size as usize);

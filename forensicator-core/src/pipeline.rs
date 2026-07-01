@@ -47,7 +47,9 @@ impl Forensicator {
                 data: region.data.clone(),
                 protection: region.protection.bits(),
                 state: region.state,
-                classification: region.region_class.unwrap_or(crate::model::RegionClass::Other),
+                classification: region
+                    .region_class
+                    .unwrap_or(crate::model::RegionClass::Other),
             };
             let _ = space.add_region(ar);
         }

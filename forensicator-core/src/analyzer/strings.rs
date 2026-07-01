@@ -56,17 +56,17 @@ impl StringAnalyzer {
                     }
                     continue;
                 }
-                if i + 2 <= data.len() {
-                    if let Some(s) = self.try_utf16le(data, region.va_start, i) {
-                        let blen = s.byte_len;
-                        if blen >= self.min_len {
-                            results.push(s);
-                            i += blen + 2;
-                        } else {
-                            i += 2;
-                        }
-                        continue;
+                if i + 2 <= data.len()
+                    && let Some(s) = self.try_utf16le(data, region.va_start, i)
+                {
+                    let blen = s.byte_len;
+                    if blen >= self.min_len {
+                        results.push(s);
+                        i += blen + 2;
+                    } else {
+                        i += 2;
                     }
+                    continue;
                 }
                 i += 1;
             }
@@ -83,10 +83,8 @@ impl StringAnalyzer {
             if b == 0 {
                 break;
             }
-            if b < 0x20 || b > 0x7E {
-                if b != b'\t' && b != b'\n' && b != b'\r' {
-                    nonprint += 1;
-                }
+            if !(0x20..=0x7E).contains(&b) && b != b'\t' && b != b'\n' && b != b'\r' {
+                nonprint += 1;
             }
             buf.push(b);
             i += 1;

@@ -1,5 +1,5 @@
-/// Architecture abstraction — v1 implements x64 only.
-/// x86 / ARM64 add new structs implementing this trait later.
+//! Architecture abstraction — v1 implements x64 only.
+//! x86 / ARM64 add new structs implementing this trait later.
 
 /// Width of a pointer in bytes for this architecture.
 pub const PTR_WIDTH: usize = 8;

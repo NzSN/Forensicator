@@ -99,7 +99,7 @@ impl AddressSpace {
             });
         }
         let va = region.va_start;
-        let end = va.checked_add(region.size).unwrap_or(u64::MAX);
+        let end = va.saturating_add(region.size);
         for r in &self.regions {
             if va < r.va_start + r.size && r.va_start < end {
                 return Err(Anomaly {
