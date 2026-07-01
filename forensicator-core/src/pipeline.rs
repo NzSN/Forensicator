@@ -1,101 +1,43 @@
 use std::path::Path;
 
-use crate::analyzer::StructureCatalog;
-use crate::error::Anomaly;
+use crate::analyzer::{Pipeline, StructureCatalog};
 use crate::error::FatalError;
-use crate::graph;
-use crate::model::{Dump, PointerGraph, ScanResult};
+use crate::model::Dump;
 use crate::parse::dump;
-use crate::pattern::PointerPattern;
-use crate::query::GraphQuery;
-use crate::recover;
-use crate::scan;
 use crate::space::AddressSpace;
-
-/// Global workflow orchestrator — mirrors `specs/Forensicator.tla`.
-///
-/// Composes the four S1 modules into a unified pipeline:
-///   A (Arch) — register decoding via x64 CONTEXT layout
-///   S (AddressSpace) — sorted non-overlapping memory regions
-///   P (ParsePipeline) — minidump parsing through Model
-///   G (PointerGraph) — pointer graph construction
-///
-/// Stage outputs:
-///   S1: `S1Output` → Model (Dump) + AddressSpace
-///   S2: `S2Output` → ScanResult + PointerGraph
-///   S3: `StructureCatalog` → strings, vtables, lists, arrays, chunks, shapes
 
 pub struct Forensicator;
 
-/// Output of S1 — both Model.tla (parsed dump) and AddressSpace.tla (memory regions).
 pub struct S1Output {
     pub dump: Dump,
     pub space: AddressSpace,
 }
 
-/// Output of S2 — scan candidates and pointer graph (uses S1's address space).
-pub struct S2Output {
-    pub scan_result: ScanResult,
-    pub graph: PointerGraph,
-}
-
 impl Forensicator {
-    /// S1: Parse a minidump file and build the address space.
-    ///
-    /// Corresponds to TLA+ modules:
-    ///   P (ParsePipeline) — header → directory → per-stream decoders → typed Dump
-    ///   A (Arch) — register decode from x64 CONTEXT layout
-    ///   S (AddressSpace) — BuildAddressSpace action: transfers p_mem_* into s_reg_*
     pub fn s1(path: impl AsRef<Path>) -> Result<S1Output, FatalError> {
         let dump = dump::open(&path)?;
         let space = Self::build_address_space(&dump);
         Ok(S1Output { dump, space })
     }
 
-    /// S1 alias — same as `Forensicator::s1(path)`.
     pub fn open(path: impl AsRef<Path>) -> Result<S1Output, FatalError> {
         Self::s1(path)
     }
 
-    /// S2: Scan memory for pointer candidates and build the pointer graph.
-    ///
-    /// Corresponds to TLA+ actions:
-    ///   BuildPointerGraph — transfers nodes from model + non-deterministic edges
-    /// Uses S1's address space for region classification and memory reads.
-    pub fn s2(s1: &S1Output, patterns: &[PointerPattern]) -> Result<S2Output, Anomaly> {
-        let registers = thread_registers(&s1.dump);
-        let stack_ranges = thread_stacks(&s1.dump);
-        let reg_refs: Vec<(u32, &[(String, u64)])> = registers
-            .iter()
-            .map(|(tid, r)| (*tid, r.as_slice()))
-            .collect();
-        let scan_result = scan::scan(&s1.space, &reg_refs, &stack_ranges, patterns)?;
-        let graph = graph::build_graph(&scan_result)?;
-        Ok(S2Output { scan_result, graph })
+    pub fn analyze(s1: &S1Output, pipeline: &Pipeline, filter: &[&str]) -> StructureCatalog {
+        pipeline.run(&s1.dump, &s1.space, filter)
     }
 
-    /// S3: Recover structures from the pointer graph and address space.
-    ///
-    /// Corresponds to TLA+ invariant G!PointerGraphInvariant and the 6 detector
-    /// modules producing StructureCatalog.
-    pub fn s3(s1: &S1Output, s2: &S2Output) -> StructureCatalog {
-        let query = GraphQuery::new(&s2.graph);
-        recover::recover_all(&s1.space, &s2.graph, &query)
-    }
-
-    /// Run the full S1→S2→S3 pipeline from a dump file path.
     pub fn run_full(
         path: impl AsRef<Path>,
-        patterns: &[PointerPattern],
-    ) -> Result<(S1Output, S2Output, StructureCatalog), Box<dyn std::error::Error>> {
+        pipeline: &Pipeline,
+        filter: &[&str],
+    ) -> Result<(S1Output, StructureCatalog), Box<dyn std::error::Error>> {
         let s1 = Self::s1(path)?;
-        let s2 = Self::s2(&s1, patterns)?;
-        let cat = Self::s3(&s1, &s2);
-        Ok((s1, s2, cat))
+        let cat = Self::analyze(&s1, pipeline, filter);
+        Ok((s1, cat))
     }
 
-    /// Build an AddressSpace from the parsed dump's memory region metadata.
-    /// Corresponds to TLA+ BuildAddressSpace: transfers p_mem_* → s_reg_*.
     pub fn build_address_space(dump: &Dump) -> AddressSpace {
         let mut space = AddressSpace::new(1_000_000);
         for region in &dump.memory_regions {
@@ -105,9 +47,7 @@ impl Forensicator {
                 data: region.data.clone(),
                 protection: region.protection.bits(),
                 state: region.state,
-                classification: region
-                    .region_class
-                    .unwrap_or(crate::model::RegionClass::Other),
+                classification: region.region_class.unwrap_or(crate::model::RegionClass::Other),
             };
             let _ = space.add_region(ar);
         }
@@ -115,26 +55,57 @@ impl Forensicator {
     }
 }
 
-/// Extract thread registers from dump — returns (thread_index, [(reg_name, va)]).
-fn thread_registers(dump: &Dump) -> Vec<(u32, Vec<(String, u64)>)> {
-    dump.threads
-        .iter()
-        .map(|t| {
-            vec![
-                ("RIP".into(), t.registers.rip()),
-                ("RSP".into(), t.registers.rsp()),
-                ("RBP".into(), t.registers.rbp()),
-            ]
-        })
-        .enumerate()
-        .map(|(i, r)| (i as u32, r))
-        .collect()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Extract thread stack ranges from dump — returns (thread_id, stack_va, stack_size).
-fn thread_stacks(dump: &Dump) -> Vec<(u32, u64, u64)> {
-    dump.threads
-        .iter()
-        .map(|t| (t.id, t.stack_va, t.stack_size))
-        .collect()
+    #[test]
+    fn s1output_construction() {
+        let dump = Dump {
+            system_info: None,
+            modules: vec![],
+            threads: vec![],
+            memory_regions: vec![],
+            exception: None,
+            anomalies: vec![],
+            file_size: 0,
+        };
+        let space = AddressSpace::new(4);
+        let out = S1Output { dump, space };
+        assert_eq!(out.dump.file_size, 0);
+        assert_eq!(out.space.len(), 0);
+    }
+
+    #[test]
+    fn analyze_with_empty_pipeline() {
+        let dump = Dump {
+            system_info: None,
+            modules: vec![],
+            threads: vec![],
+            memory_regions: vec![],
+            exception: None,
+            anomalies: vec![],
+            file_size: 0,
+        };
+        let space = AddressSpace::new(4);
+        let s1 = S1Output { dump, space };
+        let pipeline = Pipeline::new();
+        let cat = Forensicator::analyze(&s1, &pipeline, &[]);
+        assert!(cat.outputs.is_empty());
+    }
+
+    #[test]
+    fn build_address_space_from_empty_dump() {
+        let dump = Dump {
+            system_info: None,
+            modules: vec![],
+            threads: vec![],
+            memory_regions: vec![],
+            exception: None,
+            anomalies: vec![],
+            file_size: 0,
+        };
+        let space = Forensicator::build_address_space(&dump);
+        assert_eq!(space.len(), 0);
+    }
 }
