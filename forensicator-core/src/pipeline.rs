@@ -213,7 +213,6 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::model::{MemState, RegionClass};
-    use crate::space::AddressRegion;
 
     // ── S1 stage tests (mirror spec invariants) ──
 

@@ -115,6 +115,14 @@ impl ModuleSymbols {
     }
 }
 
+fn codeview_guid_to_uuid(guid: &[u8; 16]) -> uuid::Uuid {
+    let data1 = u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]);
+    let data2 = u16::from_le_bytes([guid[4], guid[5]]);
+    let data3 = u16::from_le_bytes([guid[6], guid[7]]);
+    let data4: [u8; 8] = guid[8..16].try_into().unwrap();
+    uuid::Uuid::from_fields(data1, data2, data3, &data4)
+}
+
 fn find_pdb(
     pdb_dir: &Path,
     pdb_name: &str,
@@ -146,7 +154,7 @@ fn find_pdb(
     })?;
 
     let actual_guid = pdb_info.guid;
-    let expected = uuid::Uuid::from_bytes(*_expected_guid);
+    let expected = codeview_guid_to_uuid(_expected_guid);
 
     if actual_guid != expected {
         return Err(SymbolizerError::PdbParse(format!(
@@ -227,40 +235,40 @@ fn load_module_symbols(
 
     if let Ok(dbi) = pdb.debug_information() {
         if let Ok(modules) = dbi.modules() {
-            let mut mod_iter = modules;
-            while let Some(module) = mod_iter.next().map_err(|e| {
-                SymbolizerError::PdbParse(format!("module iteration error: {e}"))
-            })? {
-                if let Ok(Some(info)) = pdb.module_info(&module) {
-                    if let Ok(line_program) = info.line_program() {
-                        let mut line_iter = line_program.lines();
-                        loop {
-                            match line_iter.next() {
-                                Ok(Some(line)) => {
-                                    let rva = line.offset.to_rva(&address_map);
-                                    let Some(rva) = rva else {
-                                        continue;
-                                    };
-                                    let va = base_va.wrapping_add(rva.0 as u64);
-                                    if let Some(entry) = symbol_map.get_mut(&va) {
-                                        let file = match line_program
-                                            .get_file_info(line.file_index)
-                                        {
-                                            Ok(fi) => fi.name.to_string(),
-                                            Err(_) => continue,
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut mod_iter = modules;
+                while let Some(module) = mod_iter.next().ok().flatten() {
+                    if let Ok(Some(info)) = pdb.module_info(&module) {
+                        if let Ok(line_program) = info.line_program() {
+                            let mut line_iter = line_program.lines();
+                            loop {
+                                match line_iter.next() {
+                                    Ok(Some(line)) => {
+                                        let rva = line.offset.to_rva(&address_map);
+                                        let Some(rva) = rva else {
+                                            continue;
                                         };
-                                        entry.1 = Some(file);
-                                        entry.2 = Some(line.line_start);
-                                        break;
+                                        let va = base_va.wrapping_add(rva.0 as u64);
+                                        if let Some(entry) = symbol_map.get_mut(&va) {
+                                            let file = match line_program
+                                                .get_file_info(line.file_index)
+                                            {
+                                                Ok(fi) => fi.name.to_string(),
+                                                Err(_) => continue,
+                                            };
+                                            entry.1 = Some(file);
+                                            entry.2 = Some(line.line_start);
+                                            break;
+                                        }
                                     }
+                                    Ok(None) => break,
+                                    Err(_) => break,
                                 }
-                                Ok(None) => break,
-                                Err(_) => break,
                             }
                         }
                     }
                 }
-            }
+            }));
         }
     }
 
@@ -421,5 +429,60 @@ mod tests {
         let tmp = std::env::temp_dir();
         let sym = Symbolizer::load(&dump, &tmp).unwrap();
         assert_eq!(sym.module_count(), 0);
+    }
+
+    #[test]
+    fn integrate_real_dump_and_pdb() {
+        let dump_path = "D:/Desktop/Workspaces/crash_renderer/20260625/ed633e36-d254-43d4-b30a-23396ebbf6a2.dmp";
+        let pdb_dir = "D:/Desktop/Workspaces/crash_renderer/20260625";
+
+        if !Path::new(dump_path).exists() {
+            eprintln!("SKIP: dump file not found at {dump_path}");
+            return;
+        }
+
+        let dump = crate::parse::dump::open(dump_path).expect("failed to parse dump");
+        let sym = Symbolizer::load(&dump, Path::new(pdb_dir)).expect("failed to load symbolizer");
+
+        eprintln!("Loaded {} modules with symbols", sym.module_count());
+        for name in sym.loaded_modules() {
+            eprintln!("  {name}");
+        }
+
+        if let Some(ref exc) = dump.exception {
+            eprintln!(
+                "Exception at 0x{:016X} (code 0x{:08X})",
+                exc.address, exc.code
+            );
+            if let Some(resolved) = sym.resolve(exc.address) {
+                eprintln!(
+                    "  -> {}!{}+0x{:X}",
+                    resolved.function_name,
+                    resolved.function_name,
+                    resolved.offset
+                );
+                if let (Some(file), Some(line)) =
+                    (resolved.source_file.as_deref(), resolved.source_line)
+                {
+                    eprintln!("     at {file}:{line}");
+                }
+            } else {
+                eprintln!("  -> (no symbol resolved)");
+            }
+        }
+
+        if let Some(first_thread) = dump.threads.first() {
+            let rip = first_thread.registers.rip();
+            eprintln!("Thread TID {} RIP 0x{:016X}", first_thread.id, rip);
+            if rip != 0 {
+                if let Some(resolved) = sym.resolve(rip) {
+                    eprintln!("  -> {}!{}+0x{:X}",
+                        resolved.function_name,
+                        resolved.function_name,
+                        resolved.offset
+                    );
+                }
+            }
+        }
     }
 }
