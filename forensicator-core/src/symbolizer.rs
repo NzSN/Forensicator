@@ -58,11 +58,24 @@ pub struct ResolvedSymbol {
     pub source_line: Option<u32>,
 }
 
-struct ModuleSymbols {
+#[doc(hidden)]
+pub struct ModuleSymbols {
     module_name: String,
     base_va: u64,
     size: u64,
     symbols: Vec<SymbolEntry>,
+}
+
+impl ModuleSymbols {
+    #[doc(hidden)]
+    pub fn new(
+        module_name: String,
+        base_va: u64,
+        size: u64,
+        symbols: Vec<SymbolEntry>,
+    ) -> Self {
+        ModuleSymbols { module_name, base_va, size, symbols }
+    }
 }
 
 pub struct Symbolizer {
@@ -125,6 +138,11 @@ impl Symbolizer {
 
     pub fn loaded_modules(&self) -> impl Iterator<Item = &str> {
         self.modules.iter().map(|m| m.module_name.as_str())
+    }
+
+    #[doc(hidden)]
+    pub fn from_modules(modules: Vec<ModuleSymbols>) -> Self {
+        Symbolizer { modules }
     }
 }
 

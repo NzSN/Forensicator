@@ -6,8 +6,8 @@
 //!   e.g. MIRROR_BIN=D:\Tools\ModelMirrors.exe APALACHE_MC=...\wrapper.bat cargo test --test mbt_symbolizer -- --nocapture
 
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 
+use forensicator_core::symbolizer::{ModuleSymbols, SymbolEntry, Symbolizer};
 use mirrorrust::{
     ApalacheConfig, State, StateComputer, TraceGenerationConfig, Value, as_int, as_str, get_param,
     run_client,
@@ -46,10 +46,7 @@ fn entries_to_value(entries: &[SymbolEntry]) -> Value {
                 Value::Record(
                     vec![
                         ("va".to_string(), Value::Int(BigInt::from(e.va as i64))),
-                        (
-                            "name".to_string(),
-                            Value::Str(e.function_name.clone()),
-                        ),
+                        ("name".to_string(), Value::Str(e.function_name.clone())),
                         (
                             "file".to_string(),
                             Value::Str(e.source_file.clone().unwrap_or_default()),
@@ -60,36 +57,27 @@ fn entries_to_value(entries: &[SymbolEntry]) -> Value {
                         ),
                     ]
                     .into_iter()
-                    .collect::<std::collections::BTreeMap<_, _>>(),
+                    .collect::<BTreeMap<_, _>>(),
                 )
             })
             .collect(),
     )
 }
 
-#[derive(Debug, Clone)]
-struct SymbolEntry {
-    va: u64,
-    function_name: String,
-    source_file: Option<String>,
-    source_line: Option<u32>,
-}
-
-impl SymbolEntry {
-    fn new(va: u64, k: usize) -> Self {
-        SymbolEntry {
-            va,
-            function_name: format!("func{k}"),
-            source_file: Some(format!("src{k}.cpp")),
-            source_line: Some((k * 10) as u32),
-        }
+fn symbol_entry(va: u64, k: usize) -> SymbolEntry {
+    SymbolEntry {
+        va,
+        function_name: format!("func{k}"),
+        source_file: Some(format!("src{k}.cpp")),
+        source_line: Some((k * 10) as u32),
     }
 }
 
-/// Mirrors the TLA+ state produced by SymbolizerMBT.tla.
+/// Mirrors the TLA+ state and exercises the real Symbolizer::resolve().
 struct SymbolizerComputer {
-    loaded: Vec<String>,
-    entries: HashMap<String, Vec<SymbolEntry>>,
+    symbolizer: Symbolizer,
+    module_names: Vec<String>,        // ordered list (mirrors sym_loaded)
+    entries: Vec<Vec<SymbolEntry>>,   // per-module symbol entries (mirrors sym_entries)
     anomalies: Vec<String>,
 }
 
@@ -99,33 +87,35 @@ const MAX_ANOMALIES: usize = 4;
 impl SymbolizerComputer {
     fn new() -> Self {
         SymbolizerComputer {
-            loaded: vec![],
-            entries: HashMap::new(),
+            symbolizer: Symbolizer::from_modules(vec![]),
+            module_names: vec![],
+            entries: vec![],
             anomalies: vec![],
         }
     }
 
     fn to_state(&self) -> State {
         let mut entries_map: BTreeMap<String, Value> = BTreeMap::new();
-        for name in &self.loaded {
-            let ents = self.entries.get(name).map(|e| e.as_slice()).unwrap_or(&[]);
+        for (i, name) in self.module_names.iter().enumerate() {
+            let ents = self.entries.get(i).map(|e| e.as_slice()).unwrap_or(&[]);
             entries_map.insert(name.clone(), entries_to_value(ents));
         }
 
         st(vec![
-            ("sym_loaded", str_set_to_value(&self.loaded)),
+            ("sym_loaded", str_set_to_value(&self.module_names)),
             ("sym_entries", Value::Record(entries_map)),
             ("sym_anomalies", anomalies_to_value(&self.anomalies)),
         ])
     }
 
-    fn resolve_va(&self, module: &str, va: u64) -> Option<usize> {
-        let entries = self.entries.get(module)?;
-        match entries.binary_search_by_key(&va, |e| e.va) {
-            Ok(i) => Some(i),
-            Err(0) => None,
-            Err(i) => Some(i - 1),
+    fn rebuild_symbolizer(&mut self) {
+        let mut modules: Vec<ModuleSymbols> = Vec::new();
+        for (i, name) in self.module_names.iter().enumerate() {
+            let syms = self.entries.get(i).cloned().unwrap_or_default();
+            let size = syms.last().map(|s| s.va + 256).unwrap_or(4096);
+            modules.push(ModuleSymbols::new(name.clone(), 0, size, syms));
         }
+        self.symbolizer = Symbolizer::from_modules(modules);
     }
 }
 
@@ -142,14 +132,14 @@ impl StateComputer for SymbolizerComputer {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
-                if !name.is_empty() && !self.loaded.contains(&name) {
-                    let count = (self.loaded.len() % MAX_SYMBOLS) + 1;
-                    let mut entries: Vec<SymbolEntry> = (1..=count)
-                        .map(|k| SymbolEntry::new((k * 256) as u64, k))
-                        .collect();
+                if !name.is_empty() && !self.module_names.contains(&name) {
+                    let count = (self.module_names.len() % MAX_SYMBOLS) + 1;
+                    let mut entries: Vec<SymbolEntry> =
+                        (1..=count).map(|k| symbol_entry((k * 256) as u64, k)).collect();
                     entries.sort_by_key(|e| e.va);
-                    self.entries.insert(name.clone(), entries);
-                    self.loaded.push(name);
+                    self.entries.push(entries);
+                    self.module_names.push(name);
+                    self.rebuild_symbolizer();
                 }
             }
             "LoadPdbEmpty" => {
@@ -159,9 +149,10 @@ impl StateComputer for SymbolizerComputer {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
-                if !name.is_empty() && !self.loaded.contains(&name) {
-                    self.entries.insert(name.clone(), vec![]);
-                    self.loaded.push(name.clone());
+                if !name.is_empty() && !self.module_names.contains(&name) {
+                    self.entries.push(vec![]);
+                    self.module_names.push(name.clone());
+                    self.rebuild_symbolizer();
                     if self.anomalies.len() < MAX_ANOMALIES {
                         self.anomalies.push("no_publics".to_string());
                     }
@@ -174,10 +165,8 @@ impl StateComputer for SymbolizerComputer {
                     .and_then(|n| n.to_u64())
                     .unwrap_or(0);
 
-                let found = self
-                    .loaded
-                    .iter()
-                    .any(|name| self.resolve_va(name, va).is_some());
+                // Exercise real Symbolizer::resolve()
+                let found = self.symbolizer.resolve(va).is_some();
 
                 if !found && self.anomalies.len() < MAX_ANOMALIES {
                     self.anomalies.push("va_not_found".to_string());
@@ -191,11 +180,7 @@ impl StateComputer for SymbolizerComputer {
 
 fn apalache_config() -> ApalacheConfig {
     let spec_path = std::env::var("MBT_SPEC").unwrap_or_else(|_| {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../specs/SymbolizerMBT.tla"
-        )
-        .to_string()
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../specs/SymbolizerMBT.tla").to_string()
     });
     ApalacheConfig {
         spec_path,
