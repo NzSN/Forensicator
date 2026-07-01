@@ -13,15 +13,31 @@ pub fn open(path: impl AsRef<Path>) -> Result<Dump, FatalError> {
     from_bytes(&data)
 }
 
+/// Parse stream data from a byte slice with a pre-parsed directory and header.
+/// This is the DecodeStream step: called once the header and directory are validated.
+/// Mirrors Forensicator.tla `DecodeStream(stream_type)` — called once per stream type.
+pub fn parse_streams(
+    data: &[u8],
+    dir: &directory::StreamDirectory,
+    file_size: u64,
+) -> Result<Dump, FatalError> {
+    from_bytes_inner(data, dir, file_size)
+}
+
 /// Parse a minidump from a byte slice.
 pub fn from_bytes(data: &[u8]) -> Result<Dump, FatalError> {
-    let mut anomalies: Vec<Anomaly> = Vec::new();
-
     let hdr = header::read_header(data)?;
-
     let dir = directory::read_directory(data, hdr.stream_directory_rva, hdr.stream_count)?;
-
     let file_size = data.len() as u64;
+    from_bytes_inner(data, &dir, file_size)
+}
+
+fn from_bytes_inner(
+    data: &[u8],
+    dir: &directory::StreamDirectory,
+    file_size: u64,
+) -> Result<Dump, FatalError> {
+    let mut anomalies: Vec<Anomaly> = Vec::new();
 
     let system_info = decode_optional(
         data,

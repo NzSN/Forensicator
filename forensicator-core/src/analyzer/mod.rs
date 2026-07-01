@@ -112,6 +112,14 @@ impl Pipeline {
         self.analyzers.iter().map(|a| (a.name(), a.description()))
     }
 
+    pub fn len(&self) -> usize {
+        self.analyzers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.analyzers.is_empty()
+    }
+
     pub fn run(&self, dump: &Dump, space: &AddressSpace, filter: &[&str]) -> StructureCatalog {
         let use_filter = !filter.is_empty();
         let mut outputs = Vec::new();
