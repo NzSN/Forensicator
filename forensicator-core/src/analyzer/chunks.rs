@@ -1,5 +1,5 @@
-use crate::analyzer::{Analyzer, AnalyzerOutput};
 use crate::analyzer::scan::pointer_scan;
+use crate::analyzer::{Analyzer, AnalyzerOutput};
 use crate::model::{CandidatePointer, Dump, RegionClass, StructChunk};
 use crate::pattern::PointerPattern;
 use crate::space::AddressSpace;
@@ -23,8 +23,12 @@ impl Default for ChunkAnalyzer {
 }
 
 impl Analyzer for ChunkAnalyzer {
-    fn name(&self) -> &str { "chunks" }
-    fn description(&self) -> &str { "Identifies heap allocation chunks by pointer density in Private regions" }
+    fn name(&self) -> &str {
+        "chunks"
+    }
+    fn description(&self) -> &str {
+        "Identifies heap allocation chunks by pointer density in Private regions"
+    }
 
     fn analyze(&self, dump: &Dump, space: &AddressSpace) -> AnalyzerOutput {
         let mut out = AnalyzerOutput::new("chunks");
@@ -43,14 +47,20 @@ impl ChunkAnalyzer {
             }
             let mut nodes_in_region: Vec<u64> = candidates
                 .iter()
-                .filter(|c| c.source_va >= region.va_start && c.source_va < region.va_start + region.size)
+                .filter(|c| {
+                    c.source_va >= region.va_start && c.source_va < region.va_start + region.size
+                })
                 .map(|c| c.source_va)
                 .collect();
             nodes_in_region.sort();
             nodes_in_region.dedup();
 
             if nodes_in_region.is_empty() {
-                let is_free = region.data.iter().take(self.zero_run_for_free).all(|&b| b == 0);
+                let is_free = region
+                    .data
+                    .iter()
+                    .take(self.zero_run_for_free)
+                    .all(|&b| b == 0);
                 results.push(StructChunk {
                     va_start: region.va_start,
                     size: region.size,
@@ -84,15 +94,18 @@ impl ChunkAnalyzer {
                         size: sz,
                         is_free: false,
                         node_count: 1,
-                        pointer_density: if sz > 0 { 1.0 / sz as f64 * 1024.0 } else { 0.0 },
+                        pointer_density: if sz > 0 {
+                            1.0 / sz as f64 * 1024.0
+                        } else {
+                            0.0
+                        },
                         confidence: 0.6,
                     });
                     chunk_start = va;
                 }
                 prev_va = va;
             }
-            let sz = (prev_va - chunk_start + 16)
-                .min(region.va_start + region.size - chunk_start);
+            let sz = (prev_va - chunk_start + 16).min(region.va_start + region.size - chunk_start);
             results.push(StructChunk {
                 va_start: chunk_start,
                 size: sz,

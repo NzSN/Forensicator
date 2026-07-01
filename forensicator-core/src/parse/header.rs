@@ -34,7 +34,9 @@ pub fn read_header(data: &[u8]) -> Result<Header, FatalError> {
 
     let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     if magic != MAGIC {
-        return Err(FatalError::BadMagic { found: [data[0], data[1], data[2], data[3]] });
+        return Err(FatalError::BadMagic {
+            found: [data[0], data[1], data[2], data[3]],
+        });
     }
 
     let version = u16::from_le_bytes([data[4], data[5]]);
@@ -51,8 +53,7 @@ pub fn read_header(data: &[u8]) -> Result<Header, FatalError> {
         checksum: u32::from_le_bytes([data[16], data[17], data[18], data[19]]),
         timestamp: u32::from_le_bytes([data[20], data[21], data[22], data[23]]),
         flags: u64::from_le_bytes([
-            data[24], data[25], data[26], data[27],
-            data[28], data[29], data[30], data[31],
+            data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
         ]),
     })
 }
@@ -64,13 +65,23 @@ mod tests {
     fn make_header_bytes() -> Vec<u8> {
         let mut buf = vec![0u8; 32];
         // Magic "MDMP"
-        buf[0] = 0x4D; buf[1] = 0x44; buf[2] = 0x4D; buf[3] = 0x50;
+        buf[0] = 0x4D;
+        buf[1] = 0x44;
+        buf[2] = 0x4D;
+        buf[3] = 0x50;
         // Version 0xA793
-        buf[4] = 0x93; buf[5] = 0xA7;
+        buf[4] = 0x93;
+        buf[5] = 0xA7;
         // Stream count = 5
-        buf[8] = 5; buf[9] = 0; buf[10] = 0; buf[11] = 0;
+        buf[8] = 5;
+        buf[9] = 0;
+        buf[10] = 0;
+        buf[11] = 0;
         // Stream directory RVA = 64
-        buf[12] = 64; buf[13] = 0; buf[14] = 0; buf[15] = 0;
+        buf[12] = 64;
+        buf[13] = 0;
+        buf[14] = 0;
+        buf[15] = 0;
         buf
     }
 
@@ -94,7 +105,10 @@ mod tests {
     #[test]
     fn bad_magic_returns_error() {
         let mut data = make_header_bytes();
-        data[0] = 0xDE; data[1] = 0xAD; data[2] = 0xBE; data[3] = 0xEF;
+        data[0] = 0xDE;
+        data[1] = 0xAD;
+        data[2] = 0xBE;
+        data[3] = 0xEF;
         let err = read_header(&data).unwrap_err();
         assert!(matches!(err, FatalError::BadMagic { .. }));
     }

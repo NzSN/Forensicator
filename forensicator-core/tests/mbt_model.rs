@@ -10,8 +10,8 @@ use forensicator_core::model::{
     CpuArch, Dump, MemState, MemType, OsPlatform, Protection, RegionClass,
 };
 use mirrorrust::{
-    as_int, as_str, get_param, run_client, ApalacheConfig, State, StateComputer,
-    TraceGenerationConfig, Value,
+    ApalacheConfig, State, StateComputer, TraceGenerationConfig, Value, as_int, as_str, get_param,
+    run_client,
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -81,47 +81,111 @@ impl ModelComputer {
 
         let mod_va: Vec<i64> = self.dump.modules.iter().map(|m| m.base_va as i64).collect();
         let mod_sz: Vec<i64> = self.dump.modules.iter().map(|m| m.size as i64).collect();
-        let mod_prov_sid: Vec<i64> =
-            self.dump.modules.iter().map(|m| m.provenance.stream_type as i64).collect();
-        let mod_prov_off: Vec<i64> =
-            self.dump.modules.iter().map(|m| m.provenance.file_offset as i64).collect();
-        let mod_prov_rva: Vec<i64> =
-            self.dump.modules.iter().map(|m| m.provenance.rva as i64).collect();
+        let mod_prov_sid: Vec<i64> = self
+            .dump
+            .modules
+            .iter()
+            .map(|m| m.provenance.stream_type as i64)
+            .collect();
+        let mod_prov_off: Vec<i64> = self
+            .dump
+            .modules
+            .iter()
+            .map(|m| m.provenance.file_offset as i64)
+            .collect();
+        let mod_prov_rva: Vec<i64> = self
+            .dump
+            .modules
+            .iter()
+            .map(|m| m.provenance.rva as i64)
+            .collect();
 
         let thr_id: Vec<i64> = self.dump.threads.iter().map(|t| t.id as i64).collect();
-        let thr_stack_va: Vec<i64> =
-            self.dump.threads.iter().map(|t| t.stack_va as i64).collect();
-        let thr_stack_sz: Vec<i64> =
-            self.dump.threads.iter().map(|t| t.stack_size as i64).collect();
-        let thr_prov_sid: Vec<i64> =
-            self.dump.threads.iter().map(|t| t.provenance.stream_type as i64).collect();
-        let thr_prov_off: Vec<i64> =
-            self.dump.threads.iter().map(|t| t.provenance.file_offset as i64).collect();
-        let thr_prov_rva: Vec<i64> =
-            self.dump.threads.iter().map(|t| t.provenance.rva as i64).collect();
+        let thr_stack_va: Vec<i64> = self
+            .dump
+            .threads
+            .iter()
+            .map(|t| t.stack_va as i64)
+            .collect();
+        let thr_stack_sz: Vec<i64> = self
+            .dump
+            .threads
+            .iter()
+            .map(|t| t.stack_size as i64)
+            .collect();
+        let thr_prov_sid: Vec<i64> = self
+            .dump
+            .threads
+            .iter()
+            .map(|t| t.provenance.stream_type as i64)
+            .collect();
+        let thr_prov_off: Vec<i64> = self
+            .dump
+            .threads
+            .iter()
+            .map(|t| t.provenance.file_offset as i64)
+            .collect();
+        let thr_prov_rva: Vec<i64> = self
+            .dump
+            .threads
+            .iter()
+            .map(|t| t.provenance.rva as i64)
+            .collect();
 
-        let mem_va: Vec<i64> =
-            self.dump.memory_regions.iter().map(|mr| mr.va_start as i64).collect();
-        let mem_sz: Vec<i64> =
-            self.dump.memory_regions.iter().map(|mr| mr.size as i64).collect();
-        let mem_prot: Vec<i64> =
-            self.dump.memory_regions.iter().map(|mr| mr.protection.bits() as i64).collect();
-        let mem_state: Vec<i64> =
-            self.dump.memory_regions.iter().map(|mr| mr.state as i64).collect();
-        let mem_type: Vec<i64> =
-            self.dump.memory_regions.iter().map(|mr| mr.mem_type as i64).collect();
+        let mem_va: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.va_start as i64)
+            .collect();
+        let mem_sz: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.size as i64)
+            .collect();
+        let mem_prot: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.protection.bits() as i64)
+            .collect();
+        let mem_state: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.state as i64)
+            .collect();
+        let mem_type: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.mem_type as i64)
+            .collect();
         let mem_cls: Vec<i64> = self
             .dump
             .memory_regions
             .iter()
             .map(|mr| mr.region_class.map(|rc| rc as i64).unwrap_or(0))
             .collect();
-        let mem_prov_sid: Vec<i64> =
-            self.dump.memory_regions.iter().map(|mr| mr.provenance.stream_type as i64).collect();
-        let mem_prov_off: Vec<i64> =
-            self.dump.memory_regions.iter().map(|mr| mr.provenance.file_offset as i64).collect();
-        let mem_prov_rva: Vec<i64> =
-            self.dump.memory_regions.iter().map(|mr| mr.provenance.rva as i64).collect();
+        let mem_prov_sid: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.provenance.stream_type as i64)
+            .collect();
+        let mem_prov_off: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.provenance.file_offset as i64)
+            .collect();
+        let mem_prov_rva: Vec<i64> = self
+            .dump
+            .memory_regions
+            .iter()
+            .map(|mr| mr.provenance.rva as i64)
+            .collect();
 
         let exc_info: Vec<i64> = self
             .dump
@@ -229,7 +293,11 @@ impl StateComputer for ModelComputer {
                     os_from_i64(os),
                     CpuArch::X64,
                     (maj as u32, min as u32, bld as u32, rev as u32),
-                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                    Provenance {
+                        stream_type: sid as u32,
+                        file_offset: off as u64,
+                        rva: rva as u32,
+                    },
                 );
             }
             "AddModule" => {
@@ -241,7 +309,11 @@ impl StateComputer for ModelComputer {
                 self.dump.add_module(
                     va as u64,
                     sz as u64,
-                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                    Provenance {
+                        stream_type: sid as u32,
+                        file_offset: off as u64,
+                        rva: rva as u32,
+                    },
                 );
             }
             "AddThread" => {
@@ -255,7 +327,11 @@ impl StateComputer for ModelComputer {
                     id as u32,
                     sva as u64,
                     ssz as u64,
-                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                    Provenance {
+                        stream_type: sid as u32,
+                        file_offset: off as u64,
+                        rva: rva as u32,
+                    },
                 );
             }
             "AddRegion" => {
@@ -275,7 +351,11 @@ impl StateComputer for ModelComputer {
                     mem_state_from_i64(state),
                     mem_type_from_i64(typ),
                     region_class_from_i64(cls),
-                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                    Provenance {
+                        stream_type: sid as u32,
+                        file_offset: off as u64,
+                        rva: rva as u32,
+                    },
                 );
             }
             "SetException" => {
@@ -291,7 +371,11 @@ impl StateComputer for ModelComputer {
                     addr as u64,
                     tid as u32,
                     flg as u32,
-                    Provenance { stream_type: sid as u32, file_offset: off as u64, rva: rva as u32 },
+                    Provenance {
+                        stream_type: sid as u32,
+                        file_offset: off as u64,
+                        rva: rva as u32,
+                    },
                 );
             }
             "AddAnomaly" => {
@@ -309,8 +393,9 @@ impl StateComputer for ModelComputer {
 }
 
 fn apalache_config() -> ApalacheConfig {
-    let spec_path = std::env::var("MBT_SPEC")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../specs/ModelMBT.tla").to_string());
+    let spec_path = std::env::var("MBT_SPEC").unwrap_or_else(|_| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../specs/ModelMBT.tla").to_string()
+    });
     ApalacheConfig {
         spec_path,
         invariant: "ModelInvariant".into(),
@@ -338,6 +423,11 @@ fn mbt_model_s1() {
             return;
         }
     };
-    run_client(&bin, apalache_config(), trace_config(), ModelComputer::new())
-        .expect("MBT model test failed");
+    run_client(
+        &bin,
+        apalache_config(),
+        trace_config(),
+        ModelComputer::new(),
+    )
+    .expect("MBT model test failed");
 }

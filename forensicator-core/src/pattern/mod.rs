@@ -1,4 +1,4 @@
-use crate::model::{ValueMatcher, SourceContext, TargetContext};
+use crate::model::{SourceContext, TargetContext, ValueMatcher};
 
 /// A user-definable pointer pattern: value matchers + source + target constraints.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,7 +105,9 @@ impl PointerPattern {
 }
 
 impl Default for PointerPattern {
-    fn default() -> Self { Self::new("default") }
+    fn default() -> Self {
+        Self::new("default")
+    }
 }
 
 #[cfg(test)]
@@ -114,8 +116,7 @@ mod tests {
 
     #[test]
     fn pattern_with_aligned_matcher_passes_aligned_value() {
-        let p = PointerPattern::new("test")
-            .with_matcher(ValueMatcher::AlignedTo(8));
+        let p = PointerPattern::new("test").with_matcher(ValueMatcher::AlignedTo(8));
         assert!(p.value_matches(0x7FFA_1000));
         assert!(!p.value_matches(0x7FFA_1001));
         assert!(!p.value_matches(0x7FFA_1007));
@@ -171,8 +172,13 @@ mod tests {
     #[test]
     fn builder_fluent_api() {
         let p = PointerPattern::new("custom")
-            .with_matcher(ValueMatcher::InRange { lo: 0x1000, hi: 0x2000 })
-            .with_source(SourceContext::Register { register_name: Some("RIP".into()) })
+            .with_matcher(ValueMatcher::InRange {
+                lo: 0x1000,
+                hi: 0x2000,
+            })
+            .with_source(SourceContext::Register {
+                register_name: Some("RIP".into()),
+            })
             .with_target(TargetContext::Image)
             .with_min_confidence(0.9);
         assert_eq!(p.name, "custom");
@@ -183,15 +189,20 @@ mod tests {
 
     #[test]
     fn with_source_stores_correctly() {
-        let p = PointerPattern::new("test")
-            .with_source(SourceContext::Heap { region_va: Some(0x1000) });
-        assert_eq!(p.source, SourceContext::Heap { region_va: Some(0x1000) });
+        let p = PointerPattern::new("test").with_source(SourceContext::Heap {
+            region_va: Some(0x1000),
+        });
+        assert_eq!(
+            p.source,
+            SourceContext::Heap {
+                region_va: Some(0x1000)
+            }
+        );
     }
 
     #[test]
     fn with_target_stores_correctly() {
-        let p = PointerPattern::new("test")
-            .with_target(TargetContext::Stack);
+        let p = PointerPattern::new("test").with_target(TargetContext::Stack);
         assert_eq!(p.target, TargetContext::Stack);
     }
 
@@ -213,8 +224,7 @@ mod tests {
 
     #[test]
     fn with_max_depth_from_root_stores_correctly() {
-        let p = PointerPattern::new("test")
-            .with_max_depth_from_root(5);
+        let p = PointerPattern::new("test").with_max_depth_from_root(5);
         assert_eq!(p.max_depth_from_root, Some(5));
     }
 
@@ -231,14 +241,11 @@ mod tests {
 
     #[test]
     fn min_confidence_clamped() {
-        let p = PointerPattern::new("test")
-            .with_min_confidence(-0.5);
+        let p = PointerPattern::new("test").with_min_confidence(-0.5);
         assert_eq!(p.min_confidence, 0.0);
-        let p = PointerPattern::new("test")
-            .with_min_confidence(1.5);
+        let p = PointerPattern::new("test").with_min_confidence(1.5);
         assert_eq!(p.min_confidence, 1.0);
-        let p = PointerPattern::new("test")
-            .with_min_confidence(0.7);
+        let p = PointerPattern::new("test").with_min_confidence(0.7);
         assert_eq!(p.min_confidence, 0.7);
     }
 }

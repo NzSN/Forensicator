@@ -11,8 +11,11 @@ pub fn pointer_scan(
         return vec![];
     }
 
-    let stack_ranges: Vec<(u32, u64, u64)> =
-        dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
+    let stack_ranges: Vec<(u32, u64, u64)> = dump
+        .threads
+        .iter()
+        .map(|t| (t.id, t.stack_va, t.stack_size))
+        .collect();
 
     let mut candidates: Vec<CandidatePointer> = Vec::new();
 
@@ -39,7 +42,9 @@ pub fn pointer_scan(
                     continue;
                 }
                 let mut conf = 0.0;
-                if value & 7 == 0 { conf += 0.15; }
+                if value & 7 == 0 {
+                    conf += 0.15;
+                }
                 let bit47 = (value >> 47) & 1;
                 let upper = value >> 48;
                 if upper == (if bit47 == 1 { 0xFFFF } else { 0x0000 }) {
@@ -55,7 +60,9 @@ pub fn pointer_scan(
 
                 if conf >= pat.min_confidence {
                     matched = true;
-                    if conf > best_confidence { best_confidence = conf; }
+                    if conf > best_confidence {
+                        best_confidence = conf;
+                    }
                 }
             }
 
@@ -91,7 +98,9 @@ fn classify_source(
                 .map(|&(tid, _, _)| tid);
             SourceContext::Stack { thread_id: tid }
         }
-        RegionClass::Private => SourceContext::Heap { region_va: Some(region.va_start) },
+        RegionClass::Private => SourceContext::Heap {
+            region_va: Some(region.va_start),
+        },
         RegionClass::Image => SourceContext::ModuleData { module_name: None },
         RegionClass::Mapped => SourceContext::AnyCommitted,
         RegionClass::Other => SourceContext::AnyCommitted,

@@ -7,7 +7,11 @@ pub struct RawMemoryRange {
     pub provenance: Provenance,
 }
 
-pub fn decode_memory_list(full_data: &[u8], data: &[u8], prov: Provenance) -> Result<Vec<RawMemoryRange>, Anomaly> {
+pub fn decode_memory_list(
+    full_data: &[u8],
+    data: &[u8],
+    prov: Provenance,
+) -> Result<Vec<RawMemoryRange>, Anomaly> {
     if data.len() < 4 {
         return Ok(vec![]);
     }
@@ -20,16 +24,19 @@ pub fn decode_memory_list(full_data: &[u8], data: &[u8], prov: Provenance) -> Re
     if data.len() < expected_len {
         return Err(Anomaly {
             provenance: prov,
-            description: format!("truncated MemoryList: expected {expected_len}, got {}", data.len()),
+            description: format!(
+                "truncated MemoryList: expected {expected_len}, got {}",
+                data.len()
+            ),
         });
     }
 
     let mut ranges = Vec::with_capacity(count);
     for i in 0..count {
         let off = header_size + i * entry_size;
-        let va_start = u64::from_le_bytes(data[off..off+8].try_into().unwrap());
-        let data_size = u32::from_le_bytes(data[off+8..off+12].try_into().unwrap()) as usize;
-        let data_rva = u32::from_le_bytes(data[off+12..off+16].try_into().unwrap()) as usize;
+        let va_start = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+        let data_size = u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()) as usize;
+        let data_rva = u32::from_le_bytes(data[off + 12..off + 16].try_into().unwrap()) as usize;
 
         let memory_data = if data_rva + data_size <= full_data.len() {
             full_data[data_rva..data_rva + data_size].to_vec()
@@ -68,7 +75,10 @@ pub fn decode_memory64(data: &[u8], prov: Provenance) -> Result<Vec<RawMemoryRan
     if data.len() < expected_len {
         return Err(Anomaly {
             provenance: prov,
-            description: format!("truncated Memory64List: expected {expected_len}, got {}", data.len()),
+            description: format!(
+                "truncated Memory64List: expected {expected_len}, got {}",
+                data.len()
+            ),
         });
     }
 
@@ -76,8 +86,8 @@ pub fn decode_memory64(data: &[u8], prov: Provenance) -> Result<Vec<RawMemoryRan
     let mut data_offset = base_rva;
     for i in 0..count {
         let off = header_size + i * entry_size;
-        let va_start = u64::from_le_bytes(data[off..off+8].try_into().unwrap());
-        let data_size = u64::from_le_bytes(data[off+8..off+16].try_into().unwrap()) as usize;
+        let va_start = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+        let data_size = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap()) as usize;
 
         let memory_data = if data_offset + data_size <= data.len() {
             data[data_offset..data_offset + data_size].to_vec()

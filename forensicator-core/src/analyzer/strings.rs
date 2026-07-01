@@ -21,8 +21,12 @@ impl Default for StringAnalyzer {
 }
 
 impl Analyzer for StringAnalyzer {
-    fn name(&self) -> &str { "strings" }
-    fn description(&self) -> &str { "Scans committed memory for null-terminated strings (ASCII, UTF-16LE)" }
+    fn name(&self) -> &str {
+        "strings"
+    }
+    fn description(&self) -> &str {
+        "Scans committed memory for null-terminated strings (ASCII, UTF-16LE)"
+    }
 
     fn analyze(&self, _dump: &Dump, space: &AddressSpace) -> AnalyzerOutput {
         let mut out = AnalyzerOutput::new("strings");

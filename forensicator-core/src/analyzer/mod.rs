@@ -1,17 +1,19 @@
 use crate::model::*;
 use crate::space::AddressSpace;
 
-pub mod scan;
-pub mod strings;
-pub mod vtables;
-pub mod lists;
 pub mod arrays;
 pub mod chunks;
+pub mod lists;
+pub mod scan;
 pub mod shapes;
+pub mod strings;
+pub mod vtables;
 
 pub trait Analyzer: Send + Sync {
     fn name(&self) -> &str;
-    fn description(&self) -> &str { "no description" }
+    fn description(&self) -> &str {
+        "no description"
+    }
     fn analyze(&self, dump: &Dump, space: &AddressSpace) -> AnalyzerOutput;
 }
 
@@ -49,7 +51,9 @@ pub struct StructureCatalog {
 
 impl StructureCatalog {
     pub fn empty() -> Self {
-        StructureCatalog { outputs: Vec::new() }
+        StructureCatalog {
+            outputs: Vec::new(),
+        }
     }
 
     pub fn all_strings(&self) -> impl Iterator<Item = &StructString> {
@@ -83,7 +87,9 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new() -> Self {
-        Pipeline { analyzers: Vec::new() }
+        Pipeline {
+            analyzers: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, a: impl Analyzer + 'static) -> &mut Self {
@@ -122,7 +128,10 @@ impl Pipeline {
                     let mut err_out = AnalyzerOutput::new(analyzer.name());
                     err_out.custom.push((
                         "error".to_string(),
-                        serde_json::Value::String(format!("analyzer '{}' panicked", analyzer.name())),
+                        serde_json::Value::String(format!(
+                            "analyzer '{}' panicked",
+                            analyzer.name()
+                        )),
                     ));
                     outputs.push(err_out);
                 }
@@ -133,7 +142,9 @@ impl Pipeline {
 }
 
 impl Default for Pipeline {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -143,10 +154,15 @@ mod tests {
 
     struct TestAnalyzer;
     impl Analyzer for TestAnalyzer {
-        fn name(&self) -> &str { "test" }
+        fn name(&self) -> &str {
+            "test"
+        }
         fn analyze(&self, _dump: &Dump, _space: &AddressSpace) -> AnalyzerOutput {
             let mut out = AnalyzerOutput::new("test");
-            out.custom.push(("result".to_string(), serde_json::Value::String("ok".to_string())));
+            out.custom.push((
+                "result".to_string(),
+                serde_json::Value::String("ok".to_string()),
+            ));
             out
         }
     }
@@ -156,8 +172,12 @@ mod tests {
         let mut pipeline = Pipeline::new();
         pipeline.register(TestAnalyzer);
         let dump = Dump {
-            system_info: None, modules: vec![], threads: vec![],
-            memory_regions: vec![], exception: None, anomalies: vec![],
+            system_info: None,
+            modules: vec![],
+            threads: vec![],
+            memory_regions: vec![],
+            exception: None,
+            anomalies: vec![],
             file_size: 0,
         };
         let space = AddressSpace::new(4);
@@ -172,8 +192,12 @@ mod tests {
         let mut pipeline = Pipeline::new();
         pipeline.register(TestAnalyzer);
         let dump = Dump {
-            system_info: None, modules: vec![], threads: vec![],
-            memory_regions: vec![], exception: None, anomalies: vec![],
+            system_info: None,
+            modules: vec![],
+            threads: vec![],
+            memory_regions: vec![],
+            exception: None,
+            anomalies: vec![],
             file_size: 0,
         };
         let space = AddressSpace::new(4);

@@ -8,17 +8,14 @@
 use forensicator_core::model::{MemState, RegionClass};
 use forensicator_core::space::{AddressRegion, AddressSpace};
 use mirrorrust::{
-    as_int, get_param, run_client, ApalacheConfig, State, StateComputer,
-    TraceGenerationConfig, Value,
+    ApalacheConfig, State, StateComputer, TraceGenerationConfig, Value, as_int, get_param,
+    run_client,
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
 fn st(pairs: Vec<(&str, Value)>) -> State {
-    pairs
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect()
+    pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
 fn seq_to_value(seq: &[i64]) -> Value {
@@ -117,11 +114,19 @@ impl PipelineComputer {
     }
 
     fn to_state(&self) -> State {
-        let s_va: Vec<i64> = self.space.regions().iter().map(|r| r.va_start as i64).collect();
+        let s_va: Vec<i64> = self
+            .space
+            .regions()
+            .iter()
+            .map(|r| r.va_start as i64)
+            .collect();
         let s_sz: Vec<i64> = self.space.regions().iter().map(|r| r.size as i64).collect();
-        let s_cl: Vec<&str> = self.space.regions().iter().map(|r| {
-            region_class_to_str(r.classification)
-        }).collect();
+        let s_cl: Vec<&str> = self
+            .space
+            .regions()
+            .iter()
+            .map(|r| region_class_to_str(r.classification))
+            .collect();
 
         st(vec![
             ("s_reg_va", seq_to_value(&s_va)),
@@ -217,8 +222,10 @@ impl StateComputer for PipelineComputer {
                 let conf = Self::get_int_param(params, "conf");
                 let src_idx = src as usize;
                 let tgt_idx = tgt as usize;
-                if src_idx >= 1 && src_idx <= self.nodes.len()
-                    && tgt_idx >= 1 && tgt_idx <= self.nodes.len()
+                if src_idx >= 1
+                    && src_idx <= self.nodes.len()
+                    && tgt_idx >= 1
+                    && tgt_idx <= self.nodes.len()
                 {
                     self.edge_from.push(src);
                     self.edge_to.push(tgt);
@@ -260,10 +267,12 @@ impl StateComputer for PipelineComputer {
 
 impl PipelineComputer {
     fn load_seq(&self, state: &State, key: &str) -> Vec<i64> {
-        state.get(key)
+        state
+            .get(key)
             .and_then(|v| match v {
                 Value::Set(s) => {
-                    let mut items: Vec<i64> = s.iter()
+                    let mut items: Vec<i64> = s
+                        .iter()
                         .filter_map(|v| match v {
                             Value::Int(n) => n.to_i64(),
                             _ => None,
@@ -279,8 +288,9 @@ impl PipelineComputer {
 }
 
 fn apalache_config() -> ApalacheConfig {
-    let spec_path = std::env::var("MBT_SPEC")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../specs/ForensicatorMBT.tla").to_string());
+    let spec_path = std::env::var("MBT_SPEC").unwrap_or_else(|_| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../specs/ForensicatorMBT.tla").to_string()
+    });
     ApalacheConfig {
         spec_path,
         invariant: "RootInvariant".into(),
@@ -308,6 +318,11 @@ fn mbt_forensicator() {
             return;
         }
     };
-    run_client(&bin, apalache_config(), trace_config(), PipelineComputer::new())
-        .expect("MBT forensicator test failed");
+    run_client(
+        &bin,
+        apalache_config(),
+        trace_config(),
+        PipelineComputer::new(),
+    )
+    .expect("MBT forensicator test failed");
 }

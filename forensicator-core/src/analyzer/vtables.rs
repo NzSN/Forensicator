@@ -9,13 +9,20 @@ pub struct VTableAnalyzer {
 
 impl Default for VTableAnalyzer {
     fn default() -> Self {
-        VTableAnalyzer { min_methods: 3, max_methods: 256 }
+        VTableAnalyzer {
+            min_methods: 3,
+            max_methods: 256,
+        }
     }
 }
 
 impl Analyzer for VTableAnalyzer {
-    fn name(&self) -> &str { "vtables" }
-    fn description(&self) -> &str { "Scans Image-region data for aligned function pointers forming vtables" }
+    fn name(&self) -> &str {
+        "vtables"
+    }
+    fn description(&self) -> &str {
+        "Scans Image-region data for aligned function pointers forming vtables"
+    }
 
     fn analyze(&self, _dump: &Dump, space: &AddressSpace) -> AnalyzerOutput {
         let mut out = AnalyzerOutput::new("vtables");

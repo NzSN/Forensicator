@@ -8,8 +8,8 @@
 use forensicator_core::model::{MemState, RegionClass};
 use forensicator_core::space::{AddressRegion, AddressSpace};
 use mirrorrust::{
-    as_int, as_str, get_param, run_client, ApalacheConfig, State, StateComputer,
-    TraceGenerationConfig, Value,
+    ApalacheConfig, State, StateComputer, TraceGenerationConfig, Value, as_int, as_str, get_param,
+    run_client,
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -80,7 +80,12 @@ impl SpaceComputer {
     }
 
     fn to_state(&self) -> State {
-        let reg_va: Vec<i64> = self.space.regions().iter().map(|r| r.va_start as i64).collect();
+        let reg_va: Vec<i64> = self
+            .space
+            .regions()
+            .iter()
+            .map(|r| r.va_start as i64)
+            .collect();
         let reg_sz: Vec<i64> = self.space.regions().iter().map(|r| r.size as i64).collect();
         let reg_cl: Vec<&str> = self
             .space
@@ -134,8 +139,8 @@ impl StateComputer for SpaceComputer {
                 };
                 match self.space.add_region(region) {
                     Ok(()) => {}
-                    Err(a) if a.description == "overlap"
-                        && self.anomalies.len() < MAX_ANOMALIES =>
+                    Err(a)
+                        if a.description == "overlap" && self.anomalies.len() < MAX_ANOMALIES =>
                     {
                         self.anomalies.push(a.description);
                     }
@@ -145,9 +150,7 @@ impl StateComputer for SpaceComputer {
             "Read" => {
                 let va = Self::get_int_param(params, "va") as u64;
                 let len = Self::get_int_param(params, "len") as usize;
-                if self.space.read(va, len).is_none()
-                    && self.anomalies.len() < MAX_ANOMALIES
-                {
+                if self.space.read(va, len).is_none() && self.anomalies.len() < MAX_ANOMALIES {
                     self.anomalies.push("read_beyond_region".to_string());
                 }
             }
@@ -188,6 +191,11 @@ fn mbt_address_space() {
             return;
         }
     };
-    run_client(&bin, apalache_config(), trace_config(), SpaceComputer::new())
-        .expect("MBT address space test failed");
+    run_client(
+        &bin,
+        apalache_config(),
+        trace_config(),
+        SpaceComputer::new(),
+    )
+    .expect("MBT address space test failed");
 }

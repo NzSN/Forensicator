@@ -29,24 +29,32 @@ pub fn decode_module_list(
     if data.len() < expected_len {
         return Err(Anomaly {
             provenance: prov,
-            description: format!("truncated ModuleList: expected {expected_len}, got {}", data.len()),
+            description: format!(
+                "truncated ModuleList: expected {expected_len}, got {}",
+                data.len()
+            ),
         });
     }
 
     let mut modules = Vec::with_capacity(count);
     for i in 0..count {
         let off = 4 + i * entry_size;
-        let base_va = u64::from_le_bytes(data[off..off+8].try_into().unwrap());
-        let mod_size = u32::from_le_bytes(data[off+8..off+12].try_into().unwrap()) as u64;
-        let checksum = u32::from_le_bytes(data[off+12..off+16].try_into().unwrap());
+        let base_va = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+        let mod_size = u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()) as u64;
+        let checksum = u32::from_le_bytes(data[off + 12..off + 16].try_into().unwrap());
 
         // Module name via ModuleNameRva (UTF-16, nul-terminated)
-        let name_rva = u32::from_le_bytes([data[off+20], data[off+21], data[off+22], data[off+23]]);
+        let name_rva = u32::from_le_bytes([
+            data[off + 20],
+            data[off + 21],
+            data[off + 22],
+            data[off + 23],
+        ]);
         let name = read_utf16_at_rva(full_data, name_rva).unwrap_or_default();
 
         // CV record (RSDS at +76: { DataSize u32, Rva u32 })
-        let cv_size = u32::from_le_bytes(data[off+76..off+80].try_into().unwrap());
-        let cv_rva  = u32::from_le_bytes(data[off+80..off+84].try_into().unwrap());
+        let cv_size = u32::from_le_bytes(data[off + 76..off + 80].try_into().unwrap());
+        let cv_rva = u32::from_le_bytes(data[off + 80..off + 84].try_into().unwrap());
 
         let (codeview_guid, pdb_name) = if cv_size >= 24 {
             let cv_start = cv_rva as usize;
@@ -59,8 +67,11 @@ pub fn decode_module_list(
                     let mut guid = [0u8; 16];
                     guid.copy_from_slice(&cv_bytes[4..20]);
                     let pdb = if cv_bytes.len() > 24 {
-                        let pdb_end = cv_bytes[24..].iter().position(|&b| b == 0).unwrap_or(cv_bytes.len() - 24);
-                        Some(String::from_utf8_lossy(&cv_bytes[24..24+pdb_end]).to_string())
+                        let pdb_end = cv_bytes[24..]
+                            .iter()
+                            .position(|&b| b == 0)
+                            .unwrap_or(cv_bytes.len() - 24);
+                        Some(String::from_utf8_lossy(&cv_bytes[24..24 + pdb_end]).to_string())
                     } else {
                         None
                     };
@@ -98,13 +109,20 @@ fn read_utf16_at_rva(full_data: &[u8], rva: u32) -> Option<String> {
         return None;
     }
     // MINIDUMP_STRING: 4-byte Length (in bytes), then UTF-16 buffer
-    let _len = u32::from_le_bytes([full_data[start], full_data[start+1], full_data[start+2], full_data[start+3]]);
+    let _len = u32::from_le_bytes([
+        full_data[start],
+        full_data[start + 1],
+        full_data[start + 2],
+        full_data[start + 3],
+    ]);
     let buf_start = start + 4;
     let mut units = Vec::new();
     let mut j = buf_start;
     while j + 1 < full_data.len() {
-        let w = u16::from_le_bytes([full_data[j], full_data[j+1]]);
-        if w == 0 { break; }
+        let w = u16::from_le_bytes([full_data[j], full_data[j + 1]]);
+        if w == 0 {
+            break;
+        }
         units.push(w);
         j += 2;
     }

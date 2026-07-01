@@ -1,12 +1,10 @@
 use std::process;
 
 use clap::{Parser, Subcommand};
-use forensicator_core::graph;
+use forensicator_core::analyzer::Pipeline;
 use forensicator_core::model::{CpuArch, OsPlatform};
 use forensicator_core::parse::dump;
-use forensicator_core::pattern::PointerPattern;
-use forensicator_core::query::GraphQuery;
-use forensicator_core::scan;
+use forensicator_core::pipeline::Forensicator;
 
 #[derive(Parser)]
 #[command(name = "forensicator")]
@@ -19,56 +17,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Inspect a minidump file and print its structural inventory.
     Inspect {
         path: String,
         #[arg(long)] json: bool,
         #[arg(long)] quiet: bool,
     },
-    /// Scan for pointer candidates using configured patterns.
-    Scan {
+    Analyze {
         path: String,
-        #[arg(long)] pattern: Option<String>,
+        #[arg(long)] plugin: Option<String>,
         #[arg(long)] json: bool,
     },
-    /// Build and export the pointer graph.
-    Graph {
-        path: String,
-        #[arg(long)] pattern: Option<String>,
-        #[arg(long, default_value = "0.5")] min_conf: f64,
-        #[arg(long)] dot: bool,
-        #[arg(long)] json: bool,
-    },
-    /// Query the pointer graph.
-    Query {
-        path: String,
-        #[arg(long)] reachable: Option<String>,
-        #[arg(long)] stats: bool,
-    },
-    /// List or show pointer patterns.
-    Patterns {
-        #[command(subcommand)]
-        action: PatternsAction,
-    },
-    /// Recover structures from a minidump.
-    Recover {
-        path: String,
-        #[arg(long)] strings: bool,
-        #[arg(long)] vtables: bool,
-        #[arg(long)] lists: bool,
-        #[arg(long)] arrays: bool,
-        #[arg(long)] chunks: bool,
-        #[arg(long)] shapes: bool,
-        #[arg(long)] all: bool,
-        #[arg(long)] json: bool,
-        #[arg(long)] pattern: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum PatternsAction {
-    List,
-    Show { name: String },
+    ListPlugins,
 }
 
 fn main() {
@@ -80,253 +39,225 @@ fn main() {
                 process::exit(1);
             }
         }
-        Commands::Scan { path, pattern, json } => {
-            if let Err(e) = cmd_scan(&path, pattern.as_deref(), json) {
+        Commands::Analyze { path, plugin, json } => {
+            if let Err(e) = cmd_analyze(&path, plugin.as_deref(), json) {
                 eprintln!("error: {e}");
                 process::exit(1);
             }
         }
-        Commands::Graph { path, pattern, min_conf, dot, json } => {
-            if let Err(e) = cmd_graph(&path, pattern.as_deref(), min_conf, dot, json) {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
-        }
-        Commands::Query { path, reachable, stats } => {
-            if let Err(e) = cmd_query(&path, reachable.as_deref(), stats) {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
-        }
-        Commands::Patterns { action } => match action {
-            PatternsAction::List => cmd_patterns_list(),
-            PatternsAction::Show { name } => cmd_patterns_show(&name),
-        },
-        Commands::Recover { path, strings, vtables, lists, arrays, chunks, shapes, all, json, pattern } => {
-            if let Err(e) = cmd_recover(&path, strings, vtables, lists, arrays, chunks, shapes, all, json, pattern.as_deref()) {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
-        }
+        Commands::ListPlugins => cmd_list_plugins(),
     }
 }
 
 fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dump = dump::open(path)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "file_size": dump.file_size,
-            "system_info": dump.system_info.as_ref().map(|si| serde_json::json!({
-                "os": os_name(si.os), "cpu": cpu_name(si.cpu),
-                "version": format!("{}.{}.{}.{}", si.version.0, si.version.1, si.version.2, si.version.3),
-            })),
-            "module_count": dump.modules.len(),
-            "thread_count": dump.threads.len(),
-            "memory_regions": dump.memory_regions.len(),
-            "exception": dump.exception.is_some(),
-            "anomaly_count": dump.anomalies.len(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "file_size": dump.file_size,
+                "system_info": dump.system_info.as_ref().map(|si| serde_json::json!({
+                    "os": os_name(si.os), "cpu": cpu_name(si.cpu),
+                    "version": format!("{}.{}.{}.{}", si.version.0, si.version.1, si.version.2, si.version.3),
+                })),
+                "module_count": dump.modules.len(),
+                "thread_count": dump.threads.len(),
+                "memory_regions": dump.memory_regions.len(),
+                "exception": dump.exception.is_some(),
+                "anomaly_count": dump.anomalies.len(),
+            }))?
+        );
         return Ok(());
     }
     if quiet {
-        println!("modules: {}  threads: {}  memory_regions: {}  anomalies: {}",
-            dump.modules.len(), dump.threads.len(), dump.memory_regions.len(), dump.anomalies.len());
+        println!(
+            "modules: {}  threads: {}  memory_regions: {}  anomalies: {}",
+            dump.modules.len(),
+            dump.threads.len(),
+            dump.memory_regions.len(),
+            dump.anomalies.len()
+        );
         return Ok(());
     }
     println!("Dump ({:.1} KB)", dump.file_size as f64 / 1024.0);
     if let Some(ref si) = dump.system_info {
-        println!("├── SystemInfo: {} on {} v{}.{}.{}.{}",
-            cpu_name(si.cpu), os_name(si.os), si.version.0, si.version.1, si.version.2, si.version.3);
-    } else { println!("├── SystemInfo: <missing>"); }
+        println!(
+            "├── SystemInfo: {} on {} v{}.{}.{}.{}",
+            cpu_name(si.cpu),
+            os_name(si.os),
+            si.version.0,
+            si.version.1,
+            si.version.2,
+            si.version.3
+        );
+    } else {
+        println!("├── SystemInfo: <missing>");
+    }
     println!("├── Modules: {} loaded", dump.modules.len());
     for m in &dump.modules {
-        println!("│   ├── {} @ 0x{:016X} ({:.1} KB)", m.name, m.base_va, m.size as f64 / 1024.0);
+        println!(
+            "│   ├── {} @ 0x{:016X} ({:.1} KB)",
+            m.name,
+            m.base_va,
+            m.size as f64 / 1024.0
+        );
     }
     println!("├── Threads: {}", dump.threads.len());
     for t in &dump.threads {
-        println!("│   ├── TID {}  stack @ 0x{:016X} ({:.1} KB)  TEB @ 0x{:016X}  RIP 0x{:016X}",
-            t.id, t.stack_va, t.stack_size as f64 / 1024.0, t.teb_va, t.registers.rip());
+        println!(
+            "│   ├── TID {}  stack @ 0x{:016X} ({:.1} KB)  TEB @ 0x{:016X}  RIP 0x{:016X}",
+            t.id,
+            t.stack_va,
+            t.stack_size as f64 / 1024.0,
+            t.teb_va,
+            t.registers.rip()
+        );
     }
     println!("├── Memory regions: {}", dump.memory_regions.len());
     if let Some(ref exc) = dump.exception {
-        println!("├── Exception: code 0x{:08X} at 0x{:016X} (thread {})", exc.code, exc.address, exc.thread_id);
+        println!(
+            "├── Exception: code 0x{:08X} at 0x{:016X} (thread {})",
+            exc.code, exc.address, exc.thread_id
+        );
     }
     if !dump.anomalies.is_empty() {
         println!("└── Anomalies: {}", dump.anomalies.len());
         for a in &dump.anomalies {
-            println!("    ├── [stream 0x{:08X} @ +0x{:X}] {}", a.provenance.stream_type, a.provenance.file_offset, a.description);
+            println!(
+                "    ├── [stream 0x{:08X} @ +0x{:X}] {}",
+                a.provenance.stream_type, a.provenance.file_offset, a.description
+            );
         }
     }
     Ok(())
 }
 
-fn cmd_scan(path: &str, pattern_name: Option<&str>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let dump = dump::open(path)?;
-    let space = forensicator_core::pipeline::Forensicator::build_address_space(&dump);
-    let patterns = select_patterns(pattern_name);
-    let registers: Vec<(u32, Vec<(String, u64)>)> = dump.threads.iter().map(|t| {
-        vec![("RIP".into(), t.registers.rip()), ("RSP".into(), t.registers.rsp()), ("RBP".into(), t.registers.rbp())]
-    }).enumerate().map(|(i, r)| (i as u32, r)).collect();
-    let stack_ranges: Vec<(u32, u64, u64)> = dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
-    let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
-    let result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns)?;
+fn cmd_analyze(path: &str, plugin: Option<&str>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let s1 = Forensicator::open(path)?;
+    let pipeline = Pipeline::default_pipeline();
+    let filter: Vec<&str> = plugin
+        .map(|p| p.split(',').map(|s| s.trim()).collect())
+        .unwrap_or_default();
+    let catalog = Forensicator::analyze(&s1, &pipeline, &filter);
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "candidate_count": result.candidates.len(), "root_count": result.roots.len(),
-            "candidates": result.candidates.iter().map(|c| serde_json::json!({
-                "source_va": format!("0x{:X}", c.source_va), "target_va": format!("0x{:X}", c.target_va),
-                "confidence": c.confidence, "evidence": c.evidence,
-            })).collect::<Vec<_>>(),
-        }))?);
+        let outputs: Vec<serde_json::Value> = catalog
+            .outputs
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "name": o.plugin_name,
+                    "count": o.strings.len() + o.vtables.len() + o.linked_lists.len()
+                        + o.arrays.len() + o.chunks.len() + o.shape_clusters.len(),
+                    "strings": if !o.strings.is_empty() {
+                        serde_json::Value::Array(
+                            o.strings.iter().map(|s| serde_json::json!({
+                                "va": format!("0x{:X}", s.va),
+                                "encoding": format!("{:?}", s.encoding),
+                                "content": s.content,
+                                "confidence": s.confidence,
+                            })).collect()
+                        )
+                    } else { serde_json::Value::Null },
+                    "vtables": if !o.vtables.is_empty() {
+                        serde_json::Value::Array(o.vtables.iter().map(|v| serde_json::json!({
+                            "va": format!("0x{:X}", v.va),
+                            "method_count": v.method_count,
+                            "confidence": v.confidence,
+                        })).collect())
+                    } else { serde_json::Value::Null },
+                    "linked_lists": if !o.linked_lists.is_empty() {
+                        serde_json::Value::Array(o.linked_lists.iter().map(|l| serde_json::json!({
+                            "head_va": format!("0x{:X}", l.head_va),
+                            "length": l.length,
+                            "stride": l.stride,
+                        })).collect())
+                    } else { serde_json::Value::Null },
+                    "arrays": if !o.arrays.is_empty() {
+                        serde_json::Value::Array(o.arrays.iter().map(|a| serde_json::json!({
+                            "start_va": format!("0x{:X}", a.start_va),
+                            "element_size": a.element_size,
+                            "count": a.count,
+                            "confidence": a.confidence,
+                        })).collect())
+                    } else { serde_json::Value::Null },
+                    "chunks": if !o.chunks.is_empty() {
+                        serde_json::Value::Array(o.chunks.iter().map(|c| serde_json::json!({
+                            "va_start": format!("0x{:X}", c.va_start),
+                            "size": c.size,
+                            "is_free": c.is_free,
+                            "confidence": c.confidence,
+                        })).collect())
+                    } else { serde_json::Value::Null },
+                    "shape_clusters": if !o.shape_clusters.is_empty() {
+                        serde_json::Value::Array(o.shape_clusters.iter().map(|g| serde_json::json!({
+                            "id": g.id,
+                            "member_count": g.member_count,
+                        })).collect())
+                    } else { serde_json::Value::Null },
+                    "custom": if !o.custom.is_empty() {
+                        serde_json::Value::Array(o.custom.iter().map(|(k, v)| serde_json::json!({ k: v })).collect())
+                    } else { serde_json::Value::Null },
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "plugins": outputs }))?);
     } else {
-        println!("Pointer scan: {} candidates, {} roots", result.candidates.len(), result.roots.len());
-        for c in &result.candidates {
-            println!("  0x{:016X} -> 0x{:016X}  conf={:.2}", c.source_va, c.target_va, c.confidence);
-        }
-    }
-    Ok(())
-}
-
-fn cmd_graph(path: &str, pattern_name: Option<&str>, _min_conf: f64, dot: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let dump = dump::open(path)?;
-    let space = forensicator_core::pipeline::Forensicator::build_address_space(&dump);
-    let patterns = select_patterns(pattern_name);
-    let registers: Vec<(u32, Vec<(String, u64)>)> = dump.threads.iter().map(|t| {
-        vec![("RIP".into(), t.registers.rip()), ("RSP".into(), t.registers.rsp()), ("RBP".into(), t.registers.rbp())]
-    }).enumerate().map(|(i, r)| (i as u32, r)).collect();
-    let stack_ranges: Vec<(u32, u64, u64)> = dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
-    let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
-    let scan_result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns)?;
-    let pointer_graph = graph::build_graph_with_capacity(&scan_result, 10_000_000, 100_000_000)?;
-    let query = GraphQuery::new(&pointer_graph);
-    if dot { println!("{}", query.to_dot()); }
-    else if json { println!("{}", serde_json::to_string_pretty(&query.to_json())?); }
-    else {
-        println!("Pointer graph: {} nodes, {} edges, {} roots",
-            pointer_graph.node_count(), pointer_graph.edge_count(), pointer_graph.root_nodes().len());
-        for (rc, nodes, edges) in query.region_breakdown() {
-            println!("  {:?}: {} nodes, {} edges", rc, nodes, edges);
-        }
-    }
-    Ok(())
-}
-
-fn cmd_query(path: &str, reachable: Option<&str>, stats: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let dump = dump::open(path)?;
-    let space = forensicator_core::pipeline::Forensicator::build_address_space(&dump);
-    let patterns = PointerPattern::presets();
-    let registers: Vec<(u32, Vec<(String, u64)>)> = dump.threads.iter().map(|t| {
-        vec![("RIP".into(), t.registers.rip()), ("RSP".into(), t.registers.rsp()), ("RBP".into(), t.registers.rbp())]
-    }).enumerate().map(|(i, r)| (i as u32, r)).collect();
-    let stack_ranges: Vec<(u32, u64, u64)> = dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
-    let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
-    let scan_result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns)?;
-    let pointer_graph = graph::build_graph_with_capacity(&scan_result, 10_000_000, 100_000_000)?;
-    let query = GraphQuery::new(&pointer_graph);
-    if let Some(va_str) = reachable {
-        let va = u64::from_str_radix(va_str.trim_start_matches("0x"), 16)?;
-        let nodes = query.reachable_from(va);
-        println!("Reachable from 0x{:X}: {} nodes", va, nodes.len());
-        for n in nodes { println!("  0x{:X}", pointer_graph.nodes[n.0].va); }
-    }
-    if stats {
-        println!("Degree distribution:");
-        for (deg, count) in query.degree_distribution() { println!("  {} -> {} nodes", deg, count); }
-        println!("Confidence distribution:");
-        for (bucket, count) in query.confidence_distribution() { println!("  bucket {} -> {} edges", bucket, count); }
-    }
-    Ok(())
-}
-
-fn cmd_recover(
-    path: &str, strings: bool, vtables: bool, lists: bool, arrays: bool, chunks: bool, shapes: bool,
-    all: bool, json: bool, pattern_name: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use forensicator_core::recover;
-    let dump = dump::open(path)?;
-    let space = forensicator_core::pipeline::Forensicator::build_address_space(&dump);
-    let patterns = if let Some(n) = pattern_name {
-        PointerPattern::presets().into_iter().filter(|p| p.name == n).collect()
-    } else { PointerPattern::presets() };
-    let registers: Vec<(u32, Vec<(String, u64)>)> = dump.threads.iter().map(|t| {
-        vec![("RIP".into(), t.registers.rip()), ("RSP".into(), t.registers.rsp()), ("RBP".into(), t.registers.rbp())]
-    }).enumerate().map(|(i, r)| (i as u32, r)).collect();
-    let stack_ranges: Vec<(u32, u64, u64)> = dump.threads.iter().map(|t| (t.id, t.stack_va, t.stack_size)).collect();
-    let reg_refs: Vec<(u32, &[(String, u64)])> = registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
-    let scan_result = scan::scan(&space, &reg_refs, &stack_ranges, &patterns)?;
-    let pointer_graph = graph::build_graph_with_capacity(&scan_result, 10_000_000, 100_000_000)?;
-    let query = GraphQuery::new(&pointer_graph);
-    let run_all = all || (!strings && !vtables && !lists && !arrays && !chunks && !shapes);
-    let catalog = recover::recover_all(&space, &pointer_graph, &query);
-    if json {
-        let output = serde_json::json!({
-            "strings": if run_all || strings { catalog.strings.len() } else { 0 },
-            "vtables": if run_all || vtables { catalog.vtables.len() } else { 0 },
-            "linked_lists": if run_all || lists { catalog.linked_lists.len() } else { 0 },
-            "arrays": if run_all || arrays { catalog.arrays.len() } else { 0 },
-            "chunks": if run_all || chunks { catalog.chunks.len() } else { 0 },
-            "shape_groups": catalog.shape_clusters.groups.len(),
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Structure recovery results:");
-        if run_all || strings { println!("  Strings: {}", catalog.strings.len()); }
-        if strings && !run_all {
-            let path = format!("{path}.strings");
-            let mut out = String::new();
-            for s in &catalog.strings {
-                let enc = match s.encoding {
-                    forensicator_core::model::StringEncoding::Ascii => "ASCII",
-                    forensicator_core::model::StringEncoding::Utf16Le => "UTF16",
-                    forensicator_core::model::StringEncoding::Utf16Be => "BE",
-                };
-                use std::fmt::Write;
-                let _ = writeln!(out, "0x{:016X} [{enc}] c{:.2} {}", s.va, s.confidence, s.content);
+        println!("Analysis results:");
+        for output in &catalog.outputs {
+            let total = output.strings.len()
+                + output.vtables.len()
+                + output.linked_lists.len()
+                + output.arrays.len()
+                + output.chunks.len()
+                + output.shape_clusters.len();
+            println!("  {}: {} results", output.plugin_name, total);
+            if !output.strings.is_empty() {
+                println!("    strings: {}", output.strings.len());
             }
-            std::fs::write(&path, out.as_bytes())?;
-            println!("  -> written {} strings to {path}", catalog.strings.len());
+            if !output.vtables.is_empty() {
+                println!("    vtables: {}", output.vtables.len());
+            }
+            if !output.linked_lists.is_empty() {
+                println!("    linked_lists: {}", output.linked_lists.len());
+            }
+            if !output.arrays.is_empty() {
+                println!("    arrays: {}", output.arrays.len());
+            }
+            if !output.chunks.is_empty() {
+                println!("    chunks: {}", output.chunks.len());
+            }
+            if !output.shape_clusters.is_empty() {
+                println!("    shape_clusters: {} groups", output.shape_clusters.len());
+            }
+            if !output.custom.is_empty() {
+                println!("    custom: {} entries", output.custom.len());
+            }
         }
-        if run_all || vtables { println!("  VTables: {}", catalog.vtables.len()); }
-        if run_all || lists { println!("  Linked lists: {}", catalog.linked_lists.len()); }
-        if run_all || arrays { println!("  Arrays: {}", catalog.arrays.len()); }
-        if run_all || chunks { println!("  Chunks: {}", catalog.chunks.len()); }
-        if run_all || shapes { println!("  Shape groups: {}", catalog.shape_clusters.groups.len()); }
     }
     Ok(())
 }
 
-fn cmd_patterns_list() {
-    println!("Pointer patterns:");
-    for p in PointerPattern::presets() {
-        println!("  {} (min_conf={:.2})", p.name, p.min_confidence);
-    }
-}
-
-fn cmd_patterns_show(name: &str) {
-    for p in PointerPattern::presets() {
-        if p.name == name {
-            println!("Pattern: {}", p.name);
-            println!("  min_confidence: {:.2}", p.min_confidence);
-            println!("  value_matchers: {:?}", p.value_matchers);
-            println!("  source: {:?}", p.source);
-            println!("  target: {:?}", p.target);
-            return;
-        }
-    }
-    println!("Pattern '{}' not found", name);
-}
-
-fn select_patterns(name: Option<&str>) -> Vec<PointerPattern> {
-    match name {
-        Some(n) => PointerPattern::presets().into_iter().filter(|p| p.name == n).collect(),
-        None => PointerPattern::presets(),
+fn cmd_list_plugins() {
+    println!("Available analyzers:");
+    let pipeline = Pipeline::default_pipeline();
+    for (name, desc) in pipeline.list_analyzers() {
+        println!("  {name}: {desc}");
     }
 }
 
 fn os_name(os: OsPlatform) -> &'static str {
-    match os { OsPlatform::Windows => "Windows", OsPlatform::Linux => "Linux", OsPlatform::MacOs => "macOS" }
+    match os {
+        OsPlatform::Windows => "Windows",
+        OsPlatform::Linux => "Linux",
+        OsPlatform::MacOs => "macOS",
+    }
 }
 
 fn cpu_name(cpu: CpuArch) -> &'static str {
-    match cpu { CpuArch::X86 => "x86", CpuArch::X64 => "x64", CpuArch::Arm64 => "ARM64" }
+    match cpu {
+        CpuArch::X86 => "x86",
+        CpuArch::X64 => "x64",
+        CpuArch::Arm64 => "ARM64",
+    }
 }

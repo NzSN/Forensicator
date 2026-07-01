@@ -5,9 +5,7 @@
 //!   e.g. MIRROR_BIN=D:\Tools\ModelMirrors.exe APALACHE_MC=...\wrapper.bat cargo test --test mbt_arch -- --nocapture
 
 use forensicator_core::arch::RegisterSet;
-use mirrorrust::{
-    run_client, ApalacheConfig, State, StateComputer, TraceGenerationConfig, Value,
-};
+use mirrorrust::{ApalacheConfig, State, StateComputer, TraceGenerationConfig, Value, run_client};
 use num_bigint::BigInt;
 
 fn st(pairs: Vec<(&str, Value)>) -> State {
@@ -57,12 +55,8 @@ impl ArchComputer {
     fn to_state(&self) -> State {
         let regs: Vec<i64> = match &self.decode {
             DecodeState::NotDecoded => vec![],
-            DecodeState::Success(rs) => {
-                (0..32).map(|i| rs.get(i) as i64).collect()
-            }
-            DecodeState::Truncated(rs) => {
-                (0..16).map(|i| rs.get(i) as i64).collect()
-            }
+            DecodeState::Success(rs) => (0..32).map(|i| rs.get(i) as i64).collect(),
+            DecodeState::Truncated(rs) => (0..16).map(|i| rs.get(i) as i64).collect(),
         };
 
         st(vec![
@@ -104,8 +98,9 @@ impl StateComputer for ArchComputer {
 }
 
 fn apalache_config() -> ApalacheConfig {
-    let spec_path = std::env::var("MBT_SPEC")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../specs/ArchMBT.tla").to_string());
+    let spec_path = std::env::var("MBT_SPEC").unwrap_or_else(|_| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../specs/ArchMBT.tla").to_string()
+    });
     ApalacheConfig {
         spec_path,
         invariant: "ArchInvariant".into(),

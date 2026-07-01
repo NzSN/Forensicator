@@ -24,17 +24,20 @@ pub fn decode_thread_list(data: &[u8], prov: Provenance) -> Result<Vec<Thread>, 
     if data.len() < expected_len {
         return Err(Anomaly {
             provenance: prov,
-            description: format!("truncated ThreadList: expected {expected_len}, got {}", data.len()),
+            description: format!(
+                "truncated ThreadList: expected {expected_len}, got {}",
+                data.len()
+            ),
         });
     }
 
     let mut threads = Vec::with_capacity(count);
     for i in 0..count {
         let off = 4 + i * entry_size;
-        let id        = u32::from_le_bytes(data[off..off+4].try_into().unwrap());
-        let teb_va    = u64::from_le_bytes(data[off+16..off+24].try_into().unwrap());
-        let stack_va  = u64::from_le_bytes(data[off+24..off+32].try_into().unwrap());
-        let stack_size= u32::from_le_bytes(data[off+32..off+36].try_into().unwrap()) as u64;
+        let id = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+        let teb_va = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+        let stack_va = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap());
+        let stack_size = u32::from_le_bytes(data[off + 32..off + 36].try_into().unwrap()) as u64;
 
         threads.push(Thread {
             id,
