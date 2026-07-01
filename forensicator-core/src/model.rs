@@ -282,14 +282,6 @@ impl Dump {
     }
 }
 
-/// Index into a PointerGraph's node array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeIndex(pub usize);
-
-/// Index into a PointerGraph's edge array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EdgeIndex(pub usize);
-
 /// Byte-level predicate on a raw 8-byte value.
 /// All matchers in a pattern are AND-ed.
 #[derive(Debug, Clone, PartialEq)]
@@ -366,177 +358,10 @@ pub enum TargetContext {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidatePointer {
     pub source_va: u64,
-    pub value: u64,
     pub target_va: u64,
     pub source_ctx: SourceContext,
     pub target_ctx: TargetContext,
     pub confidence: f64,
-    pub matched_by: Vec<String>,
-    pub evidence: Vec<String>,
-}
-
-/// Output of the scan phase.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ScanResult {
-    pub candidates: Vec<CandidatePointer>,
-    pub roots: Vec<Root>,
-}
-
-/// A root for graph traversal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Root {
-    Register { thread_id: u32, reg_name: String, va: u64 },
-    Stack { thread_id: u32, source_va: u64, va: u64 },
-    ModuleData { mod_name: String, source_va: u64, va: u64 },
-}
-
-impl Root {
-    pub fn va(&self) -> u64 {
-        match *self {
-            Root::Register { va, .. } => va,
-            Root::Stack { va, .. } => va,
-            Root::ModuleData { va, .. } => va,
-        }
-    }
-}
-
-/// A node in the pointer graph.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphNode {
-    pub va: u64,
-    pub region_class: RegionClass,
-    pub out_degree: usize,
-    pub in_degree: usize,
-    pub is_root: bool,
-}
-
-/// A directed edge in the pointer graph.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GraphEdge {
-    pub from: NodeIndex,
-    pub to: NodeIndex,
-    pub confidence: f64,
-    pub evidence: Vec<String>,
-    pub matched_by: Vec<String>,
-}
-
-/// The pointer graph: nodes, edges with dual adjacency, roots.
-#[derive(Debug, Clone)]
-pub struct PointerGraph {
-    pub nodes: Vec<GraphNode>,
-    pub adj_out: Vec<Vec<EdgeIndex>>,
-    pub adj_in: Vec<Vec<EdgeIndex>>,
-    pub edges: Vec<GraphEdge>,
-    pub va_to_node: std::collections::HashMap<u64, NodeIndex>,
-    pub roots: Vec<NodeIndex>,
-    max_nodes: usize,
-    max_edges: usize,
-}
-
-impl PointerGraph {
-    pub fn new() -> Self {
-        PointerGraph {
-            nodes: Vec::new(),
-            adj_out: Vec::new(),
-            adj_in: Vec::new(),
-            edges: Vec::new(),
-            va_to_node: std::collections::HashMap::new(),
-            roots: Vec::new(),
-            max_nodes: 1_000_000,
-            max_edges: 10_000_000,
-        }
-    }
-
-    pub fn with_capacity(max_nodes: usize, max_edges: usize) -> Self {
-        PointerGraph { max_nodes, max_edges, ..Self::new() }
-    }
-
-    pub fn node_count(&self) -> usize { self.nodes.len() }
-    pub fn edge_count(&self) -> usize { self.edges.len() }
-    pub fn root_nodes(&self) -> &[NodeIndex] { &self.roots }
-    pub fn max_nodes(&self) -> usize { self.max_nodes }
-    pub fn max_edges(&self) -> usize { self.max_edges }
-
-    pub fn node(&self, va: u64) -> Option<&GraphNode> {
-        self.va_to_node.get(&va).map(|&idx| &self.nodes[idx.0])
-    }
-}
-
-impl Default for PointerGraph {
-    fn default() -> Self { Self::new() }
-}
-
-/// Predicate for filtering graph edges during traversal.
-///
-/// `source_region`, `target_region`, and `max_depth` are checked by
-/// `matches_with_nodes()` (or by the query module's BFS logic) — they
-/// require access to `GraphNode` data that the basic `matches()` does
-/// not have.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EdgePredicate {
-    pub min_confidence: f64,
-    pub max_confidence: f64,
-    /// Checked by `matches_with_nodes()` / GraphQuery — requires source node ref.
-    pub source_region: Option<RegionClass>,
-    /// Checked by `matches_with_nodes()` / GraphQuery — requires target node ref.
-    pub target_region: Option<RegionClass>,
-    /// Checked by the query module's BFS traversal, not by `matches()`.
-    pub max_depth: Option<usize>,
-    pub matched_by_pattern: Option<String>,
-}
-
-impl EdgePredicate {
-    /// Check edge-level fields (confidence, matched_by_pattern) only.
-    pub fn matches(&self, edge: &GraphEdge) -> bool {
-        if edge.confidence < self.min_confidence { return false; }
-        if edge.confidence > self.max_confidence { return false; }
-        if let Some(ref pat) = self.matched_by_pattern {
-            if !edge.matched_by.iter().any(|m| m == pat) { return false; }
-        }
-        true
-    }
-
-    /// Full check including region and depth filters that require node references.
-    pub fn matches_with_nodes(
-        &self,
-        edge: &GraphEdge,
-        source_node: &GraphNode,
-        target_node: &GraphNode,
-        current_depth: usize,
-    ) -> bool {
-        if !self.matches(edge) { return false; }
-        if let Some(ref region) = self.source_region {
-            if source_node.region_class != *region { return false; }
-        }
-        if let Some(ref region) = self.target_region {
-            if target_node.region_class != *region { return false; }
-        }
-        if let Some(max) = self.max_depth {
-            if current_depth > max { return false; }
-        }
-        true
-    }
-}
-
-impl Default for EdgePredicate {
-    fn default() -> Self {
-        EdgePredicate {
-            min_confidence: 0.0,
-            max_confidence: 1.0,
-            source_region: None,
-            target_region: None,
-            max_depth: None,
-            matched_by_pattern: None,
-        }
-    }
-}
-
-/// A path through the graph: sequence of nodes and edges.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EdgePath {
-    pub nodes: Vec<NodeIndex>,
-    pub edges: Vec<EdgeIndex>,
-    pub total_confidence: f64,
 }
 
 /// String encoding detected by the string scanner.
@@ -615,23 +440,6 @@ pub struct ShapeGroup {
     pub signature: ShapeSignature,
     pub member_count: usize,
     pub members: Vec<u64>,
-}
-
-/// All shape groups found, sorted by member_count descending.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ShapeClusters {
-    pub groups: Vec<ShapeGroup>,
-}
-
-/// Aggregated output of all S3 detectors.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StructureCatalog {
-    pub strings: Vec<StructString>,
-    pub vtables: Vec<StructVTable>,
-    pub linked_lists: Vec<StructLinkedList>,
-    pub arrays: Vec<StructArray>,
-    pub chunks: Vec<StructChunk>,
-    pub shape_clusters: ShapeClusters,
 }
 
 #[cfg(test)]
@@ -861,12 +669,6 @@ mod tests {
     }
 
     #[test]
-    fn node_index_wrapping() {
-        let ni = NodeIndex(5);
-        assert_eq!(ni.0, 5);
-    }
-
-    #[test]
     fn value_matcher_aligned_to_matches() {
         assert!(ValueMatcher::AlignedTo(8).eval(0x7FFA_1000));
         assert!(!ValueMatcher::AlignedTo(8).eval(0x7FFA_1001));
@@ -924,80 +726,13 @@ mod tests {
     fn candidate_pointer_construction() {
         let c = CandidatePointer {
             source_va: 0x1000,
-            value: 0x7FFA_2000,
             target_va: 0x7FFA_2000,
             source_ctx: SourceContext::Stack { thread_id: Some(1) },
             target_ctx: TargetContext::Image,
             confidence: 0.85,
-            matched_by: vec!["test".into()],
-            evidence: vec!["aligned".into()],
         };
         assert_eq!(c.source_va, 0x1000);
         assert_eq!(c.confidence, 0.85);
-    }
-
-    #[test]
-    fn scan_result_empty() {
-        let sr = ScanResult { candidates: vec![], roots: vec![] };
-        assert!(sr.candidates.is_empty());
-        assert!(sr.roots.is_empty());
-    }
-
-    #[test]
-    fn root_register_variant() {
-        let r = Root::Register { thread_id: 1, reg_name: "RIP".into(), va: 0x7FFA_1000 };
-        match r {
-            Root::Register { thread_id, ref reg_name, va } => {
-                assert_eq!(thread_id, 1);
-                assert_eq!(reg_name, "RIP");
-                assert_eq!(va, 0x7FFA_1000);
-            }
-            _ => panic!("expected Register variant"),
-        }
-    }
-
-    #[test]
-    fn graph_node_default() {
-        let n = GraphNode { va: 0x400000, region_class: RegionClass::Image, out_degree: 0, in_degree: 0, is_root: false };
-        assert_eq!(n.va, 0x400000);
-        assert!(!n.is_root);
-    }
-
-    #[test]
-    fn graph_edge_construction() {
-        let e = GraphEdge { from: NodeIndex(0), to: NodeIndex(1), confidence: 0.75, evidence: vec!["canonical".into()], matched_by: vec!["all_strict".into()] };
-        assert_eq!(e.from, NodeIndex(0));
-        assert_eq!(e.to, NodeIndex(1));
-        assert_eq!(e.confidence, 0.75);
-    }
-
-    #[test]
-    fn pointer_graph_empty() {
-        let g = PointerGraph::new();
-        assert_eq!(g.node_count(), 0);
-        assert_eq!(g.edge_count(), 0);
-        assert!(g.root_nodes().is_empty());
-    }
-
-    #[test]
-    fn edge_predicate_default_allows_all() {
-        let p = EdgePredicate::default();
-        assert!(p.matches(&GraphEdge { from: NodeIndex(0), to: NodeIndex(1), confidence: 0.5, evidence: vec![], matched_by: vec![] }));
-    }
-
-    #[test]
-    fn edge_predicate_confidence_filter() {
-        let p = EdgePredicate { min_confidence: 0.6, ..Default::default() };
-        let good = GraphEdge { from: NodeIndex(0), to: NodeIndex(1), confidence: 0.8, evidence: vec![], matched_by: vec![] };
-        let bad = GraphEdge { from: NodeIndex(0), to: NodeIndex(2), confidence: 0.4, evidence: vec![], matched_by: vec![] };
-        assert!(p.matches(&good));
-        assert!(!p.matches(&bad));
-    }
-
-    #[test]
-    fn edge_path_total_confidence() {
-        let path = EdgePath { nodes: vec![NodeIndex(0), NodeIndex(1)], edges: vec![EdgeIndex(0)], total_confidence: 0.72 };
-        assert_eq!(path.total_confidence, 0.72);
     }
 
     #[test]
@@ -1055,17 +790,5 @@ mod tests {
         let sig = ShapeSignature { edges: vec![(0x00, RegionClass::Private)] };
         let g = ShapeGroup { id: 0, signature: sig, member_count: 5, members: vec![] };
         assert_eq!(g.member_count, 5);
-    }
-
-    #[test]
-    fn shape_clusters_empty() {
-        let sc = ShapeClusters { groups: vec![] };
-        assert!(sc.groups.is_empty());
-    }
-
-    #[test]
-    fn structure_catalog_empty() {
-        let cat = StructureCatalog { strings: vec![], vtables: vec![], linked_lists: vec![], arrays: vec![], chunks: vec![], shape_clusters: ShapeClusters { groups: vec![] } };
-        assert!(cat.strings.is_empty());
     }
 }
