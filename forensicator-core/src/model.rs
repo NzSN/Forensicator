@@ -54,17 +54,27 @@ pub struct Thread {
 pub struct Protection(u32);
 
 impl Protection {
-    pub fn bits(&self) -> u32 { self.0 }
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
     pub const READ: u32 = 1;
     pub const WRITE: u32 = 2;
     pub const EXECUTE: u32 = 4;
     pub const GUARD: u32 = 8;
     pub const NO_CACHE: u32 = 16;
 
-    pub fn new(flags: u32) -> Self { Protection(flags) }
-    pub fn is_readable(&self) -> bool { self.0 & Self::READ != 0 }
-    pub fn is_writable(&self) -> bool { self.0 & Self::WRITE != 0 }
-    pub fn is_executable(&self) -> bool { self.0 & Self::EXECUTE != 0 }
+    pub fn new(flags: u32) -> Self {
+        Protection(flags)
+    }
+    pub fn is_readable(&self) -> bool {
+        self.0 & Self::READ != 0
+    }
+    pub fn is_writable(&self) -> bool {
+        self.0 & Self::WRITE != 0
+    }
+    pub fn is_executable(&self) -> bool {
+        self.0 & Self::EXECUTE != 0
+    }
 }
 
 /// Memory state.
@@ -166,22 +176,37 @@ impl Dump {
         version: (u32, u32, u32, u32),
         provenance: Provenance,
     ) {
-        if self.system_info.is_some() { return; }
-        if provenance.stream_type == 0 { return; }
+        if self.system_info.is_some() {
+            return;
+        }
+        if provenance.stream_type == 0 {
+            return;
+        }
         self.system_info = Some(SystemInfo {
-            os, cpu, version, provenance,
+            os,
+            cpu,
+            version,
+            provenance,
         });
     }
 
     /// Add a module.  If the new module overlaps an existing one, records an
     /// "overlapping module" anomaly instead (matching Model.tla).
     pub fn add_module(&mut self, base_va: u64, size: u64, provenance: Provenance) {
-        if self.modules.len() >= Self::MAX_MODULES { return; }
-        if size == 0 || provenance.stream_type == 0 { return; }
+        if self.modules.len() >= Self::MAX_MODULES {
+            return;
+        }
+        if size == 0 || provenance.stream_type == 0 {
+            return;
+        }
         if self.has_module_overlap(base_va, size) {
             if self.anomalies.len() < Self::MAX_ANOMALIES {
                 self.anomalies.push(Anomaly {
-                    provenance: Provenance { stream_type: 0, file_offset: 0, rva: 0 },
+                    provenance: Provenance {
+                        stream_type: 0,
+                        file_offset: 0,
+                        rva: 0,
+                    },
                     description: "overlapping module".into(),
                 });
             }
@@ -210,15 +235,13 @@ impl Dump {
     }
 
     /// Add a thread.
-    pub fn add_thread(
-        &mut self,
-        id: u32,
-        stack_va: u64,
-        stack_size: u64,
-        provenance: Provenance,
-    ) {
-        if self.threads.len() >= Self::MAX_THREADS { return; }
-        if stack_size == 0 || provenance.stream_type == 0 { return; }
+    pub fn add_thread(&mut self, id: u32, stack_va: u64, stack_size: u64, provenance: Provenance) {
+        if self.threads.len() >= Self::MAX_THREADS {
+            return;
+        }
+        if stack_size == 0 || provenance.stream_type == 0 {
+            return;
+        }
         self.threads.push(Thread {
             id,
             registers: RegisterSet::new(),
@@ -240,8 +263,12 @@ impl Dump {
         class: RegionClass,
         provenance: Provenance,
     ) {
-        if self.memory_regions.len() >= Self::MAX_REGIONS { return; }
-        if size == 0 || provenance.stream_type == 0 { return; }
+        if self.memory_regions.len() >= Self::MAX_REGIONS {
+            return;
+        }
+        if size == 0 || provenance.stream_type == 0 {
+            return;
+        }
         self.memory_regions.push(MemoryRegionInfo {
             va_start,
             size,
@@ -263,10 +290,17 @@ impl Dump {
         flags: u32,
         provenance: Provenance,
     ) {
-        if self.exception.is_some() { return; }
-        if provenance.stream_type == 0 { return; }
+        if self.exception.is_some() {
+            return;
+        }
+        if provenance.stream_type == 0 {
+            return;
+        }
         self.exception = Some(ExceptionInfo {
-            code, address, thread_id, flags,
+            code,
+            address,
+            thread_id,
+            flags,
             context: None,
             provenance,
         });
@@ -274,9 +308,15 @@ impl Dump {
 
     /// Record a non‑fatal anomaly.
     pub fn add_anomaly(&mut self, description: &str) {
-        if self.anomalies.len() >= Self::MAX_ANOMALIES { return; }
+        if self.anomalies.len() >= Self::MAX_ANOMALIES {
+            return;
+        }
         self.anomalies.push(Anomaly {
-            provenance: Provenance { stream_type: 0, file_offset: 0, rva: 0 },
+            provenance: Provenance {
+                stream_type: 0,
+                file_offset: 0,
+                rva: 0,
+            },
             description: description.to_string(),
         });
     }
@@ -324,7 +364,11 @@ impl ValueMatcher {
             }
             ValueMatcher::InRange { lo, hi } => value >= lo && value <= hi,
             ValueMatcher::Modulo { divisor, remainder } => {
-                if divisor == 0 { false } else { value % divisor == remainder }
+                if divisor == 0 {
+                    false
+                } else {
+                    value % divisor == remainder
+                }
             }
             ValueMatcher::MatchSize(4) => value <= 0xFFFF_FFFF,
             ValueMatcher::MatchSize(8) => true,
@@ -442,13 +486,50 @@ pub struct ShapeGroup {
     pub members: Vec<u64>,
 }
 
+/// Result of a pointer scan pass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanResult {
+    pub candidates: Vec<CandidatePointer>,
+}
+
+/// A node in the pointer graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphNode {
+    pub va: u64,
+    pub size: u64,
+    pub region_class: RegionClass,
+}
+
+/// An edge in the pointer graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphEdge {
+    pub source: usize,
+    pub target: usize,
+    pub offset: u64,
+    pub confidence: f64,
+}
+
+/// The pointer graph: dual adjacency, va→node map, capacity caps.
+#[derive(Debug, Clone)]
+pub struct PointerGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub va_to_node: std::collections::HashMap<u64, usize>,
+    pub max_nodes: usize,
+    pub max_edges: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::Provenance;
 
     fn dummy_prov() -> Provenance {
-        Provenance { stream_type: 0, file_offset: 0, rva: 0 }
+        Provenance {
+            stream_type: 0,
+            file_offset: 0,
+            rva: 0,
+        }
     }
 
     #[test]
@@ -474,8 +555,12 @@ mod tests {
     #[test]
     fn dump_empty() {
         let d = Dump {
-            system_info: None, modules: vec![], threads: vec![],
-            memory_regions: vec![], exception: None, anomalies: vec![],
+            system_info: None,
+            modules: vec![],
+            threads: vec![],
+            memory_regions: vec![],
+            exception: None,
+            anomalies: vec![],
             file_size: 0,
         };
         assert_eq!(d.modules.len(), 0);
@@ -484,8 +569,10 @@ mod tests {
     #[test]
     fn system_info_with_provenance() {
         let si = SystemInfo {
-            os: OsPlatform::Windows, cpu: CpuArch::X64,
-            version: (10, 0, 19041, 0), provenance: dummy_prov(),
+            os: OsPlatform::Windows,
+            cpu: CpuArch::X64,
+            version: (10, 0, 19041, 0),
+            provenance: dummy_prov(),
         };
         assert_eq!(si.cpu, CpuArch::X64);
     }
@@ -540,7 +627,8 @@ mod tests {
     #[test]
     fn module_with_pdb() {
         let mut guid = [0u8; 16];
-        guid[0] = 0xAB; guid[1] = 0xCD;
+        guid[0] = 0xAB;
+        guid[1] = 0xCD;
         let m = Module {
             name: "ntdll.dll".into(),
             base_va: 0x7FFA_0000,
@@ -621,22 +709,35 @@ mod tests {
     #[test]
     fn dump_with_all_fields() {
         let si = SystemInfo {
-            os: OsPlatform::Windows, cpu: CpuArch::X64,
-            version: (10, 0, 22000, 0), provenance: dummy_prov(),
+            os: OsPlatform::Windows,
+            cpu: CpuArch::X64,
+            version: (10, 0, 22000, 0),
+            provenance: dummy_prov(),
         };
         let m = Module {
-            name: "test.exe".into(), base_va: 0x140000000, size: 0x1000,
-            checksum: 0, codeview_guid: None, pdb_name: None,
+            name: "test.exe".into(),
+            base_va: 0x140000000,
+            size: 0x1000,
+            checksum: 0,
+            codeview_guid: None,
+            pdb_name: None,
             provenance: dummy_prov(),
         };
         let t = Thread {
-            id: 1, registers: RegisterSet::new(),
-            stack_va: 0x7FFE_0000, stack_size: 0x10000, teb_va: 0x7FFD_E000,
+            id: 1,
+            registers: RegisterSet::new(),
+            stack_va: 0x7FFE_0000,
+            stack_size: 0x10000,
+            teb_va: 0x7FFD_E000,
             provenance: dummy_prov(),
         };
         let exc = ExceptionInfo {
-            code: 0xC0000005, address: 0, thread_id: 1, flags: 0,
-            context: None, provenance: dummy_prov(),
+            code: 0xC0000005,
+            address: 0,
+            thread_id: 1,
+            flags: 0,
+            context: None,
+            provenance: dummy_prov(),
         };
         let d = Dump {
             system_info: Some(si),
@@ -676,7 +777,10 @@ mod tests {
 
     #[test]
     fn value_matcher_in_range() {
-        let m = ValueMatcher::InRange { lo: 0x1000, hi: 0x2000 };
+        let m = ValueMatcher::InRange {
+            lo: 0x1000,
+            hi: 0x2000,
+        };
         assert!(m.eval(0x1500));
         assert!(!m.eval(0x3000));
     }
@@ -689,14 +793,20 @@ mod tests {
 
     #[test]
     fn value_matcher_bitmask() {
-        let m = ValueMatcher::BitMask { mask: 0xFF, expected: 0xAB };
+        let m = ValueMatcher::BitMask {
+            mask: 0xFF,
+            expected: 0xAB,
+        };
         assert!(m.eval(0x7FFA_10AB));
         assert!(!m.eval(0x7FFA_10CD));
     }
 
     #[test]
     fn value_matcher_modulo() {
-        let m = ValueMatcher::Modulo { divisor: 4, remainder: 0 };
+        let m = ValueMatcher::Modulo {
+            divisor: 4,
+            remainder: 0,
+        };
         assert!(m.eval(16));
         assert!(!m.eval(17));
     }
@@ -744,7 +854,13 @@ mod tests {
 
     #[test]
     fn struct_string_construction() {
-        let s = StructString { va: 0x1000, byte_len: 12, encoding: StringEncoding::Ascii, content: "hello".into(), confidence: 0.95 };
+        let s = StructString {
+            va: 0x1000,
+            byte_len: 12,
+            encoding: StringEncoding::Ascii,
+            content: "hello".into(),
+            confidence: 0.95,
+        };
         assert_eq!(s.va, 0x1000);
         assert_eq!(s.byte_len, 12);
         assert_eq!(s.content, "hello");
@@ -753,42 +869,80 @@ mod tests {
 
     #[test]
     fn struct_vtable_construction() {
-        let v = StructVTable { va: 0x400000, method_count: 3, methods: vec![0x401000, 0x402000, 0x403000], module_name: Some("test.dll".into()), confidence: 0.9 };
+        let v = StructVTable {
+            va: 0x400000,
+            method_count: 3,
+            methods: vec![0x401000, 0x402000, 0x403000],
+            module_name: Some("test.dll".into()),
+            confidence: 0.9,
+        };
         assert_eq!(v.method_count, 3);
         assert_eq!(v.methods.len(), 3);
     }
 
     #[test]
     fn struct_linked_list_construction() {
-        let l = StructLinkedList { head_va: 0x1000, length: 5, stride: 0x20, next_offset: 0x08, is_circular: false, nodes: vec![0x1000, 0x1020], avg_confidence: 0.8 };
+        let l = StructLinkedList {
+            head_va: 0x1000,
+            length: 5,
+            stride: 0x20,
+            next_offset: 0x08,
+            is_circular: false,
+            nodes: vec![0x1000, 0x1020],
+            avg_confidence: 0.8,
+        };
         assert_eq!(l.length, 5);
         assert!(!l.is_circular);
     }
 
     #[test]
     fn struct_array_construction() {
-        let a = StructArray { start_va: 0x2000, element_size: 0x10, count: 4, out_degree: 1, region_class: RegionClass::Private, elements: vec![0x2000, 0x2010, 0x2020, 0x2030], confidence: 0.85 };
+        let a = StructArray {
+            start_va: 0x2000,
+            element_size: 0x10,
+            count: 4,
+            out_degree: 1,
+            region_class: RegionClass::Private,
+            elements: vec![0x2000, 0x2010, 0x2020, 0x2030],
+            confidence: 0.85,
+        };
         assert_eq!(a.count, 4);
         assert_eq!(a.element_size, 0x10);
     }
 
     #[test]
     fn struct_chunk_construction() {
-        let c = StructChunk { va_start: 0x10000, size: 0x1000, is_free: false, node_count: 12, pointer_density: 0.75, confidence: 0.6 };
+        let c = StructChunk {
+            va_start: 0x10000,
+            size: 0x1000,
+            is_free: false,
+            node_count: 12,
+            pointer_density: 0.75,
+            confidence: 0.6,
+        };
         assert_eq!(c.size, 0x1000);
         assert!(!c.is_free);
     }
 
     #[test]
     fn shape_signature_construction() {
-        let sig = ShapeSignature { edges: vec![(0x00, RegionClass::Image), (0x08, RegionClass::Private)] };
+        let sig = ShapeSignature {
+            edges: vec![(0x00, RegionClass::Image), (0x08, RegionClass::Private)],
+        };
         assert_eq!(sig.edges.len(), 2);
     }
 
     #[test]
     fn shape_group_construction() {
-        let sig = ShapeSignature { edges: vec![(0x00, RegionClass::Private)] };
-        let g = ShapeGroup { id: 0, signature: sig, member_count: 5, members: vec![] };
+        let sig = ShapeSignature {
+            edges: vec![(0x00, RegionClass::Private)],
+        };
+        let g = ShapeGroup {
+            id: 0,
+            signature: sig,
+            member_count: 5,
+            members: vec![],
+        };
         assert_eq!(g.member_count, 5);
     }
 }

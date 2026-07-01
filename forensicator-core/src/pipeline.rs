@@ -1,9 +1,10 @@
 use std::path::Path;
 
+use crate::analyzer::StructureCatalog;
 use crate::error::Anomaly;
 use crate::error::FatalError;
 use crate::graph;
-use crate::model::{Dump, PointerGraph, ScanResult, StructureCatalog};
+use crate::model::{Dump, PointerGraph, ScanResult};
 use crate::parse::dump;
 use crate::pattern::PointerPattern;
 use crate::query::GraphQuery;
@@ -61,14 +62,13 @@ impl Forensicator {
     /// Corresponds to TLA+ actions:
     ///   BuildPointerGraph — transfers nodes from model + non-deterministic edges
     /// Uses S1's address space for region classification and memory reads.
-    pub fn s2(
-        s1: &S1Output,
-        patterns: &[PointerPattern],
-    ) -> Result<S2Output, Anomaly> {
+    pub fn s2(s1: &S1Output, patterns: &[PointerPattern]) -> Result<S2Output, Anomaly> {
         let registers = thread_registers(&s1.dump);
         let stack_ranges = thread_stacks(&s1.dump);
-        let reg_refs: Vec<(u32, &[(String, u64)])> =
-            registers.iter().map(|(tid, r)| (*tid, r.as_slice())).collect();
+        let reg_refs: Vec<(u32, &[(String, u64)])> = registers
+            .iter()
+            .map(|(tid, r)| (*tid, r.as_slice()))
+            .collect();
         let scan_result = scan::scan(&s1.space, &reg_refs, &stack_ranges, patterns)?;
         let graph = graph::build_graph(&scan_result)?;
         Ok(S2Output { scan_result, graph })
@@ -105,7 +105,9 @@ impl Forensicator {
                 data: region.data.clone(),
                 protection: region.protection.bits(),
                 state: region.state,
-                classification: region.region_class.unwrap_or(crate::model::RegionClass::Other),
+                classification: region
+                    .region_class
+                    .unwrap_or(crate::model::RegionClass::Other),
             };
             let _ = space.add_region(ar);
         }
