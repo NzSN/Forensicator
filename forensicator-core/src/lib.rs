@@ -9,4 +9,5 @@ pub mod parse;
 pub mod pattern;
 pub mod pipeline;
 pub mod space;
+pub mod symbolizer;
 
