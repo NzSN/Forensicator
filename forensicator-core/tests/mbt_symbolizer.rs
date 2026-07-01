@@ -19,10 +19,6 @@ fn st(pairs: Vec<(&str, Value)>) -> State {
     pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
-fn str_set_to_value(set: &[String]) -> Value {
-    Value::Set(set.iter().map(|s| Value::Str(s.clone())).collect())
-}
-
 fn anomalies_to_value(anomalies: &[String]) -> Value {
     Value::Set(
         anomalies
@@ -38,32 +34,6 @@ fn anomalies_to_value(anomalies: &[String]) -> Value {
     )
 }
 
-fn entries_to_value(entries: &[SymbolEntry]) -> Value {
-    Value::Set(
-        entries
-            .iter()
-            .map(|e| {
-                Value::Record(
-                    vec![
-                        ("va".to_string(), Value::Int(BigInt::from(e.va as i64))),
-                        ("name".to_string(), Value::Str(e.function_name.clone())),
-                        (
-                            "file".to_string(),
-                            Value::Str(e.source_file.clone().unwrap_or_default()),
-                        ),
-                        (
-                            "line".to_string(),
-                            Value::Int(BigInt::from(e.source_line.unwrap_or(0) as i64)),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect::<BTreeMap<_, _>>(),
-                )
-            })
-            .collect(),
-    )
-}
-
 fn symbol_entry(va: u64, k: usize) -> SymbolEntry {
     SymbolEntry {
         va,
@@ -73,11 +43,12 @@ fn symbol_entry(va: u64, k: usize) -> SymbolEntry {
     }
 }
 
-/// Mirrors the TLA+ state and exercises the real Symbolizer::resolve().
+/// Mirrors the TLA+ state produced by SymbolizerMBT.tla.
+/// Exercises real Symbolizer::resolve() for each ResolveAddress action.
 struct SymbolizerComputer {
     symbolizer: Symbolizer,
-    module_names: Vec<String>,        // ordered list (mirrors sym_loaded)
-    entries: Vec<Vec<SymbolEntry>>,   // per-module symbol entries (mirrors sym_entries)
+    modules: Vec<(String, u64, u64)>,
+    tables: Vec<Vec<SymbolEntry>>,
     anomalies: Vec<String>,
 }
 
@@ -88,70 +59,90 @@ impl SymbolizerComputer {
     fn new() -> Self {
         SymbolizerComputer {
             symbolizer: Symbolizer::from_modules(vec![]),
-            module_names: vec![],
-            entries: vec![],
+            modules: vec![],
+            tables: vec![],
             anomalies: vec![],
         }
     }
 
     fn to_state(&self) -> State {
-        let mut entries_map: BTreeMap<String, Value> = BTreeMap::new();
-        for (i, name) in self.module_names.iter().enumerate() {
-            let ents = self.entries.get(i).map(|e| e.as_slice()).unwrap_or(&[]);
-            entries_map.insert(name.clone(), entries_to_value(ents));
-        }
+        let mods: Vec<Value> = self
+            .modules
+            .iter()
+            .map(|(name, base, sz)| {
+                Value::Record(
+                    vec![
+                        ("name".to_string(), Value::Str(name.clone())),
+                        ("base_va".to_string(), Value::Int(BigInt::from(*base as i64))),
+                        ("size".to_string(), Value::Int(BigInt::from(*sz as i64))),
+                    ]
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>(),
+                )
+            })
+            .collect();
 
         st(vec![
-            ("sym_loaded", str_set_to_value(&self.module_names)),
-            ("sym_entries", Value::Record(entries_map)),
+            ("sym_modules", Value::Set(mods)),
             ("sym_anomalies", anomalies_to_value(&self.anomalies)),
         ])
     }
 
     fn rebuild_symbolizer(&mut self) {
-        let mut modules: Vec<ModuleSymbols> = Vec::new();
-        for (i, name) in self.module_names.iter().enumerate() {
-            let syms = self.entries.get(i).cloned().unwrap_or_default();
-            let size = syms.last().map(|s| s.va + 256).unwrap_or(4096);
-            modules.push(ModuleSymbols::new(name.clone(), 0, size, syms));
+        let mut ms: Vec<ModuleSymbols> = Vec::new();
+        for (i, (name, base, sz)) in self.modules.iter().enumerate() {
+            let syms = self.tables.get(i).cloned().unwrap_or_default();
+            ms.push(ModuleSymbols::new(name.clone(), *base, *sz, syms));
         }
-        self.symbolizer = Symbolizer::from_modules(modules);
+        self.symbolizer = Symbolizer::from_modules(ms);
     }
 }
 
 impl StateComputer for SymbolizerComputer {
     fn compute(&mut self, action: &str, params: &State, _prev: &State) -> State {
+        let get_str = |key: &str| -> String {
+            get_param(params, "parameters")
+                .and_then(|p| p.get(key))
+                .and_then(as_str)
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        };
+        let get_int = |key: &str| -> u64 {
+            get_param(params, "parameters")
+                .and_then(|p| p.get(key))
+                .and_then(as_int)
+                .and_then(|n| n.to_u64())
+                .unwrap_or(0)
+        };
+
         match action {
             "Init" => {
                 *self = SymbolizerComputer::new();
             }
             "LoadPdb" => {
-                let name = get_param(params, "parameters")
-                    .and_then(|p| p.get("name"))
-                    .and_then(as_str)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                let name = get_str("name");
+                let base_va = get_int("base_va");
+                let size = get_int("size");
 
-                if !name.is_empty() && !self.module_names.contains(&name) {
-                    let count = (self.module_names.len() % MAX_SYMBOLS) + 1;
-                    let mut entries: Vec<SymbolEntry> =
-                        (1..=count).map(|k| symbol_entry((k * 256) as u64, k)).collect();
+                if !name.is_empty() && !self.modules.iter().any(|(n, _, _)| n == &name) {
+                    let count = (self.modules.len() % MAX_SYMBOLS) + 1;
+                    let mut entries: Vec<SymbolEntry> = (1..=count)
+                        .map(|k| symbol_entry(base_va + (k * 256) as u64, k))
+                        .collect();
                     entries.sort_by_key(|e| e.va);
-                    self.entries.push(entries);
-                    self.module_names.push(name);
+                    self.tables.push(entries);
+                    self.modules.push((name, base_va, size));
                     self.rebuild_symbolizer();
                 }
             }
             "LoadPdbEmpty" => {
-                let name = get_param(params, "parameters")
-                    .and_then(|p| p.get("name"))
-                    .and_then(as_str)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                let name = get_str("name");
+                let base_va = get_int("base_va");
+                let size = get_int("size");
 
-                if !name.is_empty() && !self.module_names.contains(&name) {
-                    self.entries.push(vec![]);
-                    self.module_names.push(name.clone());
+                if !name.is_empty() && !self.modules.iter().any(|(n, _, _)| n == &name) {
+                    self.tables.push(vec![]);
+                    self.modules.push((name.clone(), base_va, size));
                     self.rebuild_symbolizer();
                     if self.anomalies.len() < MAX_ANOMALIES {
                         self.anomalies.push("no_publics".to_string());
@@ -159,15 +150,8 @@ impl StateComputer for SymbolizerComputer {
                 }
             }
             "ResolveAddress" => {
-                let va = get_param(params, "parameters")
-                    .and_then(|p| p.get("va"))
-                    .and_then(as_int)
-                    .and_then(|n| n.to_u64())
-                    .unwrap_or(0);
-
-                // Exercise real Symbolizer::resolve()
+                let va = get_int("va");
                 let found = self.symbolizer.resolve(va).is_some();
-
                 if !found && self.anomalies.len() < MAX_ANOMALIES {
                     self.anomalies.push("va_not_found".to_string());
                 }
