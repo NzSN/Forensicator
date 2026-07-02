@@ -83,12 +83,13 @@ fn from_bytes_inner(
         }
     };
 
-    let threads = decode_optional(
+    let threads = decode_optional_with_dump(
         data,
         &dir,
         directory::stream_types::THREAD_LIST,
+        data,
         &mut anomalies,
-        |bytes, prov| thread_list::decode_thread_list(bytes, prov).map_err(|a| vec![a]),
+        |bytes, dump_bytes, prov| thread_list::decode_thread_list_with_dump(bytes, prov, dump_bytes).map_err(|a| vec![a]),
     )
     .unwrap_or_default();
 
@@ -157,12 +158,13 @@ fn from_bytes_inner(
         })
         .collect();
 
-    let exception = decode_optional(
+    let exception = decode_optional_with_dump(
         data,
         &dir,
         directory::stream_types::EXCEPTION,
+        data,  // pass full dump for context RVA resolution
         &mut anomalies,
-        |bytes, prov| exception::decode_exception(bytes, prov).map_err(|a| vec![a]),
+        |bytes, dump_bytes, prov| exception::decode_exception_with_dump(bytes, prov, dump_bytes).map_err(|a| vec![a]),
     );
 
     let mut annotations: Vec<(String, String)> = decode_optional(
@@ -264,6 +266,47 @@ fn decode_optional<T>(
     };
 
     match decoder(bytes, prov) {
+        Ok(v) => Some(v),
+        Err(mut errs) => {
+            anomalies.append(&mut errs);
+            None
+        }
+    }
+}
+
+fn decode_optional_with_dump<T>(
+    data: &[u8],
+    dir: &directory::StreamDirectory,
+    stream_type: u32,
+    dump_data: &[u8],
+    anomalies: &mut Vec<Anomaly>,
+    decoder: impl FnOnce(&[u8], &[u8], Provenance) -> Result<T, Vec<Anomaly>>,
+) -> Option<T> {
+    let entry = dir.find(stream_type);
+    let entry = entry?;
+
+    let start = entry.rva as usize;
+    let end = start.saturating_add(entry.size as usize);
+    if end > data.len() {
+        anomalies.push(Anomaly {
+            provenance: Provenance {
+                stream_type,
+                file_offset: start as u64,
+                rva: 0,
+            },
+            description: format!("stream 0x{stream_type:08X} extends beyond file"),
+        });
+        return None;
+    }
+
+    let bytes = &data[start..end];
+    let prov = Provenance {
+        stream_type,
+        file_offset: start as u64,
+        rva: 0,
+    };
+
+    match decoder(bytes, dump_data, prov) {
         Ok(v) => Some(v),
         Err(mut errs) => {
             anomalies.append(&mut errs);

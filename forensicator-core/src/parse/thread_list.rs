@@ -14,6 +14,14 @@ use crate::model::Thread;
 ///  +40:  ThreadContext.DataSize (u32)
 ///  +44:  ThreadContext.Rva (u32)
 pub fn decode_thread_list(data: &[u8], prov: Provenance) -> Result<Vec<Thread>, Anomaly> {
+    decode_thread_list_with_dump(data, prov, &[])
+}
+
+pub fn decode_thread_list_with_dump(
+    data: &[u8],
+    prov: Provenance,
+    dump_data: &[u8],
+) -> Result<Vec<Thread>, Anomaly> {
     if data.len() < 4 {
         return Ok(vec![]);
     }
@@ -39,9 +47,18 @@ pub fn decode_thread_list(data: &[u8], prov: Provenance) -> Result<Vec<Thread>, 
         let stack_va = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap());
         let stack_size = u32::from_le_bytes(data[off + 32..off + 36].try_into().unwrap()) as u64;
 
+        let ctx_size = u32::from_le_bytes(data[off + 40..off + 44].try_into().unwrap()) as usize;
+        let ctx_rva = u32::from_le_bytes(data[off + 44..off + 48].try_into().unwrap()) as usize;
+
+        let registers = if ctx_size > 0 && ctx_rva > 0 && ctx_rva + ctx_size <= dump_data.len() {
+            RegisterSet::decode_context(&dump_data[ctx_rva..ctx_rva + ctx_size]).unwrap_or_default()
+        } else {
+            RegisterSet::new()
+        };
+
         threads.push(Thread {
             id,
-            registers: RegisterSet::new(),
+            registers,
             stack_va,
             stack_size,
             teb_va,
