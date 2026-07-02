@@ -154,7 +154,7 @@ fn walk_thread_stacks(
             frames.push(V8StackFrame {
                 thread_id: tid,
                 depth,
-                frame_type: classify_frame(rip, &module_ranges, marker),
+                frame_type: classify_frame(rip, &module_ranges, space, marker),
                 native_symbol: sym_name,
                 native_offset: offset,
                 return_address: rip,
@@ -191,7 +191,7 @@ fn walk_thread_stacks(
             frames.push(V8StackFrame {
                 thread_id: tid,
                 depth,
-                frame_type: classify_frame(return_addr, &module_ranges, marker),
+                frame_type: classify_frame(return_addr, &module_ranges, space, marker),
                 native_symbol: sym_name,
                 native_offset: offset,
                 return_address: return_addr,
@@ -215,17 +215,29 @@ fn walk_thread_stacks(
 fn classify_frame(
     return_address: u64,
     module_ranges: &[(u64, u64)],
+    space: &AddressSpace,
     frame_marker: u64,
 ) -> V8FrameType {
+    // Check V8 frame marker first
+    if let Some(ft) = decode_v8_marker(frame_marker) {
+        return ft;
+    }
+
+    // Check if address falls within any loaded module
     let in_module = module_ranges.iter().any(|&(base, size)| {
         return_address >= base && return_address < base + size
     });
 
     if in_module {
-        if let Some(ft) = decode_v8_marker(frame_marker) {
-            return ft;
-        }
         return V8FrameType::Builtin;
+    }
+
+    // Check if address is in executable memory (likely JIT-compiled JS code)
+    if let Some(region) = space.region_at(return_address) {
+        let is_exec = region.protection & crate::model::Protection::EXECUTE != 0;
+        if is_exec {
+            return V8FrameType::OptimizedJavaScript;
+        }
     }
 
     V8FrameType::Cpp
