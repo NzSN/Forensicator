@@ -69,6 +69,8 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
                 "memory_regions": dump.memory_regions.len(),
                 "exception": dump.exception.is_some(),
                 "anomaly_count": dump.anomalies.len(),
+                "annotation_count": dump.annotations.len(),
+                "annotations": dump.annotations.iter().map(|(k, v)| serde_json::json!({ k: v })).collect::<Vec<_>>(),
             }))?
         );
         return Ok(());
@@ -125,12 +127,18 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
         );
     }
     if !dump.anomalies.is_empty() {
-        println!("└── Anomalies: {}", dump.anomalies.len());
+        println!("├── Anomalies: {}", dump.anomalies.len());
         for a in &dump.anomalies {
             println!(
-                "    ├── [stream 0x{:08X} @ +0x{:X}] {}",
+                "│   ├── [stream 0x{:08X} @ +0x{:X}] {}",
                 a.provenance.stream_type, a.provenance.file_offset, a.description
             );
+        }
+    }
+    if !dump.annotations.is_empty() {
+        println!("└── Crash annotations: {}", dump.annotations.len());
+        for (k, v) in &dump.annotations {
+            println!("    ├── {} = {}", k, v);
         }
     }
     Ok(())
