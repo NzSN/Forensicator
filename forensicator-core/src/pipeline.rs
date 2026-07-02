@@ -1,4 +1,4 @@
-use std::path::Path;
+﻿use std::path::Path;
 
 use crate::analyzer::{Pipeline, StructureCatalog};
 use crate::error::FatalError;
@@ -284,6 +284,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let space = Forensicator::build_address_space(&dump);
@@ -299,6 +300,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         dump.memory_regions.push(crate::model::MemoryRegionInfo {
@@ -331,6 +333,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let space = AddressSpace::new(4);
@@ -348,6 +351,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let space = AddressSpace::new(4);
@@ -369,6 +373,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let space = AddressSpace::new(4);
@@ -391,6 +396,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let space = AddressSpace::new(4);

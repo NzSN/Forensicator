@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
@@ -358,6 +358,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let tmp = std::env::temp_dir();
@@ -375,6 +376,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let tmp = std::env::temp_dir();
@@ -404,6 +406,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let tmp = std::env::temp_dir();
@@ -432,6 +435,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let sym = Symbolizer::load(&dump, Path::new("/nonexistent/path")).unwrap();
@@ -447,6 +451,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let tmp = std::env::temp_dir();
@@ -476,6 +481,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let tmp = std::env::temp_dir();

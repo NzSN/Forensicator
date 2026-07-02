@@ -1,4 +1,4 @@
-use crate::analyzer::scan::pointer_scan;
+﻿use crate::analyzer::scan::pointer_scan;
 use crate::analyzer::{Analyzer, AnalyzerOutput};
 use crate::model::{CandidatePointer, Dump, RegionClass, StructChunk};
 use crate::pattern::PointerPattern;
@@ -145,6 +145,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = ChunkAnalyzer::default();
@@ -173,6 +174,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = ChunkAnalyzer::default();
@@ -190,6 +192,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = ChunkAnalyzer::default();

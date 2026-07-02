@@ -1,4 +1,4 @@
-use crate::analyzer::{Analyzer, AnalyzerOutput};
+﻿use crate::analyzer::{Analyzer, AnalyzerOutput};
 use crate::model::{Dump, StringEncoding, StructString};
 use crate::space::AddressSpace;
 
@@ -171,6 +171,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = StringAnalyzer::default();
@@ -200,6 +201,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = StringAnalyzer::default();
@@ -217,6 +219,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = StringAnalyzer::default();

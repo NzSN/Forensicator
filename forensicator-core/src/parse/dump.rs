@@ -4,7 +4,8 @@ use std::path::Path;
 use crate::error::{Anomaly, FatalError, Provenance};
 use crate::model::{Dump, MemState, MemType, MemoryRegionInfo, Protection, RegionClass};
 use crate::parse::{
-    directory, exception, header, memory, memory_info, module_list, system_info, thread_list,
+    comment_a, directory, exception, header, memory, memory_info, module_list, system_info,
+    thread_list,
 };
 
 /// Open a minidump file and parse it into a `Dump`.
@@ -164,6 +165,18 @@ fn from_bytes_inner(
         |bytes, prov| exception::decode_exception(bytes, prov).map_err(|a| vec![a]),
     );
 
+    let annotations = decode_optional(
+        data,
+        &dir,
+        directory::stream_types::COMMENT_A,
+        &mut anomalies,
+        |bytes, prov| comment_a::decode_comment_a(bytes, prov).map_err(|a| vec![a]),
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .map(|a| (a.key, a.value))
+    .collect();
+
     Ok(Dump {
         system_info,
         modules,
@@ -171,6 +184,7 @@ fn from_bytes_inner(
         memory_regions,
         exception,
         anomalies,
+        annotations,
         file_size,
     })
 }

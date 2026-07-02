@@ -1,4 +1,4 @@
-use crate::model::{CandidatePointer, Dump, RegionClass, SourceContext, TargetContext};
+﻿use crate::model::{CandidatePointer, Dump, RegionClass, SourceContext, TargetContext};
 use crate::pattern::PointerPattern;
 use crate::space::AddressSpace;
 
@@ -151,6 +151,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let patterns = PointerPattern::presets();
@@ -168,6 +169,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let pat = PointerPattern::new("test")
@@ -190,6 +192,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let result = pointer_scan(&space, &dump, &[]);
@@ -219,6 +222,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let pat = PointerPattern::new("test")
@@ -247,6 +251,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let pat = PointerPattern::new("test").with_min_confidence(0.0);

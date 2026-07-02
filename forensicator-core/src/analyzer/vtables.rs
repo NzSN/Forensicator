@@ -1,4 +1,4 @@
-use crate::analyzer::{Analyzer, AnalyzerOutput};
+﻿use crate::analyzer::{Analyzer, AnalyzerOutput};
 use crate::model::{Dump, RegionClass, StructVTable};
 use crate::space::AddressSpace;
 
@@ -148,6 +148,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = VTableAnalyzer::default();
@@ -166,6 +167,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = VTableAnalyzer::default();
@@ -207,6 +209,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let a = VTableAnalyzer::default();

@@ -158,6 +158,7 @@ pub struct Dump {
     pub memory_regions: Vec<MemoryRegionInfo>,
     pub exception: Option<ExceptionInfo>,
     pub anomalies: Vec<Anomaly>,
+    pub annotations: Vec<(String, String)>,
     pub file_size: u64,
 }
 
@@ -561,6 +562,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         assert_eq!(d.modules.len(), 0);
@@ -746,6 +748,7 @@ mod tests {
             memory_regions: vec![],
             exception: Some(exc),
             anomalies: vec![],
+            annotations: vec![],
             file_size: 1024,
         };
         assert_eq!(d.modules.len(), 1);

@@ -1,4 +1,4 @@
-use crate::model::*;
+﻿use crate::model::*;
 use crate::space::AddressSpace;
 
 pub mod arrays;
@@ -187,6 +187,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let space = AddressSpace::new(4);
@@ -207,6 +208,7 @@ mod tests {
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
+            annotations: vec![],
             file_size: 0,
         };
         let space = AddressSpace::new(4);

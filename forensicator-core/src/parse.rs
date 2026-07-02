@@ -1,3 +1,4 @@
+pub mod comment_a;
 pub mod directory;
 pub mod dump;
 pub mod exception;
