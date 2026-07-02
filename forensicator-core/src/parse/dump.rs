@@ -194,18 +194,6 @@ fn from_bytes_inner(
                 }
             }
         }
-
-        if let Some(obj_rva) = crashpad::extract_annotation_objects_rva(stream_bytes) {
-            let obj_start = obj_rva as usize;
-            if obj_start < data.len() {
-                let prov = Provenance { stream_type: 0x43500001, file_offset: start as u64, rva: obj_rva };
-                if let Ok(mut objs) = crashpad::decode_annotation_objects(data, obj_start, prov) {
-                    for a in objs.drain(..) {
-                        annotations.push((a.key, a.value));
-                    }
-                }
-            }
-        }
     }
 
     Ok(Dump {
