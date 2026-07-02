@@ -7,6 +7,7 @@ pub mod lists;
 pub mod scan;
 pub mod shapes;
 pub mod strings;
+pub mod v8;
 pub mod vtables;
 
 pub trait Analyzer: Send + Sync {
