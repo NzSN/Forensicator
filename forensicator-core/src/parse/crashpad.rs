@@ -39,6 +39,16 @@ pub fn extract_annotation_rva(stream_data: &[u8]) -> Option<u32> {
     Some(ann_rva)
 }
 
+/// Extract the annotation objects blob RVA from the crashpad extension stream.
+/// The second pointer is at offset 48 (annotation objects, per-module data).
+pub fn extract_annotation_objects_rva(stream_data: &[u8]) -> Option<u32> {
+    if stream_data.len() < 52 { return None; }
+    let version = u32::from_le_bytes([stream_data[0], stream_data[1], stream_data[2], stream_data[3]]);
+    if version != 1 { return None; }
+    let rva = u32::from_le_bytes([stream_data[48], stream_data[49], stream_data[50], stream_data[51]]);
+    if rva == 0 { None } else { Some(rva) }
+}
+
 /// Decode crashpad snapshot annotations from a dump byte slice at the given RVA.
 /// The blob contains a directory (count + count × u32 RVAs) followed by
 /// length-prefixed key=value pairs with 4-byte padding.
@@ -139,6 +149,58 @@ pub fn decode_crashpad_annotations(
             provenance,
             description: "no annotations found in crashpad stream".into(),
         });
+    }
+    Ok(annotations)
+}
+
+/// Scan the annotation objects region for length-prefixed key=value pairs.
+/// Unlike snapshot annotations (which have a count+directory), annotation
+/// objects are stored in a nested tree. We scan linearly for any plausible
+/// 4-byte-aligned key-length + value-length pairs in the blob region.
+pub fn decode_crashpad_annotation_objects(
+    dump_data: &[u8],
+    objects_rva: usize,
+    provenance: Provenance,
+) -> Result<Vec<Annotation>, Anomaly> {
+    // Scan a window of 4096 bytes around the objects RVA
+    let start = objects_rva;
+    let end = (start + 4096).min(dump_data.len());
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut seen_vals = std::collections::HashSet::new();
+    let mut annotations = Vec::new();
+
+    let mut pos = start;
+    while pos + 8 <= end {
+        let klen = u32::from_le_bytes([dump_data[pos], dump_data[pos+1], dump_data[pos+2], dump_data[pos+3]]) as usize;
+        // Plausible key length: 2-128 characters, printable ASCII
+        if klen >= 2 && klen <= 128 && pos + 4 + klen + 4 <= end {
+            let key_bytes = &dump_data[pos+4..pos+4+klen];
+            let is_ascii = key_bytes.iter().all(|&b| (b >= 0x20 && b <= 0x7E) || b == b'_' || b == b'-' || b == b'.');
+            let has_alpha = key_bytes.iter().any(|&b| b.is_ascii_alphabetic());
+            let not_numeric = !key_bytes.iter().all(|&b| b.is_ascii_digit() || b == b'x' || b == b'0');
+            if is_ascii && has_alpha && not_numeric {
+                let key = String::from_utf8_lossy(key_bytes).to_string();
+                if !seen_keys.contains(&key) && !seen_vals.contains(&key) {
+                    seen_keys.insert(key.clone());
+                    let vpos = pos + 4 + ((klen + 4) / 4) * 4;
+                    if vpos + 4 <= end {
+                        let vlen = u32::from_le_bytes([dump_data[vpos], dump_data[vpos+1], dump_data[vpos+2], dump_data[vpos+3]]) as usize;
+                        if vlen > 0 && vlen <= 1024 && vpos + 4 + vlen <= end {
+                            let val = String::from_utf8_lossy(&dump_data[vpos+4..vpos+4+vlen])
+                                .trim_end_matches('\0')
+                                .to_string();
+                            seen_vals.insert(val.clone());
+                            annotations.push(Annotation { key, value: val });
+                        }
+                    }
+                }
+            }
+        }
+        pos += 4;
+    }
+
+    if annotations.is_empty() {
+        return Err(Anomaly { provenance, description: "no annotation objects found".into() });
     }
     Ok(annotations)
 }
