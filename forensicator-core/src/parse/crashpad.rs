@@ -26,6 +26,130 @@ pub fn extract_annotation_rva(stream_data: &[u8]) -> Option<u32> {
     Some(ann_rva)
 }
 
+/// Extract the annotation objects RVA from a crashpad extension stream header.
+/// The second pointer is at offset 48 (after the snapshot annotation pointer at 40).
+pub fn extract_annotation_objects_rva(stream_data: &[u8]) -> Option<u32> {
+    if stream_data.len() < 52 {
+        return None;
+    }
+    let version = u32::from_le_bytes([stream_data[0], stream_data[1], stream_data[2], stream_data[3]]);
+    if version != 1 { return None; }
+    let rva = u32::from_le_bytes([stream_data[48], stream_data[49], stream_data[50], stream_data[51]]);
+    if rva == 0 { None } else { Some(rva) }
+}
+
+/// Walk the nested annotation objects tree. Each level:
+///   u32 group_count
+///   for each group: u32 flags, u32 padding, u32 entry_count, u32 entry_rva
+/// Leaf entries (where entry_count acts as a sentinel):
+///   u32 type, u32 name_rva, u32 value_rva
+/// At name_rva / value_rva: length-prefixed string with 4-byte padding.
+pub fn decode_annotation_objects(
+    dump_data: &[u8],
+    objects_rva: usize,
+    provenance: Provenance,
+) -> Result<Vec<Annotation>, Anomaly> {
+    // Walk the nested tree to find the leaf annotation entries.
+    // The tree structure: each node starts with group_count (u32),
+    // followed by group entries. When a group has count=0, its
+    // entry_rva points to the annotation entry table.
+    let mut annotations = Vec::new();
+    find_annotation_table(dump_data, objects_rva, &mut annotations);
+
+    if annotations.is_empty() {
+        return Err(Anomaly { provenance, description: "no annotation objects found".into() });
+    }
+    Ok(annotations)
+}
+
+fn find_annotation_table(dump_data: &[u8], rva: usize, out: &mut Vec<Annotation>) {
+    let end = (rva + 2048).min(dump_data.len());
+    let mut pos = rva;
+    while pos + 8 <= end {
+        let v = u32::from_le_bytes([dump_data[pos], dump_data[pos+1], dump_data[pos+2], dump_data[pos+3]]) as usize;
+        if v >= 5 && v <= 100 {
+            let entries_rva = u32::from_le_bytes([dump_data[pos+4], dump_data[pos+5], dump_data[pos+6], dump_data[pos+7]]) as usize;
+            if entries_rva > rva && entries_rva + 12 <= end {
+                // Verify first entry at entries_rva has type=1
+                let typ = u32::from_le_bytes([dump_data[entries_rva], dump_data[entries_rva+1], dump_data[entries_rva+2], dump_data[entries_rva+3]]);
+                if typ == 1 {
+                    let count = v;
+                    let mut epos = entries_rva;
+                    for _ in 0..count {
+                        if epos + 12 > end { break; }
+                        let _t    = u32::from_le_bytes([dump_data[epos], dump_data[epos+1], dump_data[epos+2], dump_data[epos+3]]);
+                        let name_rva = u32::from_le_bytes([dump_data[epos+4], dump_data[epos+5], dump_data[epos+6], dump_data[epos+7]]) as usize;
+                        let val_rva  = u32::from_le_bytes([dump_data[epos+8], dump_data[epos+9], dump_data[epos+10], dump_data[epos+11]]) as usize;
+                        epos += 12;
+                        let key = read_padded_string(dump_data, name_rva);
+                        let val = read_padded_string(dump_data, val_rva);
+                        if !key.is_empty() {
+                            out.push(Annotation { key, value: val });
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        pos += 4;
+    }
+}
+
+fn walk_objects(dump_data: &[u8], rva: usize, out: &mut Vec<Annotation>) {
+    if rva + 16 > dump_data.len() { return; }
+    let group_count = u32::from_le_bytes([dump_data[rva], dump_data[rva+1], dump_data[rva+2], dump_data[rva+3]]) as usize;
+    if group_count > 256 { return; }
+
+    let mut pos = rva + 4;
+    for _ in 0..group_count {
+        if pos + 16 > dump_data.len() { break; }
+        let _flags = u32::from_le_bytes([dump_data[pos], dump_data[pos+1], dump_data[pos+2], dump_data[pos+3]]);
+        let _pad   = u32::from_le_bytes([dump_data[pos+4], dump_data[pos+5], dump_data[pos+6], dump_data[pos+7]]);
+        let count  = u32::from_le_bytes([dump_data[pos+8], dump_data[pos+9], dump_data[pos+10], dump_data[pos+11]]) as usize;
+        let entry  = u32::from_le_bytes([dump_data[pos+12], dump_data[pos+13], dump_data[pos+14], dump_data[pos+15]]) as usize;
+        pos += 16;
+
+        if entry == 0 || entry >= dump_data.len() { continue; }
+
+        if count == 0 {
+            parse_annotation_entries(dump_data, entry, out);
+            break;
+        } else {
+            walk_objects(dump_data, entry, out);
+        }
+    }
+}
+
+fn parse_annotation_entries(dump_data: &[u8], rva: usize, out: &mut Vec<Annotation>) {
+    if rva + 4 > dump_data.len() { return; }
+    let count = u32::from_le_bytes([dump_data[rva], dump_data[rva+1], dump_data[rva+2], dump_data[rva+3]]) as usize;
+    if count == 0 || count > 256 { return; }
+
+    let mut pos = rva + 4;
+    for _ in 0..count {
+        if pos + 12 > dump_data.len() { break; }
+        let _typ     = u32::from_le_bytes([dump_data[pos], dump_data[pos+1], dump_data[pos+2], dump_data[pos+3]]);
+        let name_rva = u32::from_le_bytes([dump_data[pos+4], dump_data[pos+5], dump_data[pos+6], dump_data[pos+7]]) as usize;
+        let val_rva  = u32::from_le_bytes([dump_data[pos+8], dump_data[pos+9], dump_data[pos+10], dump_data[pos+11]]) as usize;
+        pos += 12;
+
+        let key = read_padded_string(dump_data, name_rva);
+        let val = read_padded_string(dump_data, val_rva);
+        if !key.is_empty() {
+            out.push(Annotation { key, value: val });
+        }
+    }
+}
+
+fn read_padded_string(dump_data: &[u8], rva: usize) -> String {
+    if rva + 4 > dump_data.len() { return String::new(); }
+    let len = u32::from_le_bytes([dump_data[rva], dump_data[rva+1], dump_data[rva+2], dump_data[rva+3]]) as usize;
+    if len == 0 || len > 1024 || rva + 4 + len > dump_data.len() { return String::new(); }
+    String::from_utf8_lossy(&dump_data[rva+4..rva+4+len])
+        .trim_end_matches('\0')
+        .to_string()
+}
+
 /// Decode Crashpad annotations from a dump byte slice at the given RVA.
 /// The annotation blob contains length-prefixed key=value pairs interleaved
 /// in a flat buffer. Pairs are parsed sequentially until a zero-length key

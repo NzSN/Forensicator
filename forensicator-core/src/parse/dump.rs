@@ -182,12 +182,25 @@ fn from_bytes_inner(
         let start = entry.rva as usize;
         let end = (start + entry.size as usize).min(data.len());
         let stream_bytes = &data[start..end];
+
         if let Some(ann_rva) = crashpad::extract_annotation_rva(stream_bytes) {
             let ann_start = ann_rva as usize;
             if ann_start < data.len() {
                 let prov = Provenance { stream_type: 0x43500001, file_offset: start as u64, rva: ann_rva };
                 if let Ok(mut crashpad_anns) = crashpad::decode_crashpad_annotations(data, ann_start, prov) {
                     for a in crashpad_anns.drain(..) {
+                        annotations.push((a.key, a.value));
+                    }
+                }
+            }
+        }
+
+        if let Some(obj_rva) = crashpad::extract_annotation_objects_rva(stream_bytes) {
+            let obj_start = obj_rva as usize;
+            if obj_start < data.len() {
+                let prov = Provenance { stream_type: 0x43500001, file_offset: start as u64, rva: obj_rva };
+                if let Ok(mut objs) = crashpad::decode_annotation_objects(data, obj_start, prov) {
+                    for a in objs.drain(..) {
                         annotations.push((a.key, a.value));
                     }
                 }
