@@ -52,6 +52,7 @@ SubVars ==
       M!thr_id, M!thr_stack_va, M!thr_stack_sz, M!thr_prov_sid, M!thr_prov_off, M!thr_prov_rva,
       M!mem_va, M!mem_sz, M!mem_prot, M!mem_state, M!mem_type, M!mem_cls,
       M!mem_prov_sid, M!mem_prov_off, M!mem_prov_rva, M!exc_info, M!anomalies,
+      M!ann_key, M!ann_val,
       A!reg_va, A!reg_sz, A!reg_cl, A!anomalies,
       R!regs, R!anomalies,
       S!sym_modules, S!sym_tables, S!sym_anomalies>>
@@ -118,6 +119,7 @@ DecodeStream(stream_type) ==
             \/ (stream_type = 4 /\ M!AddRegion(0, 1, 3, 0, 0, 0, 1, 0, 0))
             \/ (stream_type = 5 /\ M!SetException(0, 0, 0, 0, 1, 0, 0))
             \/ (stream_type = 6 /\ M!AddAnomaly("truncated"))
+            \/ (stream_type = 7 /\ M!AddAnnotation("key", "val"))
             \/ TRUE
          /\ p_stream_parsed' = [p_stream_parsed EXCEPT ![idx] = 1]
     /\ UNCHANGED <<p_header_parsed, p_dir_parsed, p_stream_types, s1_complete,

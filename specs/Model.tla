@@ -1,168 +1,119 @@
 ---- MODULE Model ----
 EXTENDS Integers, Sequences, FiniteSets
 
-\* Normalized data types for S1 — what S2-S4 consume.
+\* Normalized data types for S1 — what S2+ consume.
 \* Every fact carries Provenance: which stream + offset it came from.
-\* Cross-cutting: no type depends on the minidump parse module.
+\* Crash annotations from CommentStreamA/W are modeled as key-value pairs.
 
-MaxModules  == 2
-MaxThreads  == 2
-MaxRegions  == 2
-MaxAnomalies == 4
-
-\* ---- Provenance (cross-cutting) ----
-
-\* Provenance is a record, but for Apalache compat we use flat fields.
-\* stream_id: 1=SystemInfo, 2=ModuleList, 3=ThreadList, 4=Memory64, 5=MemoryInfo, 6=Exception
-\* file_offset: byte offset in .dmp
-\* rva: relative virtual address within the stream
-
-\* ---- Anomaly (non-fatal issue) ----
-
-\* Every anomaly records WHERE the problem was found (provenance) + WHAT went wrong.
-\* Modeled as <<stream_id, offset, rva, description>> tuples.
-
-\* ---- SystemInfo ----
-
-\* OS platform: 0=Windows, 1=Linux, 2=macOS
-\* CPU arch: 0=x86, 1=x64, 2=ARM64
-\* Version: (major, minor, build, revision)
-
-\* ---- Module (loaded image) ----
-
-\* Each module: name_hash, base_va, size, checksum, pdb_hash
-\* Plus provenance: which stream entry it came from
-
-\* ---- Thread ----
-
-\* Each thread: id, stack_va, stack_size, teb_va
-\* Plus provenance
-
-\* ---- MemoryRegion ----
-
-\* va_start, size, protection (bitmask: R=1,W=2,X=4), state (0=commit,1=reserve,2=free)
-\* type (0=private,1=mapped,2=image), classification (0=Image,1=Stack,2=Mapped,3=Private,4=Other)
-\* Plus provenance
-
-\* ---- ExceptionInfo ----
-
-\* code, address, thread_id, flags
-\* Plus provenance
-
-\* ---- Dump (root aggregate) ----
-
-\* system_info, modules, threads, memory (AddressSpace), exception, anomalies
-\* The Dump IS the output of the parse pipeline and the input to S2+
+MaxModules    == 2
+MaxThreads    == 2
+MaxRegions    == 2
+MaxAnomalies  == 4
+MaxAnnotations == 4
 
 \* ---- STATE ----
 
 VARIABLES
     \* @type: Seq(Int);
-    sysinfo,              \* [os, cpu, ver_major, ver_minor, ver_build, ver_rev, stream_id, offset, rva]
+    sysinfo,
     \* @type: Seq(Int);
-    mod_va,               \* module base VAs
+    mod_va,
     \* @type: Seq(Int);
-    mod_sz,               \* module sizes
+    mod_sz,
     \* @type: Seq(Int);
-    mod_prov_sid,         \* module provenance: stream_id
+    mod_prov_sid,
     \* @type: Seq(Int);
-    mod_prov_off,         \* module provenance: file_offset
+    mod_prov_off,
     \* @type: Seq(Int);
-    mod_prov_rva,         \* module provenance: rva
+    mod_prov_rva,
     \* @type: Seq(Int);
-    thr_id,               \* thread ids
+    thr_id,
     \* @type: Seq(Int);
-    thr_stack_va,         \* thread stack VAs
+    thr_stack_va,
     \* @type: Seq(Int);
-    thr_stack_sz,         \* thread stack sizes
+    thr_stack_sz,
     \* @type: Seq(Int);
-    thr_prov_sid,         \* thread provenance: stream_id
+    thr_prov_sid,
     \* @type: Seq(Int);
-    thr_prov_off,         \* thread provenance: file_offset
+    thr_prov_off,
     \* @type: Seq(Int);
-    thr_prov_rva,         \* thread provenance: rva
+    thr_prov_rva,
     \* @type: Seq(Int);
-    mem_va,               \* memory region VAs
+    mem_va,
     \* @type: Seq(Int);
-    mem_sz,               \* memory region sizes
+    mem_sz,
     \* @type: Seq(Int);
-    mem_prot,             \* memory protection flags
+    mem_prot,
     \* @type: Seq(Int);
-    mem_state,            \* memory state (commit/reserve/free)
+    mem_state,
     \* @type: Seq(Int);
-    mem_type,             \* memory type (private/mapped/image)
+    mem_type,
     \* @type: Seq(Int);
-    mem_cls,              \* classification (Image/Stack/Mapped/Private/Other)
+    mem_cls,
     \* @type: Seq(Int);
-    mem_prov_sid,         \* memory provenance: stream_id
+    mem_prov_sid,
     \* @type: Seq(Int);
-    mem_prov_off,         \* memory provenance: file_offset
+    mem_prov_off,
     \* @type: Seq(Int);
-    mem_prov_rva,         \* memory provenance: rva
+    mem_prov_rva,
     \* @type: Seq(Int);
-    exc_info,             \* [code, addr, thread_id, flags, stream_id, offset, rva]
+    exc_info,
     \* @type: Seq([desc: Str]);
-    anomalies
+    anomalies,
+    \* @type: Seq(Str);
+    ann_key,
+    \* @type: Seq(Str);
+    ann_val
 
 \* ---- Helpers ----
 
-HasSysInfo     == Len(sysinfo) = 9
-ModuleCount    == Len(mod_va)
-ThreadCount    == Len(thr_id)
-RegionCount    == Len(mem_va)
+HasSysInfo   == Len(sysinfo) = 9
+ModuleCount  == Len(mod_va)
+ThreadCount  == Len(thr_id)
+RegionCount  == Len(mem_va)
+AnnCount     == Len(ann_key)
 
-\* Provenance present on every entity
 SysInfoProv       == HasSysInfo => sysinfo[7] > 0 /\ sysinfo[8] > 0
 ModuleProv(i)     == i <= ModuleCount => mod_prov_sid[i] > 0 /\ mod_prov_off[i] >= 0
 ThreadProv(i)     == i <= ThreadCount => thr_prov_sid[i] > 0 /\ thr_prov_off[i] >= 0
 MemRegionProv(i)  == i <= RegionCount => mem_prov_sid[i] > 0 /\ mem_prov_off[i] >= 0
 
+\* Annotations: key-length matching, values are non-empty strings
+AnnKeyValMatch    == Len(ann_val) = AnnCount
+AnnValNonEmpty    == \A i \in 1..AnnCount: ann_val[i] # ""
+
 \* ---- Invariants ----
 
-SysInfoComplete     == HasSysInfo => /\ sysinfo[1] \in {0,1,2}     \* OS
-                                    /\ sysinfo[2] \in {1}          \* CPU = x64 (S1 only)
+SysInfoComplete     == HasSysInfo => /\ sysinfo[1] \in {0,1,2}
+                                    /\ sysinfo[2] \in {1}
                                     /\ SysInfoProv
 ModuleCountBound    == ModuleCount <= MaxModules
 ThreadCountBound    == ThreadCount <= MaxThreads
 RegionCountBound    == RegionCount <= MaxRegions
 AnomalyCountBound   == Len(anomalies) <= MaxAnomalies
+AnnCountBound       == AnnCount <= MaxAnnotations
 
-\* Modules don't overlap in address space
 ModulesDisjoint == \A i \in 1..MaxModules:
                      \A j \in 1..MaxModules:
                        (i <= ModuleCount /\ j <= ModuleCount /\ i # j) =>
                          ~(mod_va[i] < mod_va[j] + mod_sz[j] /\ mod_va[j] < mod_va[i] + mod_sz[i])
 
-\* Every module has provenance
-AllModulesHaveProv == \A i \in 1..MaxModules: i <= ModuleCount => ModuleProv(i)
+AllModulesHaveProv  == \A i \in 1..MaxModules: i <= ModuleCount => ModuleProv(i)
+AllThreadsHaveProv  == \A i \in 1..MaxThreads: i <= ThreadCount => ThreadProv(i)
+AllRegionsHaveProv  == \A i \in 1..MaxRegions: i <= RegionCount => MemRegionProv(i)
 
-\* Every thread has provenance
-AllThreadsHaveProv == \A i \in 1..MaxThreads: i <= ThreadCount => ThreadProv(i)
-
-\* Every memory region has provenance
-AllRegionsHaveProv == \A i \in 1..MaxRegions: i <= RegionCount => MemRegionProv(i)
-
-\* Thread stacks are within valid address ranges (bounded for model checking)
 ThreadStacksValid == \A i \in 1..MaxThreads:
-                       i <= ThreadCount =>
-                         thr_stack_va[i] + thr_stack_sz[i] <= 65535
+                       i <= ThreadCount => thr_stack_va[i] + thr_stack_sz[i] <= 65535
 
-\* Exception info has provenance if present
 ExcHasProv == (Len(exc_info) = 7) => exc_info[5] > 0
 
-\* Memory classification values are valid
 MemClassValid == \A i \in 1..MaxRegions:
                    i <= RegionCount => mem_cls[i] \in {0,1,2,3,4}
-
-\* Memory state values are valid
 MemStateValid == \A i \in 1..MaxRegions:
                    i <= RegionCount => mem_state[i] \in {0,1,2}
-
-\* Memory protection values are in range (0..7 = R|W|X combinations)
-MemProtValid == \A i \in 1..MaxRegions:
+MemProtValid  == \A i \in 1..MaxRegions:
                    i <= RegionCount => mem_prot[i] <= 7
 
-\* Thread stack sizes > 0
 ThreadStacksPositive == \A i \in 1..MaxThreads:
                           i <= ThreadCount => thr_stack_sz[i] > 0
 
@@ -171,6 +122,8 @@ ModelInvariant ==
     /\ ThreadCountBound
     /\ RegionCountBound
     /\ AnomalyCountBound
+    /\ AnnCountBound
+    /\ AnnKeyValMatch
     /\ ModulesDisjoint
     /\ AllModulesHaveProv
     /\ AllThreadsHaveProv
@@ -182,18 +135,17 @@ ModelInvariant ==
 
 \* ---- Operations ----
 
-\* Set system info (once)
 SetSysInfo(os, cpu, maj, min, bld, rev, sid, off, rva) ==
     /\ Len(sysinfo) = 0
-    /\ cpu = 1     \* S1: x64 only
+    /\ cpu = 1
     /\ sid > 0
     /\ sysinfo' = <<os, cpu, maj, min, bld, rev, sid, off, rva>>
     /\ UNCHANGED <<mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
                    thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
                    mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                   mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies>>
+                   mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies,
+                   ann_key, ann_val>>
 
-\* Add a module (deterministic: overlap -> anomaly, else -> append)
 AddModule(va, sz, sid, off, rva) ==
     /\ ModuleCount < MaxModules
     /\ sz > 0
@@ -209,13 +161,15 @@ AddModule(va, sz, sid, off, rva) ==
                /\ UNCHANGED <<sysinfo, thr_id, thr_stack_va, thr_stack_sz,
                               thr_prov_sid, thr_prov_off, thr_prov_rva,
                               mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                              mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies>>
+                              mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies,
+                              ann_key, ann_val>>
           ELSE /\ Len(anomalies) < MaxAnomalies
                /\ anomalies' = Append(anomalies, [desc |-> "overlapping module"])
                /\ UNCHANGED <<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
                               thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
                               mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                              mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info>>
+                              mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info,
+                              ann_key, ann_val>>
 
 AddThread(id, sva, ssz, sid, off, rva) ==
     /\ ThreadCount < MaxThreads
@@ -229,7 +183,8 @@ AddThread(id, sva, ssz, sid, off, rva) ==
     /\ thr_prov_rva'   = Append(thr_prov_rva, rva)
     /\ UNCHANGED <<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
                    mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                   mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies>>
+                   mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies,
+                   ann_key, ann_val>>
 
 AddRegion(va, sz, prot, state, typ, cls, sid, off, rva) ==
     /\ RegionCount < MaxRegions
@@ -249,7 +204,7 @@ AddRegion(va, sz, prot, state, typ, cls, sid, off, rva) ==
     /\ mem_prov_rva' = Append(mem_prov_rva, rva)
     /\ UNCHANGED <<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
                    thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
-                   exc_info, anomalies>>
+                   exc_info, anomalies, ann_key, ann_val>>
 
 SetException(code, addr, tid, flg, sid, off, rva) ==
     /\ Len(exc_info) = 0
@@ -258,7 +213,7 @@ SetException(code, addr, tid, flg, sid, off, rva) ==
     /\ UNCHANGED <<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
                    thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
                    mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                   mem_prov_sid, mem_prov_off, mem_prov_rva, anomalies>>
+                   mem_prov_sid, mem_prov_off, mem_prov_rva, anomalies, ann_key, ann_val>>
 
 AddAnomaly(desc) ==
     /\ Len(anomalies) < MaxAnomalies
@@ -266,9 +221,22 @@ AddAnomaly(desc) ==
     /\ UNCHANGED <<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
                    thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
                    mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                   mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info>>
+                   mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, ann_key, ann_val>>
+
+\* Crash annotation from CommentStreamA/W: a diagnostic key=value pair.
+AddAnnotation(key, val) ==
+    /\ AnnCount < MaxAnnotations
+    /\ key # ""
+    /\ val # ""
+    /\ ann_key' = Append(ann_key, key)
+    /\ ann_val' = Append(ann_val, val)
+    /\ UNCHANGED <<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
+                   thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
+                   mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
+                   mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies>>
 
 \* ---- Init ----
+
 Init ==
     /\ sysinfo      = <<>>
     /\ mod_va       = <<>>
@@ -293,8 +261,11 @@ Init ==
     /\ mem_prov_rva = <<>>
     /\ exc_info     = <<>>
     /\ anomalies    = <<>>
+    /\ ann_key      = <<>>
+    /\ ann_val      = <<>>
 
 \* ---- Next ----
+
 Next ==
     \/ \E os \in {0,1}: \E maj,min,bld,rev \in {0,1}:
          \E sid \in {1,2}: \E off,rva \in {0,1}:
@@ -311,10 +282,14 @@ Next ==
          SetException(code, addr, tid, flg, sid, off, rva)
     \/ \E desc \in {"truncated", "invalid", "missing"}:
          AddAnomaly(desc)
+    \/ \E key \in {"app_version", "user_id", "session_id"}:
+         \E val \in {"1.0", "42", "abc"}:
+           AddAnnotation(key, val)
 
 Spec == Init /\ [][Next]_<<sysinfo, mod_va, mod_sz, mod_prov_sid, mod_prov_off, mod_prov_rva,
-                           thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
-                           mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
-                           mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies>>
+                            thr_id, thr_stack_va, thr_stack_sz, thr_prov_sid, thr_prov_off, thr_prov_rva,
+                            mem_va, mem_sz, mem_prot, mem_state, mem_type, mem_cls,
+                            mem_prov_sid, mem_prov_off, mem_prov_rva, exc_info, anomalies,
+                            ann_key, ann_val>>
 
 ====

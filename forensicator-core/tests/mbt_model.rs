@@ -39,9 +39,14 @@ fn anomalies_to_value(dump: &Dump) -> Value {
     )
 }
 
+fn str_seq_to_value(seq: &[&str]) -> Value {
+    Value::Set(seq.iter().map(|&s| Value::Str(s.to_string())).collect())
+}
+
 /// Mirrors the TLA+ `State` produced by Model.tla.
 struct ModelComputer {
     dump: Dump,
+    annotations: Vec<(String, String)>,
 }
 
 impl ModelComputer {
@@ -56,6 +61,7 @@ impl ModelComputer {
                 anomalies: vec![],
                 file_size: 0,
             },
+            annotations: vec![],
         }
     }
 
@@ -204,6 +210,9 @@ impl ModelComputer {
             })
             .unwrap_or_default();
 
+        let ann_keys: Vec<&str> = self.annotations.iter().map(|(k, _)| k.as_str()).collect();
+        let ann_vals: Vec<&str> = self.annotations.iter().map(|(_, v)| v.as_str()).collect();
+
         st(vec![
             ("sysinfo", seq_to_value(&sysinfo)),
             ("mod_va", seq_to_value(&mod_va)),
@@ -228,6 +237,8 @@ impl ModelComputer {
             ("mem_prov_rva", seq_to_value(&mem_prov_rva)),
             ("exc_info", seq_to_value(&exc_info)),
             ("anomalies", anomalies_to_value(&self.dump)),
+            ("ann_key", str_seq_to_value(&ann_keys)),
+            ("ann_val", str_seq_to_value(&ann_vals)),
         ])
     }
 
@@ -237,6 +248,14 @@ impl ModelComputer {
             .and_then(as_int)
             .and_then(|n| n.to_i64())
             .unwrap_or(0)
+    }
+
+    fn get_str_param(params: &State, key: &str) -> String {
+        get_param(params, "parameters")
+            .and_then(|p| p.get(key))
+            .and_then(as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -384,6 +403,13 @@ impl StateComputer for ModelComputer {
                     .and_then(as_str)
                 {
                     self.dump.add_anomaly(desc);
+                }
+            }
+            "AddAnnotation" => {
+                let key = Self::get_str_param(params, "key");
+                let val = Self::get_str_param(params, "val");
+                if !key.is_empty() && !val.is_empty() {
+                    self.annotations.push((key, val));
                 }
             }
             _ => {}
