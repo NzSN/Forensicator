@@ -30,6 +30,8 @@ enum Commands {
         plugin: Option<String>,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        symbols: Option<String>,
     },
     ListPlugins,
 }
@@ -43,8 +45,8 @@ fn main() {
                 process::exit(1);
             }
         }
-        Commands::Analyze { path, plugin, json } => {
-            if let Err(e) = cmd_analyze(&path, plugin.as_deref(), json) {
+        Commands::Analyze { path, plugin, json, symbols } => {
+            if let Err(e) = cmd_analyze(&path, plugin.as_deref(), json, symbols.as_deref()) {
                 eprintln!("error: {e}");
                 process::exit(1);
             }
@@ -148,9 +150,22 @@ fn cmd_analyze(
     path: &str,
     plugin: Option<&str>,
     json: bool,
+    symbols: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let s1 = Forensicator::open(path)?;
-    let pipeline = Pipeline::default_pipeline();
+    let pipeline = if let Some(pdb_dir) = symbols {
+        let mut p = Pipeline::new();
+        p.register(forensicator_core::analyzer::strings::StringAnalyzer::default());
+        p.register(forensicator_core::analyzer::vtables::VTableAnalyzer::default());
+        p.register(forensicator_core::analyzer::lists::ListAnalyzer::default());
+        p.register(forensicator_core::analyzer::arrays::ArrayAnalyzer::default());
+        p.register(forensicator_core::analyzer::chunks::ChunkAnalyzer::default());
+        p.register(forensicator_core::analyzer::shapes::ShapeAnalyzer);
+        p.register(forensicator_core::analyzer::v8::V8Analyzer::new().with_pdb_dir(pdb_dir));
+        p
+    } else {
+        Pipeline::default_pipeline()
+    };
     let filter: Vec<&str> = plugin
         .map(|p| p.split(',').map(|s| s.trim()).collect())
         .unwrap_or_default();
