@@ -1,4 +1,5 @@
 pub mod comment_a;
+pub mod crashpad;
 pub mod directory;
 pub mod dump;
 pub mod exception;

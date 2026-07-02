@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::error::{Anomaly, FatalError, Provenance};
 use crate::model::{Dump, MemState, MemType, MemoryRegionInfo, Protection, RegionClass};
 use crate::parse::{
-    comment_a, directory, exception, header, memory, memory_info, module_list, system_info,
-    thread_list,
+    comment_a, crashpad, directory, exception, header, memory, memory_info, module_list,
+    system_info, thread_list,
 };
 
 /// Open a minidump file and parse it into a `Dump`.
@@ -165,7 +165,7 @@ fn from_bytes_inner(
         |bytes, prov| exception::decode_exception(bytes, prov).map_err(|a| vec![a]),
     );
 
-    let annotations = decode_optional(
+    let mut annotations: Vec<(String, String)> = decode_optional(
         data,
         &dir,
         directory::stream_types::COMMENT_A,
@@ -176,6 +176,24 @@ fn from_bytes_inner(
     .into_iter()
     .map(|a| (a.key, a.value))
     .collect();
+
+    // Crashpad annotations (stream 0x43500001): header with annotation RVA pointer
+    if let Some(entry) = dir.find(0x43500001) {
+        let start = entry.rva as usize;
+        let end = (start + entry.size as usize).min(data.len());
+        let stream_bytes = &data[start..end];
+        if let Some(ann_rva) = crashpad::extract_annotation_rva(stream_bytes) {
+            let ann_start = ann_rva as usize;
+            if ann_start < data.len() {
+                let prov = Provenance { stream_type: 0x43500001, file_offset: start as u64, rva: ann_rva };
+                if let Ok(mut crashpad_anns) = crashpad::decode_crashpad_annotations(data, ann_start, prov) {
+                    for a in crashpad_anns.drain(..) {
+                        annotations.push((a.key, a.value));
+                    }
+                }
+            }
+        }
+    }
 
     Ok(Dump {
         system_info,
