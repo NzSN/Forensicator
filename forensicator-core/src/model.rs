@@ -520,6 +520,38 @@ pub struct PointerGraph {
     pub max_edges: usize,
 }
 
+// ── V8 Analyzer output types ──
+
+/// Frame type classification for V8 stack frames.
+/// Constants match V8's StackFrame::Type enum from frame-constants.h.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V8FrameType {
+    JavaScript,
+    OptimizedJavaScript,
+    WasmCompiled,
+    Exit,
+    Stub,
+    Builtin,
+    Construct,
+    Internal,
+    Cpp,
+    Unknown,
+}
+
+/// A single stack frame recovered by the V8 analyzer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct V8StackFrame {
+    pub thread_id: u32,
+    pub depth: usize,
+    pub frame_type: V8FrameType,
+    pub native_symbol: String,
+    pub native_offset: u64,
+    pub return_address: u64,
+    pub js_function_name: Option<String>,
+    pub script_name: Option<String>,
+    pub script_line: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -412,6 +412,6 @@ mod tests {
     fn pipeline_registered_count_matches_tla_spec() {
         // Mirror: RegisteredAnalyzers == Len(pipeline)
         let pipeline = Pipeline::default_pipeline();
-        assert_eq!(pipeline.registered_count(), 6);
+        assert_eq!(pipeline.registered_count(), 7);
     }
 }
