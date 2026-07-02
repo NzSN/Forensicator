@@ -102,13 +102,12 @@ fn walk_thread_stacks(
 ) -> Vec<V8StackFrame> {
     let mut frames = Vec::new();
 
-    // Find electron.exe base for module region checks
-    let electron_base = dump
+    // Build module VA ranges for frame classification
+    let module_ranges: Vec<(u64, u64)> = dump
         .modules
         .iter()
-        .find(|m| m.name.to_lowercase().contains("electron.exe"))
         .map(|m| (m.base_va, m.size))
-        .or_else(|| dump.modules.first().map(|m| (m.base_va, m.size)));
+        .collect();
 
     for (_i, thread) in dump.threads.iter().enumerate() {
         let tid = thread.id;
@@ -142,6 +141,7 @@ fn walk_thread_stacks(
 
         // Frame 0: current instruction
         if rip != 0 {
+            let marker = read_u64(space, rbp.wrapping_sub(8));
             let sym_name = symbolizer
                 .and_then(|s| s.resolve(rip))
                 .map(|r| r.function_name.clone())
@@ -154,7 +154,7 @@ fn walk_thread_stacks(
             frames.push(V8StackFrame {
                 thread_id: tid,
                 depth,
-                frame_type: classify_frame(rip, space, electron_base),
+                frame_type: classify_frame(rip, &module_ranges, marker),
                 native_symbol: sym_name,
                 native_offset: offset,
                 return_address: rip,
@@ -173,6 +173,7 @@ fn walk_thread_stacks(
 
             let saved_rbp = read_u64(space, current_rbp);
             let return_addr = read_u64(space, current_rbp + 8);
+            let marker = read_u64(space, current_rbp.wrapping_sub(8));
 
             if return_addr == 0 {
                 break;
@@ -190,7 +191,7 @@ fn walk_thread_stacks(
             frames.push(V8StackFrame {
                 thread_id: tid,
                 depth,
-                frame_type: classify_frame(return_addr, space, electron_base),
+                frame_type: classify_frame(return_addr, &module_ranges, marker),
                 native_symbol: sym_name,
                 native_offset: offset,
                 return_address: return_addr,
@@ -213,22 +214,54 @@ fn walk_thread_stacks(
 
 fn classify_frame(
     return_address: u64,
-    space: &AddressSpace,
-    module_range: Option<(u64, u64)>,
+    module_ranges: &[(u64, u64)],
+    frame_marker: u64,
 ) -> V8FrameType {
-    let class = space.classify(return_address);
-    match class {
-        crate::model::RegionClass::Image => {
-            // Check if within the main Electron/V8 module
-            if let Some((base, size)) = module_range {
-                if return_address >= base && return_address < base + size {
-                    return V8FrameType::Builtin;
-                }
-            }
-            V8FrameType::Builtin
+    let in_module = module_ranges.iter().any(|&(base, size)| {
+        return_address >= base && return_address < base + size
+    });
+
+    if in_module {
+        if let Some(ft) = decode_v8_marker(frame_marker) {
+            return ft;
         }
-        crate::model::RegionClass::Stack => V8FrameType::Cpp,
-        _ => V8FrameType::Unknown,
+        return V8FrameType::Builtin;
+    }
+
+    V8FrameType::Cpp
+}
+
+/// Decode a V8 frame marker value to a frame type.
+/// V8 stores frame types as Smi values (small integers) at [FP - 8].
+/// On x64 without pointer compression, Smi values have the lower 32 bits
+/// containing (value << 1) with bit 0 = 0 for Smi tag.
+fn decode_v8_marker(marker: u64) -> Option<V8FrameType> {
+    if marker == 0 { return None; }
+
+    // HeapObject pointer: bit 0 = 1 → tagged pointer → JavaScript frame
+    if marker & 1 != 0 {
+        return Some(V8FrameType::JavaScript);
+    }
+
+    // Smi: bit 0 = 0, value = (marker & 0xFFFFFFFF) >> 1
+    let lo = marker as u32;
+    if lo & 1 != 0 { return None; }
+    let hi = (marker >> 32) as u32;
+    if hi != 0 && hi != 0xFFFFFFFF { return None; }
+
+    let value = (lo >> 1) as i32;
+    match value {
+        0 => Some(V8FrameType::Cpp),
+        1 => Some(V8FrameType::Exit),
+        2 => Some(V8FrameType::JavaScript),
+        3 => Some(V8FrameType::Internal),
+        4 => Some(V8FrameType::Stub),
+        5 => Some(V8FrameType::Builtin),
+        6 => Some(V8FrameType::Internal),
+        7 => Some(V8FrameType::Construct),
+        8 => Some(V8FrameType::WasmCompiled),
+        -1 => Some(V8FrameType::Cpp),
+        _ => None,
     }
 }
 
