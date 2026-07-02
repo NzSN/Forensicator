@@ -106,7 +106,7 @@ impl Pipeline {
         p.register(arrays::ArrayAnalyzer::default());
         p.register(chunks::ChunkAnalyzer::default());
         p.register(shapes::ShapeAnalyzer);
-        p.register(v8::V8Analyzer);
+        p.register(v8::V8Analyzer::default());
         p
     }
 

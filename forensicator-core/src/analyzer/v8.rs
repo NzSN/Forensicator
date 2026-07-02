@@ -9,7 +9,26 @@ use crate::model::{Dump, V8FrameType, V8StackFrame};
 use crate::space::AddressSpace;
 use crate::symbolizer::Symbolizer;
 
-pub struct V8Analyzer;
+pub struct V8Analyzer {
+    pdb_dir: Option<String>,
+}
+
+impl V8Analyzer {
+    pub fn new() -> Self {
+        V8Analyzer { pdb_dir: None }
+    }
+
+    pub fn with_pdb_dir(mut self, dir: impl Into<String>) -> Self {
+        self.pdb_dir = Some(dir.into());
+        self
+    }
+}
+
+impl Default for V8Analyzer {
+    fn default() -> Self {
+        V8Analyzer::new()
+    }
+}
 
 impl Analyzer for V8Analyzer {
     fn name(&self) -> &str {
@@ -25,7 +44,11 @@ impl Analyzer for V8Analyzer {
 
         let isolate_va = resolve_v8_isolate(dump);
 
-        let sym = Symbolizer::load(dump, Path::new(".")).ok();
+        let sym = if let Some(ref dir) = self.pdb_dir {
+            Symbolizer::load(dump, Path::new(dir)).ok()
+        } else {
+            Symbolizer::load(dump, Path::new(".")).ok()
+        };
 
         let frames = walk_thread_stacks(dump, space, isolate_va, sym.as_ref());
 
@@ -74,10 +97,18 @@ fn resolve_v8_isolate(dump: &Dump) -> Option<u64> {
 fn walk_thread_stacks(
     dump: &Dump,
     space: &AddressSpace,
-    isolate_va: Option<u64>,
+    _isolate_va: Option<u64>,
     symbolizer: Option<&Symbolizer>,
 ) -> Vec<V8StackFrame> {
     let mut frames = Vec::new();
+
+    // Find electron.exe base for module region checks
+    let electron_base = dump
+        .modules
+        .iter()
+        .find(|m| m.name.to_lowercase().contains("electron.exe"))
+        .map(|m| (m.base_va, m.size))
+        .or_else(|| dump.modules.first().map(|m| (m.base_va, m.size)));
 
     for (_i, thread) in dump.threads.iter().enumerate() {
         let tid = thread.id;
@@ -85,15 +116,11 @@ fn walk_thread_stacks(
         let rsp = thread.registers.rsp();
         let rbp = thread.registers.rbp();
 
-        // If thread registers are all zero, try exception context
-        let (rip, rsp, rbp) = if rip == 0 && rsp == 0 && rbp == 0 {
-            if let Some(ref exc) = dump.exception {
-                if exc.thread_id == tid {
-                    if let Some(ref ctx) = exc.context {
-                        (ctx.rip(), ctx.rsp(), ctx.rbp())
-                    } else {
-                        (rip, rsp, rbp)
-                    }
+        // Prefer exception context for the crashed thread
+        let (rip, rsp, rbp) = if let Some(ref exc) = dump.exception {
+            if exc.thread_id == tid {
+                if let Some(ref ctx) = exc.context {
+                    (ctx.rip(), ctx.rsp(), ctx.rbp())
                 } else {
                     (rip, rsp, rbp)
                 }
@@ -127,7 +154,7 @@ fn walk_thread_stacks(
             frames.push(V8StackFrame {
                 thread_id: tid,
                 depth,
-                frame_type: classify_frame(rip, space, isolate_va),
+                frame_type: classify_frame(rip, space, electron_base),
                 native_symbol: sym_name,
                 native_offset: offset,
                 return_address: rip,
@@ -163,7 +190,7 @@ fn walk_thread_stacks(
             frames.push(V8StackFrame {
                 thread_id: tid,
                 depth,
-                frame_type: classify_frame(return_addr, space, isolate_va),
+                frame_type: classify_frame(return_addr, space, electron_base),
                 native_symbol: sym_name,
                 native_offset: offset,
                 return_address: return_addr,
@@ -187,11 +214,17 @@ fn walk_thread_stacks(
 fn classify_frame(
     return_address: u64,
     space: &AddressSpace,
-    _isolate_va: Option<u64>,
+    module_range: Option<(u64, u64)>,
 ) -> V8FrameType {
     let class = space.classify(return_address);
     match class {
         crate::model::RegionClass::Image => {
+            // Check if within the main Electron/V8 module
+            if let Some((base, size)) = module_range {
+                if return_address >= base && return_address < base + size {
+                    return V8FrameType::Builtin;
+                }
+            }
             V8FrameType::Builtin
         }
         crate::model::RegionClass::Stack => V8FrameType::Cpp,
@@ -309,7 +342,7 @@ mod tests {
             annotations: vec![],
             file_size: 0,
         };
-        let a = V8Analyzer;
+        let a = V8Analyzer::new();
         let out = a.analyze(&dump, &space);
         let frames = out.custom.iter().find(|(k, _)| k == "v8_frames");
         assert!(frames.is_some());
@@ -318,13 +351,13 @@ mod tests {
     #[test]
     fn synthetic_stack_walks_correct_frame_count() {
         let (space, dump) = make_synthetic_stack();
-        let a = V8Analyzer;
+        let a = V8Analyzer::new();
         let out = a.analyze(&dump, &space);
         let count: usize = out
             .custom
             .iter()
             .find(|(k, _)| k == "v8_frame_count")
-            .and_then(|(_, v)| v.as_u64().map(|n| n as usize))
+            .and_then(|(_, v): &(String, serde_json::Value)| v.as_u64().map(|n| n as usize))
             .unwrap_or(0);
         assert!(count >= 2, "expected at least 2 frames, got {count}");
     }
@@ -379,13 +412,13 @@ mod tests {
             file_size: 0,
         };
 
-        let a = V8Analyzer;
+        let a = V8Analyzer::new();
         let out = a.analyze(&dump, &space);
         let count: usize = out
             .custom
             .iter()
             .find(|(k, _)| k == "v8_frame_count")
-            .and_then(|(_, v)| v.as_u64().map(|n| n as usize))
+            .and_then(|(_, v): &(String, serde_json::Value)| v.as_u64().map(|n| n as usize))
             .unwrap_or(0);
         assert!(count <= 256, "should terminate on loop");
     }
