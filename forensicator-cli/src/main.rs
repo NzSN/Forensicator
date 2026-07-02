@@ -246,6 +246,10 @@ fn cmd_analyze(
                 + output.chunks.len()
                 + output.shape_clusters.len();
             println!("  {}: {} results", output.plugin_name, total);
+            if output.plugin_name == "v8" {
+                print_v8_frames(output);
+                continue;
+            }
             if !output.strings.is_empty() {
                 println!("    strings: {}", output.strings.len());
             }
@@ -278,6 +282,86 @@ fn cmd_list_plugins() {
     for (name, desc) in pipeline.list_analyzers() {
         println!("  {name}: {desc}");
     }
+}
+
+fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
+    use forensicator_core::analyzer::AnalyzerOutput;
+
+    // Extract v8_frames from custom
+    let frames_json = output
+        .custom
+        .iter()
+        .find(|(k, _)| k == "v8_frames")
+        .map(|(_, v)| v);
+
+    let frame_count = output
+        .custom
+        .iter()
+        .find(|(k, _)| k == "v8_frame_count")
+        .and_then(|(_, v)| v.as_u64())
+        .unwrap_or(0);
+
+    let Some(frames) = frames_json.and_then(|v| v.as_array()) else {
+        println!("    v8: no frames");
+        return;
+    };
+
+    // Group frames by thread
+    let mut by_thread: std::collections::BTreeMap<u32, Vec<&serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    for frame in frames {
+        if let Some(tid) = frame.get("thread_id").and_then(|v| v.as_u64()) {
+            by_thread.entry(tid as u32).or_default().push(frame);
+        }
+    }
+
+    for (tid, thread_frames) in &by_thread {
+        println!("  Thread {}: {} frames", tid, thread_frames.len());
+        for frame in thread_frames {
+            let depth = frame.get("depth").and_then(|v| v.as_u64()).unwrap_or(0);
+            let symbol = frame
+                .get("native_symbol")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let offset = frame
+                .get("native_offset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let addr = frame
+                .get("return_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0x0");
+            let ftype = frame
+                .get("frame_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+
+            // Shorten long symbols
+            let short_sym = if symbol.len() > 80 {
+                let bytes = symbol.as_bytes();
+                if let Some(pos) = bytes.iter().position(|&b| b == b'@') {
+                    &symbol[..pos.min(75)]
+                } else {
+                    &symbol[..75]
+                }
+            } else {
+                symbol
+            };
+
+            if offset > 0 {
+                println!(
+                    "    #{:<3} {} +0x{:X}  [{ftype}]  {addr}",
+                    depth, short_sym, offset
+                );
+            } else {
+                println!(
+                    "    #{:<3} {}  [{ftype}]  {addr}",
+                    depth, short_sym
+                );
+            }
+        }
+    }
+    println!("  Total: {} frames across {} threads", frame_count, by_thread.len());
 }
 
 fn os_name(os: OsPlatform) -> &'static str {
