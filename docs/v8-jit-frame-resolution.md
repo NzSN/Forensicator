@@ -430,7 +430,7 @@ and line numbers do not depend on the EPT and are not affected by this.
   (inline Seq*/internalized and external strings are covered).
 - Offsets are hardcoded for V8 14.6 (Electron 41 / Chromium 146). Other V8
   versions with different `JSFunction`/`SharedFunctionInfo`/`ScopeInfo`
-  layouts need the constants in `analyzer/v8.rs` adjusted — everything is
+  layouts need another `V8Layout` table in `v8layout.rs` — everything is
   validated, so a wrong layout fails closed to `None`, never to wrong names.
 
 ## Implementation map

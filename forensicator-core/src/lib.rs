@@ -11,5 +11,6 @@ pub mod pattern;
 pub mod pipeline;
 pub mod space;
 pub mod symbolizer;
+pub mod v8layout;
 pub mod unwind;
 

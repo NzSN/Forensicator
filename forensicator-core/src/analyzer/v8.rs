@@ -145,69 +145,13 @@ fn annotation_hex(dump: &Dump, key: &str) -> Option<u64> {
     None
 }
 
-/// x64 StandardFrameConstants / JavaScript frame slots (V8 ≥ 13, frame pointer
-/// relative). Layout: [fp-8]=context, [fp-16]=JSFunction, [fp-24]=type marker.
-const K_CONTEXT_OFFSET: i64 = -8;
-const K_FUNCTION_OFFSET: i64 = -16;
-const K_MARKER_OFFSET: i64 = -24;
-/// Pre-V8-13 layout: [fp-8]=marker, [fp-16]=context, [fp-24]=JSFunction.
-const K_FUNCTION_OFFSET_LEGACY: i64 = -24;
-
-/// Compressed-pointer heap layouts (bytes) for V8 14.6 (Chromium 146 /
-/// Electron 41), from js-function.tq / shared-function-info.tq / scope-info.tq.
-const JSFUNCTION_SHARED_FUNCTION_INFO: u64 = 16; // after dispatch_handle(int32)
-const JSFUNCTION_CONTEXT: u64 = 20;
-const SFI_NAME_OR_SCOPE_INFO: u64 = 12; // after trusted + untrusted func data
-
-/// V8 String: map(0), raw_hash_field(4), length(8), chars(12).
-const STRING_LENGTH: u64 = 8;
-const STRING_CHARS: u64 = 12;
-const MAX_JS_NAME_LEN: u32 = 4096;
-
-/// Instance-type heuristics: string types occupy the low range (< 0x40) and
-/// the one-byte encoding bit is 0x08 (SEQ_ONE=0x28, INTERNALIZED_ONE=0x08).
-const STRING_ITYPE_MAX: u16 = 0x40;
-const STRING_ONE_BYTE_BIT: u16 = 0x08;
-const STRING_EXTERNAL_BIT: u16 = 0x02;
-
-/// SFI/Script field offsets (script.tq).
-const SFI_SCRIPT: u64 = 20;
-const SCRIPT_NAME: u64 = 8;
-const SCRIPT_LINE_OFFSET: u64 = 12;
-const SCRIPT_LINE_ENDS: u64 = 28;
-/// ScopeInfo position_info.start (Smi) — character offset into the source.
-const SCOPE_POSITION_START: u64 = 16;
-/// FixedArray: map(0), length Smi(4), elements(8).
-const FIXED_ARRAY_LENGTH: u64 = 4;
-const FIXED_ARRAY_DATA: u64 = 8;
-
-/// External pointer table (sandbox EPT), V8 14.6: 16-byte tagged entries,
-/// handle = index << 6, payload = entry & 48-bit mask, resource chars at +16.
-const EPT_ENTRY_SIZE: u64 = 16;
-const EPT_INDEX_SHIFT: u32 = 6;
-const EPT_PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-
-/// ScopeInfo layout (scope-info.tq): flags(4), parameter_count Smi(8),
-/// context_local_count Smi(12), position_info two Smis(16,20), then
-/// flag-dependent slots from +24.
-const SCOPE_FLAGS: u64 = 4;
-const SCOPE_PARAM_COUNT: u64 = 8;
-const SCOPE_LOCAL_COUNT: u64 = 12;
-const SCOPE_DYNAMIC_START: u64 = 24;
-const SCOPE_SCOPE_TYPE_MASK: u32 = 0xF;
-const SCOPE_TYPE_MODULE: u32 = 5;
-const SCOPE_FLAG_SAVED_CLASS_VARIABLE: u32 = 1 << 10;
-const SCOPE_FUNCTION_VARIABLE_SHIFT: u32 = 12;
-const SCOPE_FUNCTION_VARIABLE_MASK: u32 = 0x3;
-const SCOPE_FLAG_INFERRED_FUNCTION_NAME: u32 = 1 << 14;
-const SCOPE_MAX_INLINED_LOCAL_NAMES: u32 = 512;
-
 fn walk_thread_stacks(
     dump: &Dump,
     space: &AddressSpace,
     isolate_va: Option<u64>,
     symbolizer: Option<&Symbolizer>,
 ) -> Vec<V8StackFrame> {
+    let layout = crate::v8layout::V8Layout::detect(dump);
     let mut frames = Vec::new();
     let ept_base = std::cell::Cell::new(None);
 
@@ -252,7 +196,7 @@ fn walk_thread_stacks(
                 break;
             }
 
-            let marker = read_u64(space, rbp.wrapping_add_signed(K_MARKER_OFFSET));
+            let marker = read_u64(space, rbp.wrapping_add_signed(layout.k_marker_offset));
             let sym_name = symbolizer
                 .and_then(|s| s.resolve(rip))
                 .map(|r| r.function_name.clone())
@@ -262,8 +206,16 @@ fn walk_thread_stacks(
                 .map(|r| r.offset)
                 .unwrap_or(0);
 
-            let frame_type = classify_frame(rip, &module_ranges, space, marker);
-            let js = decode_js_frame(space, rbp, cage_base, isolate_va, &module_ranges, &ept_base);
+            let frame_type = classify_frame(rip, &module_ranges, space, marker, &layout);
+            let js = decode_js_frame(
+                space,
+                rbp,
+                cage_base,
+                isolate_va,
+                &module_ranges,
+                &ept_base,
+                &layout,
+            );
             let frame_type = refine_type(frame_type, js.is_some(), rip, &module_ranges);
             let (js_function_name, script_name, script_line) = js
                 .map(|i| (i.name, i.script_name, i.script_line))
@@ -369,9 +321,10 @@ fn classify_frame(
     module_ranges: &[(u64, u64)],
     space: &AddressSpace,
     frame_marker: u64,
+    layout: &crate::v8layout::V8Layout,
 ) -> V8FrameType {
     // Check V8 frame marker first
-    if let Some(ft) = decode_v8_marker(frame_marker) {
+    if let Some(ft) = layout.marker_frame_type(frame_marker) {
         return ft;
     }
 
@@ -393,24 +346,6 @@ fn classify_frame(
     }
 
     V8FrameType::Cpp
-}
-
-/// Decode a V8 frame marker to a frame type.
-/// Markers are raw `StackFrame::Type` ints (STACK_FRAME_TYPE_LIST order,
-/// frames.h) stored at [fp + K_MARKER_OFFSET].
-fn decode_v8_marker(marker: u64) -> Option<V8FrameType> {
-    Some(match marker {
-        3 | 4 => V8FrameType::JavaScript,          // INTERPRETED, BASELINE
-        5 | 6 => V8FrameType::OptimizedJavaScript, // MAGLEV, TURBOFAN_JS
-        7 | 8 => V8FrameType::Stub,                // STUB, TURBOFAN_STUB_WITH_CONTEXT
-        9..=11 => V8FrameType::Builtin,            // *_CONTINUATION
-        13 | 14 => V8FrameType::Construct,         // CONSTRUCT, FAST_CONSTRUCT
-        15 => V8FrameType::Builtin,                // BUILTIN
-        2 | 16..=21 => V8FrameType::Exit,          // EXIT, *_EXIT, NATIVE, IRREGEXP
-        1 | 12 => V8FrameType::Internal,           // CONSTRUCT_ENTRY, INTERNAL
-        22..=40 => V8FrameType::WasmCompiled,
-        _ => return None,
-    })
 }
 
 fn read_u64(space: &AddressSpace, va: u64) -> u64 {
@@ -457,8 +392,9 @@ fn decode_js_frame(
     isolate_va: Option<u64>,
     module_ranges: &[(u64, u64)],
     ept_base: &std::cell::Cell<Option<u64>>,
+    layout: &crate::v8layout::V8Layout,
 ) -> Option<JsFrameInfo> {
-    for slot in [K_FUNCTION_OFFSET, K_FUNCTION_OFFSET_LEGACY] {
+    for slot in [layout.k_function_offset, layout.k_function_offset_legacy] {
         let tagged = read_u64(space, fp.wrapping_add_signed(slot));
         if tagged & 1 != 1 {
             continue;
@@ -473,15 +409,15 @@ fn decode_js_frame(
 
         // Validate: JSFunction.context (+20) must equal the frame's context
         // slot [fp-8] after decompression.
-        let frame_context = read_u64(space, fp.wrapping_add_signed(K_CONTEXT_OFFSET));
-        let fn_context = read_u32(space, heap + JSFUNCTION_CONTEXT)
+        let frame_context = read_u64(space, fp.wrapping_add_signed(layout.k_context_offset));
+        let fn_context = read_u32(space, heap + layout.jsfunction_context)
             .and_then(|c| decompress(cage, c))
             .map(|h| h | 1);
         if fn_context != Some(frame_context) {
             continue;
         }
 
-        let Some(sfi) = read_u32(space, heap + JSFUNCTION_SHARED_FUNCTION_INFO)
+        let Some(sfi) = read_u32(space, heap + layout.jsfunction_shared_function_info)
             .and_then(|c| decompress(cage, c))
         else {
             continue;
@@ -495,25 +431,35 @@ fn decode_js_frame(
         let mut position = None;
 
         if let Some(name_or_scope) =
-            read_u32(space, sfi + SFI_NAME_OR_SCOPE_INFO).and_then(|c| decompress(cage, c))
+            read_u32(space, sfi + layout.sfi_name_or_scope_info).and_then(|c| decompress(cage, c))
             && let Some(itype) = instance_type(space, cage, name_or_scope)
         {
-            if itype < STRING_ITYPE_MAX {
-                info.name = read_v8_string(space, name_or_scope, itype);
+            if itype < layout.string_itype_max {
+                info.name = read_v8_string(space, name_or_scope, itype, layout);
             } else {
-                info.name = scope_info_function_name(space, cage, name_or_scope);
-                position = read_u32(space, name_or_scope + SCOPE_POSITION_START).and_then(smi);
+                info.name = scope_info_function_name(space, cage, name_or_scope, layout);
+                position =
+                    read_u32(space, name_or_scope + layout.scope_position_start).and_then(smi);
             }
         }
         if info.name.is_none() {
             info.name = Some("<anonymous>".to_string());
         }
 
-        if let Some(script) = read_u32(space, sfi + SFI_SCRIPT).and_then(|c| decompress(cage, c)) {
-            info.script_name =
-                decode_script_name(space, cage, script, isolate_va, module_ranges, ept_base);
+        if let Some(script) =
+            read_u32(space, sfi + layout.sfi_script).and_then(|c| decompress(cage, c))
+        {
+            info.script_name = decode_script_name(
+                space,
+                cage,
+                script,
+                isolate_va,
+                module_ranges,
+                ept_base,
+                layout,
+            );
             if let Some(pos) = position {
-                info.script_line = decode_script_line(space, cage, script, pos);
+                info.script_line = decode_script_line(space, cage, script, pos, layout);
             }
         }
         return Some(info);
@@ -529,36 +475,46 @@ fn decode_script_name(
     isolate_va: Option<u64>,
     module_ranges: &[(u64, u64)],
     ept_base: &std::cell::Cell<Option<u64>>,
+    layout: &crate::v8layout::V8Layout,
 ) -> Option<String> {
-    let name_obj = read_u32(space, script + SCRIPT_NAME).and_then(|c| decompress(cage, c))?;
+    let name_obj =
+        read_u32(space, script + layout.script_name).and_then(|c| decompress(cage, c))?;
     let itype = instance_type(space, cage, name_obj)?;
-    if itype >= STRING_ITYPE_MAX {
+    if itype >= layout.string_itype_max {
         return None;
     }
-    if itype & STRING_EXTERNAL_BIT == 0 {
-        return read_v8_string(space, name_obj, itype);
+    if itype & layout.string_external_bit == 0 {
+        return read_v8_string(space, name_obj, itype, layout);
     }
 
     // External string: resource is an EPT handle at +12.
-    let handle = read_u32(space, name_obj + STRING_CHARS)?;
-    if handle == 0 || handle as u64 & ((1 << EPT_INDEX_SHIFT) - 1) != 0 {
+    let handle = read_u32(space, name_obj + layout.string_chars)?;
+    if handle == 0 || handle as u64 & ((1 << layout.ept_index_shift) - 1) != 0 {
         return None;
     }
-    let len = read_u32(space, name_obj + STRING_LENGTH)?;
-    if len == 0 || len > MAX_JS_NAME_LEN {
+    let len = read_u32(space, name_obj + layout.string_length)?;
+    if len == 0 || len > layout.max_js_name_len {
         return None;
     }
 
-    let one_byte = itype & STRING_ONE_BYTE_BIT != 0;
+    let one_byte = itype & layout.string_one_byte_bit != 0;
     let base = match ept_base.get() {
         Some(b) => Some(b),
         None => {
-            let b = find_ept_base(space, isolate_va?, handle, len, one_byte, module_ranges);
+            let b = find_ept_base(
+                space,
+                isolate_va?,
+                handle,
+                len,
+                one_byte,
+                module_ranges,
+                layout,
+            );
             ept_base.set(b);
             b
         }
     }?;
-    external_string_via_ept(space, base, handle, len, one_byte)
+    external_string_via_ept(space, base, handle, len, one_byte, layout)
 }
 
 /// Decode an external string's chars through the external pointer table.
@@ -568,12 +524,13 @@ fn external_string_via_ept(
     handle: u32,
     len: u32,
     one_byte: bool,
+    layout: &crate::v8layout::V8Layout,
 ) -> Option<String> {
     let entry = try_read_u64(
         space,
-        ept_base + EPT_ENTRY_SIZE * (handle as u64 >> EPT_INDEX_SHIFT),
+        ept_base + layout.ept_entry_size * (handle as u64 >> layout.ept_index_shift),
     )?;
-    let resource = entry & EPT_PAYLOAD_MASK;
+    let resource = entry & layout.ept_payload_mask;
     if resource == 0 {
         return None;
     }
@@ -593,9 +550,10 @@ fn find_ept_base(
     len: u32,
     one_byte: bool,
     module_ranges: &[(u64, u64)],
+    layout: &crate::v8layout::V8Layout,
 ) -> Option<u64> {
     let region = space.region_at(isolate_va)?;
-    let idx = handle as u64 >> EPT_INDEX_SHIFT;
+    let idx = handle as u64 >> layout.ept_index_shift;
     // Pass 1 rejects payloads that fall back into the candidate table's own
     // reservation window (evacuation entries / wrong tables like the
     // CodePointerTable). Pass 2 (fallback) accepts any validated payload.
@@ -605,10 +563,10 @@ fn find_ept_base(
             if b < 0x10000 || b & 7 != 0 {
                 continue;
             }
-            let Some(entry) = try_read_u64(space, b + EPT_ENTRY_SIZE * idx) else {
+            let Some(entry) = try_read_u64(space, b + layout.ept_entry_size * idx) else {
                 continue;
             };
-            let resource = entry & EPT_PAYLOAD_MASK;
+            let resource = entry & layout.ept_payload_mask;
             if resource == 0 {
                 continue;
             }
@@ -674,20 +632,27 @@ fn read_external_chars(space: &AddressSpace, ptr: u64, len: u32, one_byte: bool)
 /// Compute a 1-based line number: binary-search Script.line_ends (FixedArray
 /// of Smi source positions, one per line end) for the function's start
 /// position, then add Script.line_offset.
-fn decode_script_line(space: &AddressSpace, cage: u64, script: u64, position: i32) -> Option<u32> {
-    let line_ends = read_u32(space, script + SCRIPT_LINE_ENDS).and_then(|c| decompress(cage, c))?;
-    let len = smi(read_u32(space, line_ends + FIXED_ARRAY_LENGTH)?)?;
+fn decode_script_line(
+    space: &AddressSpace,
+    cage: u64,
+    script: u64,
+    position: i32,
+    layout: &crate::v8layout::V8Layout,
+) -> Option<u32> {
+    let line_ends =
+        read_u32(space, script + layout.script_line_ends).and_then(|c| decompress(cage, c))?;
+    let len = smi(read_u32(space, line_ends + layout.fixed_array_length)?)?;
     if !(0..=10_000_000).contains(&len) {
         return None;
     }
-    let line_offset = smi(read_u32(space, script + SCRIPT_LINE_OFFSET)?).unwrap_or(0);
+    let line_offset = smi(read_u32(space, script + layout.script_line_offset)?).unwrap_or(0);
 
     let (mut lo, mut hi) = (0i32, len);
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         let v = smi(read_u32(
             space,
-            line_ends + FIXED_ARRAY_DATA + 4 * mid as u64,
+            line_ends + layout.fixed_array_data + 4 * mid as u64,
         )?)?;
         if v < position {
             lo = mid + 1;
@@ -713,15 +678,20 @@ fn instance_type(space: &AddressSpace, cage: u64, heap: u64) -> Option<u16> {
 
 /// Read an inline (Seq*/Internalized) string payload with structural
 /// validation. Layout: map(0), raw_hash(4), length(8), chars(12).
-fn read_v8_string(space: &AddressSpace, va: u64, itype: u16) -> Option<String> {
-    let len = read_u32(space, va + STRING_LENGTH)?;
-    if len == 0 || len > MAX_JS_NAME_LEN {
+fn read_v8_string(
+    space: &AddressSpace,
+    va: u64,
+    itype: u16,
+    layout: &crate::v8layout::V8Layout,
+) -> Option<String> {
+    let len = read_u32(space, va + layout.string_length)?;
+    if len == 0 || len > layout.max_js_name_len {
         return None;
     }
     let len = len as usize;
 
-    if itype & STRING_ONE_BYTE_BIT != 0 {
-        let bytes = space.read(va + STRING_CHARS, len)?;
+    if itype & layout.string_one_byte_bit != 0 {
+        let bytes = space.read(va + layout.string_chars, len)?;
         if bytes
             .iter()
             .all(|&b| (0x20..=0x7e).contains(&b) || b >= 0x80)
@@ -729,7 +699,7 @@ fn read_v8_string(space: &AddressSpace, va: u64, itype: u16) -> Option<String> {
             return Some(String::from_utf8_lossy(bytes).into_owned());
         }
     } else {
-        let bytes = space.read(va + STRING_CHARS, len.checked_mul(2)?)?;
+        let bytes = space.read(va + layout.string_chars, len.checked_mul(2)?)?;
         let units: Vec<u16> = bytes
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -747,37 +717,43 @@ fn read_v8_string(space: &AddressSpace, va: u64, itype: u16) -> Option<String> {
 /// Extract a function name from a ScopeInfo when the SFI has no direct name.
 /// Walks the flag-dependent slots to function_variable_info.name and
 /// inferred_function_name (both String|Undefined|Zero).
-fn scope_info_function_name(space: &AddressSpace, cage: u64, scope: u64) -> Option<String> {
-    let flags = read_u32(space, scope + SCOPE_FLAGS)?;
-    let local_count = smi(read_u32(space, scope + SCOPE_LOCAL_COUNT)?)?;
+fn scope_info_function_name(
+    space: &AddressSpace,
+    cage: u64,
+    scope: u64,
+    layout: &crate::v8layout::V8Layout,
+) -> Option<String> {
+    let flags = read_u32(space, scope + layout.scope_flags)?;
+    let local_count = smi(read_u32(space, scope + layout.scope_local_count)?)?;
     if local_count < 0 || local_count as u32 > 0x10000 {
         return None;
     }
-    let _ = read_u32(space, scope + SCOPE_PARAM_COUNT)?;
+    let _ = read_u32(space, scope + layout.scope_param_count)?;
 
-    let mut off = SCOPE_DYNAMIC_START;
-    if flags & SCOPE_SCOPE_TYPE_MASK == SCOPE_TYPE_MODULE {
+    let mut off = layout.scope_dynamic_start;
+    if flags & 0xF == layout.scope_type_module {
         off += 4; // module_variable_count
     }
     let n = local_count as u64;
     // context_local_names[n] (inlined) or names hashtable pointer
-    off += if (n as u32) < SCOPE_MAX_INLINED_LOCAL_NAMES {
+    off += if (n as u32) < layout.scope_max_inlined_local_names {
         4 * n
     } else {
         4
     };
     off += 4 * n; // context_local_infos[n]
-    if flags & SCOPE_FLAG_SAVED_CLASS_VARIABLE != 0 {
+    if flags & layout.scope_flag_saved_class_variable != 0 {
         off += 4;
     }
 
     let mut candidates = [None, None];
-    let alloc = (flags >> SCOPE_FUNCTION_VARIABLE_SHIFT) & SCOPE_FUNCTION_VARIABLE_MASK;
+    let alloc =
+        (flags >> layout.scope_function_variable_shift) & layout.scope_function_variable_mask;
     if alloc != 0 {
         candidates[0] = Some(off); // function_variable_info.name
         off += 8; // name + context_or_stack_slot_index
     }
-    if flags & SCOPE_FLAG_INFERRED_FUNCTION_NAME != 0 {
+    if flags & layout.scope_flag_inferred_function_name != 0 {
         candidates[1] = Some(off); // inferred_function_name
     }
 
@@ -788,8 +764,8 @@ fn scope_info_function_name(space: &AddressSpace, cage: u64, scope: u64) -> Opti
         let Some(itype) = instance_type(space, cage, name_obj) else {
             continue;
         };
-        if itype < STRING_ITYPE_MAX
-            && let Some(name) = read_v8_string(space, name_obj, itype)
+        if itype < layout.string_itype_max
+            && let Some(name) = read_v8_string(space, name_obj, itype, layout)
         {
             return Some(name);
         }
@@ -1109,7 +1085,15 @@ mod tests {
 
     fn decode(space: &AddressSpace, fp: u64) -> Option<JsFrameInfo> {
         let ept = std::cell::Cell::new(None);
-        decode_js_frame(space, fp, Some(CAGE), None, &[], &ept)
+        decode_js_frame(
+            space,
+            fp,
+            Some(CAGE),
+            None,
+            &[],
+            &ept,
+            &crate::v8layout::V8Layout::v14_6(),
+        )
     }
 
     #[test]
@@ -1192,7 +1176,10 @@ mod tests {
         h.w32(EXT_NAME, V8HeapBuilder::cptr(MAP_EXT_STRING));
         h.w32(EXT_NAME + 4, 0xdead_beef);
         h.w32(EXT_NAME + 8, 6); // length
-        h.w32(EXT_NAME + 12, 3 << EPT_INDEX_SHIFT); // handle → index 3
+        h.w32(
+            EXT_NAME + 12,
+            3 << crate::v8layout::V8Layout::v14_6().ept_index_shift,
+        ); // handle → index 3
         h
     }
 
@@ -1252,7 +1239,16 @@ mod tests {
             .unwrap();
 
         let ept = std::cell::Cell::new(None);
-        let info = decode_js_frame(&space, FP, Some(CAGE), Some(ISOLATE), &[MODULE], &ept).unwrap();
+        let info = decode_js_frame(
+            &space,
+            FP,
+            Some(CAGE),
+            Some(ISOLATE),
+            &[MODULE],
+            &ept,
+            &crate::v8layout::V8Layout::v14_6(),
+        )
+        .unwrap();
         assert_eq!(info.script_name.as_deref(), Some("app.js"));
         assert_eq!(info.script_line, Some(5));
     }
