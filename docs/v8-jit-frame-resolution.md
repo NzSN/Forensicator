@@ -173,12 +173,65 @@ production identifiers V8 stores in the ScopeInfo.
   string length, printable characters — any failure aborts decoding for that
   frame instead of producing garbage.
 
+## Script names and line numbers
+
+Beyond function names, two more SFI/Script fields give source positions:
+
+**Line number** (works for any frame whose name goes through a ScopeInfo):
+
+```
+ScopeInfo.position_info.start  (Smi @ +16)  → character offset into source
+SFI.script (@ +20) → Script.line_ends (@ +28, FixedArray of Smi line-end offsets)
+line = lower_bound(line_ends, position) + Script.line_offset (@ +12) + 1
+```
+
+**Script name** (`Script.name @ +8`): usually an inline string, but for large
+embedder-provided names it is an *external string*, whose char buffer lives
+outside the sandbox behind the **external pointer table (EPT)**:
+
+```
+ExternalString.resource_  (EPT handle @ +12, 4 bytes)
+index    = handle >> 6                      (kExternalPointerIndexShift, V8 14.6)
+entry    = ept_base + 16 * index            (16-byte tagged entries)
+resource = entry & 0x0000FFFFFFFFFFFF       (payload mask)
+chars    = *(u64*)(resource + 16)           (blink ExternalStringResource layout)
+```
+
+The table base is discovered at runtime by scanning the isolate region for a
+pointer whose entry for a known handle passes full end-to-end validation:
+resource has a vtable inside a loaded module **and** the decoded chars are
+readable and printable with exactly the string's length. (The first criterion
+alone produces false positives — Skia/WebGL fills the EPT with shader-source
+strings — so the second is essential.)
+
+### Real-world result (Case/fulldump)
+
+```
+#2  yye             [OptimizedJS]  @ m=k*.5;half n=b==e?0.:f/(m>.5?2.-k:k);…:34
+#3  renderByMatrix  [OptimizedJS]  @ m=k*.5;half n=b==e?0.:f/(m>.5?2.-k:k);…:35
+#4  renderByMatrix0 [OptimizedJS]  @ m=k*.5;half n=b==e?0.:f/(m>.5?2.-k:k);…:35
+#5  render0         [OptimizedJS]  @ m=k*.5;half n=b==e?0.:f/(m>.5?2.-k:k);…:35
+#7  renderPlanes    [OptimizedJS]  @ m=k*.5;half n=b==e?0.:f/(m>.5?2.-k:k);…:35
+```
+
+In this dump the crashed frames' shared Script (id 55) is **not file-backed**:
+its V8 name is a 59-char SkSL shader snippet — the app generates these render
+functions dynamically (`new Function`/eval-style code embedding shader logic),
+so there is no URL to recover, but the line numbers within that generated
+source are exact. For file-backed scripts the same machinery decodes the URL
+(inline or external string path).
+
+Caveat on EPT table discovery: the isolate holds pointers to several
+lookalike segmented tables (EPT, CodePointerTable, CppHeapPointerTable). The
+validation chain (payload is heap, not module code → resource has module
+vtable → chars printable at exact length, plus a table-internal-payload
+rejection with fallback) is heuristic; a wrong table that happens to pass all
+checks would surface as a plausible but incorrect script name.
+
 ## Current limitations
 
-- `script_name` / `script_line` are not resolved. Script names are
-  `ExternalString`s here (resource pointers live in the external pointer
-  table), and line numbers require the bytecode/compiled-code source position
-  tables — both are future work.
+- Script *column* and per-statement positions are not resolved (would require
+  the bytecode/compiled-code source position tables).
 - Offsets are hardcoded for V8 14.6 (Electron 41). Other V8 versions with
   different `JSFunction`/`SharedFunctionInfo` layouts need the constants in
   `analyzer/v8.rs` adjusted (everything is validated, so a wrong layout fails

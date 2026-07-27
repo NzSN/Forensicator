@@ -121,6 +121,24 @@ const MAX_JS_NAME_LEN: u32 = 4096;
 /// the one-byte encoding bit is 0x08 (SEQ_ONE=0x28, INTERNALIZED_ONE=0x08).
 const STRING_ITYPE_MAX: u16 = 0x40;
 const STRING_ONE_BYTE_BIT: u16 = 0x08;
+const STRING_EXTERNAL_BIT: u16 = 0x02;
+
+/// SFI/Script field offsets (script.tq).
+const SFI_SCRIPT: u64 = 20;
+const SCRIPT_NAME: u64 = 8;
+const SCRIPT_LINE_OFFSET: u64 = 12;
+const SCRIPT_LINE_ENDS: u64 = 28;
+/// ScopeInfo position_info.start (Smi) — character offset into the source.
+const SCOPE_POSITION_START: u64 = 16;
+/// FixedArray: map(0), length Smi(4), elements(8).
+const FIXED_ARRAY_LENGTH: u64 = 4;
+const FIXED_ARRAY_DATA: u64 = 8;
+
+/// External pointer table (sandbox EPT), V8 14.6: 16-byte tagged entries,
+/// handle = index << 6, payload = entry & 48-bit mask, resource chars at +16.
+const EPT_ENTRY_SIZE: u64 = 16;
+const EPT_INDEX_SHIFT: u32 = 6;
+const EPT_PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 /// ScopeInfo layout (scope-info.tq): flags(4), parameter_count Smi(8),
 /// context_local_count Smi(12), position_info two Smis(16,20), then
@@ -140,10 +158,11 @@ const SCOPE_MAX_INLINED_LOCAL_NAMES: u32 = 512;
 fn walk_thread_stacks(
     dump: &Dump,
     space: &AddressSpace,
-    _isolate_va: Option<u64>,
+    isolate_va: Option<u64>,
     symbolizer: Option<&Symbolizer>,
 ) -> Vec<V8StackFrame> {
     let mut frames = Vec::new();
+    let ept_base = std::cell::Cell::new(None);
 
     // Pointer-compression cage base: RO space starts at the cage start in
     // shared-cage builds; fall back to deriving it from frame JSFunctions.
@@ -195,9 +214,11 @@ fn walk_thread_stacks(
                 .unwrap_or(0);
 
             let frame_type = classify_frame(rip, &module_ranges, space, marker);
-            let js_function_name = decode_js_frame(space, rbp, cage_base);
-            let frame_type =
-                refine_type(frame_type, js_function_name.is_some(), rip, &module_ranges);
+            let js = decode_js_frame(space, rbp, cage_base, isolate_va, &module_ranges, &ept_base);
+            let frame_type = refine_type(frame_type, js.is_some(), rip, &module_ranges);
+            let (js_function_name, script_name, script_line) = js
+                .map(|i| (i.name, i.script_name, i.script_line))
+                .unwrap_or((None, None, None));
 
             frames.push(V8StackFrame {
                 thread_id: tid,
@@ -208,8 +229,8 @@ fn walk_thread_stacks(
                 return_address: rip,
                 frame_pointer: rbp,
                 js_function_name,
-                script_name: None,
-                script_line: None,
+                script_name,
+                script_line,
             });
             depth += 1;
         }
@@ -238,13 +259,18 @@ fn walk_thread_stacks(
                 .unwrap_or(0);
 
             let frame_type = classify_frame(return_addr, &module_ranges, space, marker);
-            let js_function_name = decode_js_frame(space, current_rbp, cage_base);
-            let frame_type = refine_type(
-                frame_type,
-                js_function_name.is_some(),
-                return_addr,
+            let js = decode_js_frame(
+                space,
+                current_rbp,
+                cage_base,
+                isolate_va,
                 &module_ranges,
+                &ept_base,
             );
+            let frame_type = refine_type(frame_type, js.is_some(), return_addr, &module_ranges);
+            let (js_function_name, script_name, script_line) = js
+                .map(|i| (i.name, i.script_name, i.script_line))
+                .unwrap_or((None, None, None));
 
             frames.push(V8StackFrame {
                 thread_id: tid,
@@ -255,8 +281,8 @@ fn walk_thread_stacks(
                 return_address: return_addr,
                 frame_pointer: current_rbp,
                 js_function_name,
-                script_name: None,
-                script_line: None,
+                script_name,
+                script_line,
             });
 
             depth += 1;
@@ -371,14 +397,27 @@ fn decompress(cage_base: u64, compressed: u32) -> Option<u64> {
     Some(cage_base + (compressed & !1) as u64)
 }
 
-/// Resolve the JS function name for a JavaScript stack frame at `fp` by
-/// walking JSFunction → SharedFunctionInfo → name_or_scope_info, then either
-/// a direct name String or the ScopeInfo's function variable / inferred name.
-/// Validates the JSFunction via its context field matching [fp-8].
-/// `cage_hint` is the pointer-compression cage base from dump annotations.
-/// Returns Some(name), Some("<anonymous>") for validated nameless functions,
-/// or None when the frame has no valid JSFunction.
-fn decode_js_frame(space: &AddressSpace, fp: u64, cage_hint: Option<u64>) -> Option<String> {
+/// Everything decoded from a JavaScript stack frame's JSFunction.
+struct JsFrameInfo {
+    name: Option<String>,
+    script_name: Option<String>,
+    script_line: Option<u32>,
+}
+
+/// Resolve JS frame info at `fp` by walking
+/// JSFunction → SharedFunctionInfo → {name_or_scope_info, script}, decoding
+/// the function name (direct String or ScopeInfo slots), the script name
+/// (inline or external string), and the line number (ScopeInfo position vs
+/// Script.line_ends). Validates the JSFunction via its context field matching
+/// [fp-8]. Returns None when the frame has no valid JSFunction.
+fn decode_js_frame(
+    space: &AddressSpace,
+    fp: u64,
+    cage_hint: Option<u64>,
+    isolate_va: Option<u64>,
+    module_ranges: &[(u64, u64)],
+    ept_base: &std::cell::Cell<Option<u64>>,
+) -> Option<JsFrameInfo> {
     for slot in [K_FUNCTION_OFFSET, K_FUNCTION_OFFSET_LEGACY] {
         let tagged = read_u64(space, fp.wrapping_add_signed(slot));
         if tagged & 1 != 1 {
@@ -407,24 +446,221 @@ fn decode_js_frame(space: &AddressSpace, fp: u64, cage_hint: Option<u64>) -> Opt
         else {
             continue;
         };
-        let Some(name_or_scope) =
+
+        let mut info = JsFrameInfo {
+            name: None,
+            script_name: None,
+            script_line: None,
+        };
+        let mut position = None;
+
+        if let Some(name_or_scope) =
             read_u32(space, sfi + SFI_NAME_OR_SCOPE_INFO).and_then(|c| decompress(cage, c))
-        else {
-            continue;
-        };
-        let Some(itype) = instance_type(space, cage, name_or_scope) else {
-            continue;
-        };
-        if itype < STRING_ITYPE_MAX {
-            if let Some(name) = read_v8_string(space, name_or_scope, itype) {
-                return Some(name);
+            && let Some(itype) = instance_type(space, cage, name_or_scope)
+        {
+            if itype < STRING_ITYPE_MAX {
+                info.name = read_v8_string(space, name_or_scope, itype);
+            } else {
+                info.name = scope_info_function_name(space, cage, name_or_scope);
+                position = read_u32(space, name_or_scope + SCOPE_POSITION_START).and_then(smi);
             }
-        } else if let Some(name) = scope_info_function_name(space, cage, name_or_scope) {
-            return Some(name);
         }
-        return Some("<anonymous>".to_string());
+        if info.name.is_none() {
+            info.name = Some("<anonymous>".to_string());
+        }
+
+        if let Some(script) = read_u32(space, sfi + SFI_SCRIPT).and_then(|c| decompress(cage, c)) {
+            info.script_name =
+                decode_script_name(space, cage, script, isolate_va, module_ranges, ept_base);
+            if let Some(pos) = position {
+                info.script_line = decode_script_line(space, cage, script, pos);
+            }
+        }
+        return Some(info);
     }
     None
+}
+
+/// Decode Script.name — an inline or external string.
+fn decode_script_name(
+    space: &AddressSpace,
+    cage: u64,
+    script: u64,
+    isolate_va: Option<u64>,
+    module_ranges: &[(u64, u64)],
+    ept_base: &std::cell::Cell<Option<u64>>,
+) -> Option<String> {
+    let name_obj = read_u32(space, script + SCRIPT_NAME).and_then(|c| decompress(cage, c))?;
+    let itype = instance_type(space, cage, name_obj)?;
+    if itype >= STRING_ITYPE_MAX {
+        return None;
+    }
+    if itype & STRING_EXTERNAL_BIT == 0 {
+        return read_v8_string(space, name_obj, itype);
+    }
+
+    // External string: resource is an EPT handle at +12.
+    let handle = read_u32(space, name_obj + STRING_CHARS)?;
+    if handle == 0 || handle as u64 & ((1 << EPT_INDEX_SHIFT) - 1) != 0 {
+        return None;
+    }
+    let len = read_u32(space, name_obj + STRING_LENGTH)?;
+    if len == 0 || len > MAX_JS_NAME_LEN {
+        return None;
+    }
+
+    let one_byte = itype & STRING_ONE_BYTE_BIT != 0;
+    let base = match ept_base.get() {
+        Some(b) => Some(b),
+        None => {
+            let b = find_ept_base(space, isolate_va?, handle, len, one_byte, module_ranges);
+            ept_base.set(b);
+            b
+        }
+    }?;
+    external_string_via_ept(space, base, handle, len, one_byte)
+}
+
+/// Decode an external string's chars through the external pointer table.
+fn external_string_via_ept(
+    space: &AddressSpace,
+    ept_base: u64,
+    handle: u32,
+    len: u32,
+    one_byte: bool,
+) -> Option<String> {
+    let entry = try_read_u64(
+        space,
+        ept_base + EPT_ENTRY_SIZE * (handle as u64 >> EPT_INDEX_SHIFT),
+    )?;
+    let resource = entry & EPT_PAYLOAD_MASK;
+    if resource == 0 {
+        return None;
+    }
+    // ExternalOneByteStringResource: vtable(0), impl fields, char data at +16
+    // (blink layout, verified against this Chromium build).
+    let chars = try_read_u64(space, resource + 16)?;
+    read_external_chars(space, chars, len, one_byte)
+}
+
+/// Locate the external pointer table base by scanning the isolate region for
+/// a pointer B whose table entry for `handle` resolves to a resource with a
+/// module vtable and a fully printable char payload of exactly `len` chars.
+fn find_ept_base(
+    space: &AddressSpace,
+    isolate_va: u64,
+    handle: u32,
+    len: u32,
+    one_byte: bool,
+    module_ranges: &[(u64, u64)],
+) -> Option<u64> {
+    let region = space.region_at(isolate_va)?;
+    let idx = handle as u64 >> EPT_INDEX_SHIFT;
+    // Pass 1 rejects payloads that fall back into the candidate table's own
+    // reservation window (evacuation entries / wrong tables like the
+    // CodePointerTable). Pass 2 (fallback) accepts any validated payload.
+    for reject_internal in [true, false] {
+        for chunk in region.data.chunks_exact(8) {
+            let b = u64::from_le_bytes(chunk.try_into().unwrap());
+            if b < 0x10000 || b & 7 != 0 {
+                continue;
+            }
+            let Some(entry) = try_read_u64(space, b + EPT_ENTRY_SIZE * idx) else {
+                continue;
+            };
+            let resource = entry & EPT_PAYLOAD_MASK;
+            if resource == 0 {
+                continue;
+            }
+            if reject_internal && resource >= b && resource < b + (2 << 20) {
+                continue;
+            }
+            // The resource is a heap object (not module code), whose first
+            // word is a vtable inside a loaded module.
+            if module_ranges
+                .iter()
+                .any(|&(base, size)| resource >= base && resource < base + size)
+            {
+                continue;
+            }
+            let Some(vtable) = try_read_u64(space, resource) else {
+                continue;
+            };
+            if !module_ranges
+                .iter()
+                .any(|&(base, size)| vtable >= base && vtable < base + size)
+            {
+                continue;
+            }
+            // Full end-to-end check: chars must be readable and printable.
+            let Some(chars) = try_read_u64(space, resource + 16) else {
+                continue;
+            };
+            if read_external_chars(space, chars, len, one_byte).is_some() {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
+/// Read `len` characters from an external string's char buffer.
+fn read_external_chars(space: &AddressSpace, ptr: u64, len: u32, one_byte: bool) -> Option<String> {
+    let len = len as usize;
+    if one_byte {
+        let bytes = space.read(ptr, len)?;
+        if bytes
+            .iter()
+            .all(|&b| (0x20..=0x7e).contains(&b) || b >= 0x80)
+        {
+            return Some(String::from_utf8_lossy(bytes).into_owned());
+        }
+    } else {
+        let bytes = space.read(ptr, len.checked_mul(2)?)?;
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        if units
+            .iter()
+            .all(|&u| (0x20..=0x7e).contains(&u) || u >= 0x80)
+        {
+            return String::from_utf16(&units).ok();
+        }
+    }
+    None
+}
+
+/// Compute a 1-based line number: binary-search Script.line_ends (FixedArray
+/// of Smi source positions, one per line end) for the function's start
+/// position, then add Script.line_offset.
+fn decode_script_line(space: &AddressSpace, cage: u64, script: u64, position: i32) -> Option<u32> {
+    let line_ends = read_u32(space, script + SCRIPT_LINE_ENDS).and_then(|c| decompress(cage, c))?;
+    let len = smi(read_u32(space, line_ends + FIXED_ARRAY_LENGTH)?)?;
+    if !(0..=10_000_000).contains(&len) {
+        return None;
+    }
+    let line_offset = smi(read_u32(space, script + SCRIPT_LINE_OFFSET)?).unwrap_or(0);
+
+    let (mut lo, mut hi) = (0i32, len);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let v = smi(read_u32(
+            space,
+            line_ends + FIXED_ARRAY_DATA + 4 * mid as u64,
+        )?)?;
+        if v < position {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    u32::try_from(lo + line_offset + 1).ok()
+}
+
+fn try_read_u64(space: &AddressSpace, va: u64) -> Option<u64> {
+    let bytes = space.read(va, 8)?;
+    Some(u64::from_le_bytes(bytes.try_into().ok()?))
 }
 
 /// Read a heap object's instance type: Map at +0 (compressed), u16 at Map+8.
@@ -831,13 +1067,18 @@ mod tests {
         h
     }
 
+    fn decode(space: &AddressSpace, fp: u64) -> Option<JsFrameInfo> {
+        let ept = std::cell::Cell::new(None);
+        decode_js_frame(space, fp, Some(CAGE), None, &[], &ept)
+    }
+
     #[test]
     fn decodes_direct_string_name() {
         let mut h = base_heap();
         h.w32(SFI + 12, V8HeapBuilder::cptr(NAME_STR)); // name_or_scope_info
         let space = build_space(h, (CAGE + FUNC as u64) | 1);
-        let name = decode_js_frame(&space, FP, Some(CAGE));
-        assert_eq!(name.as_deref(), Some("render0"));
+        let info = decode(&space, FP).unwrap();
+        assert_eq!(info.name.as_deref(), Some("render0"));
     }
 
     #[test]
@@ -851,8 +1092,8 @@ mod tests {
         h.w32(SCOPE + 12, 0); // context_local_count Smi
         h.w32(SCOPE + 24, V8HeapBuilder::cptr(NAME_STR)); // function_variable_info.name
         let space = build_space(h, (CAGE + FUNC as u64) | 1);
-        let name = decode_js_frame(&space, FP, Some(CAGE));
-        assert_eq!(name.as_deref(), Some("render0"));
+        let info = decode(&space, FP).unwrap();
+        assert_eq!(info.name.as_deref(), Some("render0"));
     }
 
     #[test]
@@ -862,15 +1103,15 @@ mod tests {
         h.w32(SCOPE, V8HeapBuilder::cptr(MAP_SCOPE));
         h.w32(SCOPE + 4, 4); // flags: FUNCTION_SCOPE, no function_variable
         let space = build_space(h, (CAGE + FUNC as u64) | 1);
-        let name = decode_js_frame(&space, FP, Some(CAGE));
-        assert_eq!(name.as_deref(), Some("<anonymous>"));
+        let info = decode(&space, FP).unwrap();
+        assert_eq!(info.name.as_deref(), Some("<anonymous>"));
     }
 
     #[test]
     fn rejects_frame_without_jsfunction() {
         let h = base_heap();
         let space = build_space(h, 0); // fp-16 not a tagged pointer
-        assert_eq!(decode_js_frame(&space, FP, Some(CAGE)), None);
+        assert!(decode(&space, FP).is_none());
     }
 
     #[test]
@@ -879,6 +1120,100 @@ mod tests {
         h.w32(SFI + 12, V8HeapBuilder::cptr(NAME_STR));
         h.w32(FUNC + 20, V8HeapBuilder::cptr(0x700)); // wrong context
         let space = build_space(h, (CAGE + FUNC as u64) | 1);
-        assert_eq!(decode_js_frame(&space, FP, Some(CAGE)), None);
+        assert!(decode(&space, FP).is_none());
+    }
+
+    // ── script name / line tests ─────────────────────────────────────────
+
+    const SCRIPT: usize = 0x700;
+    const LINE_ENDS: usize = 0x780;
+    const EXT_NAME: usize = 0x7c0;
+    const MAP_EXT_STRING: usize = 0x180;
+
+    /// Heap with SFI → ScopeInfo (position 45) and SFI → Script.
+    fn heap_with_script() -> V8HeapBuilder {
+        let mut h = base_heap();
+        h.w32(SFI + 12, V8HeapBuilder::cptr(SCOPE));
+        h.w32(SCOPE, V8HeapBuilder::cptr(MAP_SCOPE));
+        h.w32(SCOPE + 4, 4); // FUNCTION_SCOPE, no name slots
+        h.w32(SCOPE + 16, 45 << 1); // position_info.start Smi = 45
+        h.w32(SFI + 20, V8HeapBuilder::cptr(SCRIPT)); // script
+        // Script: name = external string, line_offset = 0, line_ends FixedArray
+        h.w32(SCRIPT + 8, V8HeapBuilder::cptr(EXT_NAME));
+        h.w32(SCRIPT + 12, 0); // line_offset Smi
+        h.w32(SCRIPT + 28, V8HeapBuilder::cptr(LINE_ENDS));
+        h.w32(LINE_ENDS, 0); // map (unused)
+        h.w32(LINE_ENDS + 4, 5 << 1); // length Smi = 5
+        for (i, pos) in [10i32, 20, 30, 40, 50].iter().enumerate() {
+            h.w32(LINE_ENDS + 8 + 4 * i, (pos << 1) as u32);
+        }
+        // External name string: map itype 0x2a, len 6, EPT handle at +12
+        h.map(MAP_EXT_STRING, 0x2a);
+        h.w32(EXT_NAME, V8HeapBuilder::cptr(MAP_EXT_STRING));
+        h.w32(EXT_NAME + 4, 0xdead_beef);
+        h.w32(EXT_NAME + 8, 6); // length
+        h.w32(EXT_NAME + 12, 3 << EPT_INDEX_SHIFT); // handle → index 3
+        h
+    }
+
+    #[test]
+    fn resolves_script_line_from_line_ends() {
+        let h = heap_with_script();
+        let space = build_space(h, (CAGE + FUNC as u64) | 1);
+        let info = decode(&space, FP).unwrap();
+        // position 45 → first line_end >= 45 is index 4 → line 5
+        assert_eq!(info.script_line, Some(5));
+    }
+
+    #[test]
+    fn resolves_external_script_name_via_ept() {
+        const ISOLATE: u64 = 0x9_0000;
+        const EPT_BASE: u64 = 0x9_4000;
+        const RESOURCE: u64 = 0xa_0000;
+        const CHARS: u64 = 0xa_1000;
+        const MODULE: (u64, u64) = (0x7ff0_0000, 0x1_0000);
+
+        let h = heap_with_script();
+        let mut space = build_space(h, (CAGE + FUNC as u64) | 1);
+
+        // isolate region containing the EPT base pointer
+        let mut iso = vec![0u8; 0x8000];
+        iso[(EPT_BASE - ISOLATE) as usize..(EPT_BASE - ISOLATE) as usize + 8]
+            .copy_from_slice(&EPT_BASE.to_le_bytes());
+        // EPT entry 3 → resource
+        iso[(EPT_BASE - ISOLATE) as usize + 16 * 3..(EPT_BASE - ISOLATE) as usize + 16 * 3 + 8]
+            .copy_from_slice(&RESOURCE.to_le_bytes());
+        space
+            .add_region(AddressRegion {
+                va_start: ISOLATE,
+                size: iso.len() as u64,
+                data: iso,
+                protection: 3,
+                state: MemState::Commit,
+                classification: RegionClass::Private,
+            })
+            .unwrap();
+
+        // resource: vtable into module, chars at +16
+        let mut res = vec![0u8; 0x2000];
+        res[0..8].copy_from_slice(&(MODULE.0 + 0x100).to_le_bytes());
+        res[16..24].copy_from_slice(&CHARS.to_le_bytes());
+        res[(CHARS - RESOURCE) as usize..(CHARS - RESOURCE) as usize + 6]
+            .copy_from_slice(b"app.js");
+        space
+            .add_region(AddressRegion {
+                va_start: RESOURCE,
+                size: res.len() as u64,
+                data: res,
+                protection: 3,
+                state: MemState::Commit,
+                classification: RegionClass::Private,
+            })
+            .unwrap();
+
+        let ept = std::cell::Cell::new(None);
+        let info = decode_js_frame(&space, FP, Some(CAGE), Some(ISOLATE), &[MODULE], &ept).unwrap();
+        assert_eq!(info.script_name.as_deref(), Some("app.js"));
+        assert_eq!(info.script_line, Some(5));
     }
 }

@@ -344,6 +344,8 @@ fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
                 .get("js_function_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let script = frame.get("script_name").and_then(|v| v.as_str());
+            let line = frame.get("script_line").and_then(|v| v.as_u64());
 
             // Shorten long symbols
             let short_sym = if symbol.len() > 80 {
@@ -360,7 +362,12 @@ fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
             let js_part = if js_name.is_empty() {
                 String::new()
             } else {
-                format!("  [js: {js_name}]")
+                let loc = match (script, line) {
+                    (Some(s), Some(l)) => format!(" @ {s}:{l}"),
+                    (Some(s), None) => format!(" @ {s}"),
+                    _ => String::new(),
+                };
+                format!("  [js: {js_name}{loc}]")
             };
             if offset > 0 {
                 println!(
