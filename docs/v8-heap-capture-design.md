@@ -74,13 +74,52 @@ addresses only the stacks reveal. Two strategies, in order of preference:
 **A. Page-granular capture from stack references (smallest, recommended).**
 At dump time, for every captured thread stack, scan for tagged values inside
 the cage (`value ∈ [cage_base, cage_base+4GB), bit0=1`), mask to heap
-addresses, and capture the **containing page** of each reference:
+addresses, and capture the **containing page** of each reference.
+
+This alone is **not enough**: the stack yields only the `JSFunction` (1 hop),
+while the decoder's chain — `JSFunction → SFI → name_or_scope_info →
+String/ScopeInfo → name` and `SFI → Script → name/line_ends` — continues
+through objects no stack word points at. So the scan must **dereference
+transitively**: every captured page is itself scanned for cage-pointer-like
+words, whose pages are captured in turn (breadth-first closure). **Where this
+chase runs is a safety decision — see the safety model in §4.3: the default
+is the chase-free strategy A′, and the transitive chase below runs
+out-of-process (Crashpad handler) or guarded, never unguarded in-process.**
 
 ```
-for each stack word w:
-    if (w & 1) && cage_base <= (w & ~1) < cage_base + 4GB:
-        page = (w & ~1) & ~(256KB - 1)      // V8 page granularity
-        mark page for capture
+worklist = pages(stack-referenced cage pointers)
+captured = {}
+depth    = 0
+while worklist not empty and depth < 6 and |captured| < CAP_PAGES:
+    page = worklist.pop()
+    if page in captured: continue
+    capture page; captured.add(page)
+    for each tagged word w in page:
+        if (w & 1) && cage_base <= (w & ~1) < cage_base + 4GB:
+            worklist.push(page_of(w & ~1))
+    depth += 1
+```
+
+Depth 6 covers the decoder's longest chain (function → sfi → script →
+line_ends = 3, function → sfi → scope → name = 3, plus slack for the EPT-free
+paths); `CAP_PAGES` (~64) bounds worst-case size. Chasing is raw memory
+scanning only — no V8 locks or APIs. False positives (a heap number that
+looks like a cage pointer) only cost a wasted 256 KB page; false negatives
+simply degrade that frame to `None`, never to wrong names.
+
+**A′. Chase-free superset capture (safest, default).**
+If dereferencing in the crashed process is off the table entirely, don't
+chase — capture a superset instead. Enumerate committed pages inside the cage
+with `VirtualQuery` (pure OS queries, no pointer following) and capture every
+`MEM_COMMIT` page that is **not** execute-protected (this excludes the large
+JIT code space while keeping RO/old/new/map space). Zero dereferences, zero
+V8 internals; typical size is tens of MB — bigger than strategy A but still
+an order of magnitude below a full dump, and it cannot crash the handler.
+
+```
+for va in [cage_base, cage_base + 4GB) step VirtualQuery region:
+    if mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_EXECUTE*)):
+        capture region
 ```
 
 V8 allocates old-space objects on 256 KB-aligned pages (`Page::kPageSize`),
@@ -174,25 +213,37 @@ Region bytes are appended after the directory entries. A second, optional
 stream `V8XT` carries the external-string targets (EPT reservation +
 resource/char buffers) so §3.4 can be disabled independently.
 
-### 4.2 Collection procedure (inside the handler)
+### 4.2 Collection procedure
 
 1. Read annotations for `v8_isolate_address` / `v8_ro_space_firstpage_address`
    (also obtainable directly from V8: `v8::Isolate::GetCurrent()`).
 2. Push RO space range (§3.1).
-3. For each thread context+stack being written: run the §3.2-A scan, push
-   referenced pages (dedup by page address; cap total at, say, 32 MB —
-   overflow sets `flags.bit1` so forensicator can report partial capture).
+3. Heap objects, per the safety model (§4.3): default is the chase-free
+   VirtualQuery superset (§3.2-A′); the transitive chase (§3.2-A) runs only
+   in the handler process or under the in-process guards below.
 4. Push isolate slice (§3.3).
 5. Locate EPT base via the same end-to-end probe the analyzer uses; push the
    EPT reservation and chase external-string targets of reachable Scripts
    (§3.4) into `V8XT`.
 
-Safety: the collector runs in a crashed process — it must not allocate V8
-heap, take V8 locks, or call into V8 APIs that can deadlock. All work is raw
-memory reads of `this` process (in-process Crashpad) with strict caps and
-SEH-guarded reads; any fault aborts that region, not the dump.
+### 4.3 Collector safety model
 
-### 4.3 Forensicator ingestion
+Dereferencing pointers inside a crashed process is dangerous for three
+reasons: reads against freed/unmapped pages can fault inside the handler,
+any lock acquisition can deadlock against threads frozen mid-operation, and a
+mid-GC heap can be torn. The design therefore layers the collection by risk:
+
+| Level | Where the chase runs | Rule |
+|---|---|---|
+| **Safe default** | — | No dereferencing at all: capture RO space, isolate slice, and the chase-free `VirtualQuery` superset (§3.2-A′). Pure OS queries; cannot crash the handler. |
+| **Preferred for precision** | **Out-of-process** | The transitive chase (§3.2-A) and EPT target chasing (§3.4) run in the **Crashpad handler process**, reading the client's memory through OS APIs (`ReadProcessMemory`-equivalent). A bad read fails one region; the crashed app cannot be harmed; no app locks are involved. |
+| **Last resort** | In-process | Only with all guards: threads already suspended by Crashpad, no locks ever taken, every page read preceded by a `VirtualQuery` commit check **and** wrapped in SEH (`__try`/`__except`), hard caps on pages/bytes/depth/time, any fault aborts that region — never the dump. |
+| **Deferred (forced dumps)** | Normal thread, post-handler | `0x80000003` "dump without crash" leaves the app alive: after the handler returns, run the chase on a regular thread and append/rewrite `V8HE`/`V8XT` offline (ingestion format is identical). Not applicable to fatal crashes. |
+
+Forensicator ingestion is unchanged by where bytes came from — the stream
+format (§4.1) is identical for all levels.
+
+### 4.4 Forensicator ingestion
 
 - Parse `V8HE`/`V8XT` in `parse/` (new stream decoder, provenance-tagged as
   usual), and `AddressSpace::add_region` each region **before** analysis —
@@ -209,9 +260,10 @@ SEH-guarded reads; any fault aborts that region, not the dump.
 | Scavenger moved young-gen objects between crash and capture | a frame's JSFunction read fails | decoder fails closed (`None`); strategy B captures old space wholesale |
 | V8 page pool holds freed pages | §3.2-A misses objects | same closed failure; optional strategy B |
 | Handler runs mid-GC: heap in transient state | torn objects | capture is best-effort; validation in decoder rejects inconsistencies |
+| In-process chase faults (freed/unmapped page) | handler crash, dump lost | chase-free default §3.2-A′, or chase out-of-process / SEH-guarded only (§4.3) |
 | Crashpad version lacks user-stream API | can't attach streams | fallback: patch the writer directly, or post-process: run a helper that rewrites the .dmp adding regions offline (same V8HE format — ingestion code shared) |
 | EPT reservation huge / sparse | size blowup | cap at 8 MB; skip V8XT beyond cap |
-| Version drift (V8 ≥ 15 changes layouts) | wrong offsets | decoder constants are per-version (currently 14.6); V8HE `version` field allows region-format evolution |
+| Version drift (V8 ≥ 15 changes layouts) | wrong offsets | decoder layouts are per-version (`v8layout.rs`); V8HE `version` field allows region-format evolution |
 
 ## 6. Implementation plan (suggested phases)
 
