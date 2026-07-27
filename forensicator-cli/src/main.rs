@@ -157,7 +157,31 @@ fn cmd_analyze(
     json: bool,
     symbols: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let s1 = Forensicator::open(path)?;
+    let mut s1 = Forensicator::open(path)?;
+
+    // Stack-only minidumps: supplement module bytes (.pdata/.text) from
+    // on-disk images discovered next to the dump.
+    let image_count = {
+        let dir = std::path::Path::new(path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        let names: Vec<String> = s1.dump.modules.iter().map(|m| m.name.clone()).collect();
+        let bases: Vec<u64> = s1.dump.modules.iter().map(|m| m.base_va).collect();
+        let images = forensicator_core::image::ImageSet::discover(dir, &names, &bases);
+        let n = images.len();
+        if !images.is_empty() {
+            s1.space.set_backing(images);
+        }
+        n
+    };
+    if !json {
+        let kind = match s1.kind {
+            forensicator_core::pipeline::DumpKind::FullMemory => "full-memory",
+            forensicator_core::pipeline::DumpKind::StackOnly => "stack-only",
+        };
+        eprintln!("dump: {kind}, {image_count} image(s) supplemented");
+    }
+
     let pipeline = if let Some(pdb_dir) = symbols {
         let mut p = Pipeline::new();
         p.register(forensicator_core::analyzer::strings::StringAnalyzer::default());
@@ -290,7 +314,6 @@ fn cmd_list_plugins() {
 }
 
 fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
-
     // Extract v8_frames from custom
     let frames_json = output
         .custom
@@ -309,6 +332,21 @@ fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
         println!("    v8: no frames");
         return;
     };
+
+    // Crash-site disassembly, when present
+    if let Some(disasm) = output
+        .custom
+        .iter()
+        .find(|(k, _)| k == "crash_disasm")
+        .and_then(|(_, v)| v.as_array())
+    {
+        println!("  Crash site:");
+        for insn in disasm {
+            let va = insn.get("va").and_then(|v| v.as_str()).unwrap_or("");
+            let text = insn.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            println!("    {va}  {text}");
+        }
+    }
 
     // Group frames by thread
     let mut by_thread: std::collections::BTreeMap<u32, Vec<&serde_json::Value>> =

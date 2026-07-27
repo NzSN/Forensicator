@@ -26,11 +26,20 @@ pub enum S1State {
     Complete,
 }
 
+/// Whether the dump captured the full process memory or only thread stacks.
+/// Drives analyzer degradation (e.g. V8 heap decoding needs FullMemory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DumpKind {
+    FullMemory,
+    StackOnly,
+}
+
 /// Output of S1 — both Model.tla (parsed dump) and AddressSpace.tla (memory regions).
 #[derive(Debug, Clone)]
 pub struct S1Output {
     pub dump: Dump,
     pub space: AddressSpace,
+    pub kind: DumpKind,
 }
 
 /// Orchestrator — mirrors `Spec == Init /\ [][Next]_vars` from Forensicator.tla.
@@ -95,7 +104,20 @@ impl Forensicator {
     pub fn s1(path: impl AsRef<Path>) -> Result<S1Output, FatalError> {
         let dump = dump::open(&path)?;
         let space = Self::build_address_space(&dump);
-        Ok(S1Output { dump, space })
+        let kind = Self::classify_dump(&dump);
+        Ok(S1Output { dump, space, kind })
+    }
+
+    /// Heuristic dump-kind classification: stack-only crashpad minidumps
+    /// capture a few MiB; full dumps capture hundreds of MiB.
+    pub fn classify_dump(dump: &Dump) -> DumpKind {
+        const FULL_MEMORY_THRESHOLD: u64 = 64 * 1024 * 1024;
+        let total: u64 = dump.memory_regions.iter().map(|r| r.size).sum();
+        if total >= FULL_MEMORY_THRESHOLD {
+            DumpKind::FullMemory
+        } else {
+            DumpKind::StackOnly
+        }
     }
 
     /// Alias for `s1`. Entry point for the full workflow.
@@ -108,11 +130,7 @@ impl Forensicator {
     /// Run the S2 analyzer pipeline against S1 output.
     /// Corresponds to: `AnalyzerRun` — iterates registered analyzers,
     /// each producing typed output or failing (panic isolation).
-    pub fn analyze(
-        s1: &S1Output,
-        pipeline: &Pipeline,
-        filter: &[&str],
-    ) -> StructureCatalog {
+    pub fn analyze(s1: &S1Output, pipeline: &Pipeline, filter: &[&str]) -> StructureCatalog {
         pipeline.run(&s1.dump, &s1.space, filter)
     }
 
@@ -144,19 +162,12 @@ impl Forensicator {
 
     /// Verify S2 invariants for a completed catalog.
     /// `S2PipelineInvariant /\ NoFailedProduces /\ PipelineOrdered`
-    pub fn verify_catalog_invariants(
-        catalog: &StructureCatalog,
-        total_registered: usize,
-    ) -> bool {
+    pub fn verify_catalog_invariants(catalog: &StructureCatalog, total_registered: usize) -> bool {
         let completed = catalog.outputs.len();
         let _failed = catalog
             .outputs
             .iter()
-            .filter(|o| {
-                o.custom
-                    .iter()
-                    .any(|(k, _)| k == "error")
-            })
+            .filter(|o| o.custom.iter().any(|(k, _)| k == "error"))
             .count();
 
         // PipelineOrdered: completed <= registered
@@ -337,7 +348,11 @@ mod tests {
             file_size: 0,
         };
         let space = AddressSpace::new(4);
-        let out = S1Output { dump, space };
+        let out = S1Output {
+            dump,
+            space,
+            kind: DumpKind::StackOnly,
+        };
         assert_eq!(out.dump.file_size, 0);
         assert_eq!(out.space.len(), 0);
     }
@@ -355,7 +370,11 @@ mod tests {
             file_size: 0,
         };
         let space = AddressSpace::new(4);
-        let s1 = S1Output { dump, space };
+        let s1 = S1Output {
+            dump,
+            space,
+            kind: DumpKind::StackOnly,
+        };
         let pipeline = Pipeline::new();
         let cat = Forensicator::analyze(&s1, &pipeline, &[]);
         assert!(cat.outputs.is_empty());

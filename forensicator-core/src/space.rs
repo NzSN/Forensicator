@@ -1,4 +1,5 @@
 use crate::error::Anomaly;
+use crate::image::ImageSet;
 use crate::model::{MemState, RegionClass};
 
 /// A memory region in the AddressSpace, with its raw bytes.
@@ -17,6 +18,7 @@ pub struct AddressRegion {
 pub struct AddressSpace {
     regions: Vec<AddressRegion>,
     max_regions: usize,
+    backing: Option<ImageSet>,
 }
 
 impl AddressSpace {
@@ -25,7 +27,14 @@ impl AddressSpace {
         AddressSpace {
             regions: Vec::new(),
             max_regions,
+            backing: None,
         }
+    }
+
+    /// Attach on-disk PE images used as a read fallback for VAs not covered
+    /// by any dump region (stack-only minidumps).
+    pub fn set_backing(&mut self, images: ImageSet) {
+        self.backing = Some(images);
     }
 
     /// Number of regions.
@@ -64,15 +73,21 @@ impl AddressSpace {
             .unwrap_or(RegionClass::Other)
     }
 
-    /// Read `len` bytes starting at `va`. Returns None if the read crosses a region boundary or is unmapped.
+    /// Read `len` bytes starting at `va`. Returns None if the read crosses a
+    /// region boundary or is unmapped. Falls through to the image backing
+    /// store for VAs not covered by any dump region.
     pub fn read(&self, va: u64, len: usize) -> Option<&[u8]> {
-        let r = self.region_at(va)?;
-        let offset = (va - r.va_start) as usize;
-        let end = offset.checked_add(len)?;
-        if end > r.data.len() {
-            return None;
+        match self.region_at(va) {
+            Some(r) => {
+                let offset = (va - r.va_start) as usize;
+                let end = offset.checked_add(len)?;
+                if end > r.data.len() {
+                    return None;
+                }
+                Some(&r.data[offset..end])
+            }
+            None => self.backing.as_ref().and_then(|b| b.read(va, len)),
         }
-        Some(&r.data[offset..end])
     }
 
     /// Add a region. Returns Err on zero size, capacity exceeded, or overlap.

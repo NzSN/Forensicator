@@ -1,7 +1,6 @@
 //! V8 JavaScript engine stack analyzer.
 //! Walks native call stacks, resolves symbols via PDB, classifies V8 frames.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, AnalyzerOutput};
@@ -78,7 +77,55 @@ impl Analyzer for V8Analyzer {
             serde_json::json!(frames.len()),
         ));
 
+        if let Some(disasm) = disassemble_exception(dump, space) {
+            out.custom.push(("crash_disasm".to_string(), disasm));
+        }
+
+        // Whether V8 heap memory was captured (false for stack-only dumps) —
+        // JS names/scripts/lines are only recoverable when it is.
+        let heap_captured = annotation_hex(dump, "v8_ro_space_firstpage_address")
+            .map(|cage| space.region_at(cage).is_some())
+            .unwrap_or(false);
+        out.custom.push((
+            "v8_heap_captured".to_string(),
+            serde_json::json!(heap_captured),
+        ));
+
         out
+    }
+}
+
+/// Disassemble ~10 instructions at the exception address (bytes come from the
+/// dump or, for stack-only minidumps, from the supplemented module image).
+fn disassemble_exception(dump: &Dump, space: &AddressSpace) -> Option<serde_json::Value> {
+    let exc = dump.exception.as_ref()?;
+    let pc = exc.address;
+    let bytes = space.read(pc, 64)?;
+    let mut decoder = iced_x86::Decoder::with_ip(64, bytes, pc, iced_x86::DecoderOptions::NONE);
+    let mut lines = Vec::new();
+    let mut instr = iced_x86::Instruction::default();
+    let mut output = FormatterOutputImpl(String::new());
+    while lines.len() < 10 && decoder.can_decode() {
+        decoder.decode_out(&mut instr);
+        output.0.clear();
+        let mut formatter = iced_x86::IntelFormatter::new();
+        iced_x86::Formatter::format(&mut formatter, &instr, &mut output);
+        lines.push(serde_json::json!({
+            "va": format!("0x{:X}", instr.ip()),
+            "text": output.0.clone(),
+        }));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(serde_json::Value::Array(lines))
+}
+
+struct FormatterOutputImpl(String);
+
+impl iced_x86::FormatterOutput for FormatterOutputImpl {
+    fn write(&mut self, text: &str, _kind: iced_x86::FormatterTextKind) {
+        self.0.push_str(text);
     }
 }
 
@@ -170,39 +217,41 @@ fn walk_thread_stacks(
 
     // Build module VA ranges for frame classification
     let module_ranges: Vec<(u64, u64)> = dump.modules.iter().map(|m| (m.base_va, m.size)).collect();
+    let mut unwind_tables = crate::unwind::UnwindTables::new(&dump.modules);
 
     for thread in &dump.threads {
         let tid = thread.id;
-        let rip = thread.registers.rip();
-        let rsp = thread.registers.rsp();
-        let rbp = thread.registers.rbp();
 
         // Prefer exception context for the crashed thread
-        let (rip, rsp, rbp) = if let Some(ref exc) = dump.exception {
-            if exc.thread_id == tid {
-                if let Some(ref ctx) = exc.context {
-                    (ctx.rip(), ctx.rsp(), ctx.rbp())
-                } else {
-                    (rip, rsp, rbp)
-                }
-            } else {
-                (rip, rsp, rbp)
-            }
-        } else {
-            (rip, rsp, rbp)
-        };
-
-        if rbp == 0 || rsp == 0 {
-            continue;
+        let mut regs = thread.registers.clone();
+        if let Some(ref exc) = dump.exception
+            && exc.thread_id == tid
+            && let Some(ref ctx) = exc.context
+        {
+            regs = ctx.clone();
         }
 
+        let stack_va = thread.stack_va;
         let stack_end = thread.stack_va.saturating_add(thread.stack_size);
-        let mut current_rbp = rbp;
         let mut depth = 0usize;
-        let mut seen = HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut via_leaf = false;
 
-        // Frame 0: current instruction
-        if rip != 0 {
+        loop {
+            let rip = regs.rip();
+            let rsp = regs.rsp();
+            let rbp = regs.rbp();
+            if rip == 0 || depth >= 256 || !seen.insert((rip, rsp)) {
+                break;
+            }
+            // Reject implausible PCs (garbage unwound frames): must be in a
+            // module or a captured region — unless we got here via a
+            // validated fp-chain link (JIT code pages may be uncaptured).
+            let in_module = module_ranges.iter().any(|&(b, s)| rip >= b && rip < b + s);
+            if !in_module && space.region_at(rip).is_none() && via_leaf {
+                break;
+            }
+
             let marker = read_u64(space, rbp.wrapping_add_signed(K_MARKER_OFFSET));
             let sym_name = symbolizer
                 .and_then(|s| s.resolve(rip))
@@ -233,64 +282,55 @@ fn walk_thread_stacks(
                 script_line,
             });
             depth += 1;
-        }
 
-        while current_rbp > 0 && current_rbp < stack_end && depth < 256 {
-            if seen.contains_key(&current_rbp) {
-                break;
+            // Advance, in order of preference:
+            // 1. x64 unwind info (.pdata) — authoritative for module code
+            //    (Chrome is built without frame pointers; rbp is just a GPR).
+            let mut advanced = false;
+            if let Some((base, rt)) = unwind_tables.lookup(space, rip)
+                && crate::unwind::unwind_step(&mut regs, space, base, rt)
+            {
+                advanced = true;
             }
-            seen.insert(current_rbp, depth);
-
-            let saved_rbp = read_u64(space, current_rbp);
-            let return_addr = read_u64(space, current_rbp + 8);
-            let marker = read_u64(space, current_rbp.wrapping_add_signed(K_MARKER_OFFSET));
-
-            if return_addr == 0 {
-                break;
+            if advanced {
+                via_leaf = false;
+                continue;
             }
-
-            let sym_name = symbolizer
-                .and_then(|s| s.resolve(return_addr))
-                .map(|r| r.function_name.clone())
-                .unwrap_or_else(|| format!("0x{:X}", return_addr));
-            let offset = symbolizer
-                .and_then(|s| s.resolve(return_addr))
-                .map(|r| r.offset)
-                .unwrap_or(0);
-
-            let frame_type = classify_frame(return_addr, &module_ranges, space, marker);
-            let js = decode_js_frame(
-                space,
-                current_rbp,
-                cage_base,
-                isolate_va,
-                &module_ranges,
-                &ept_base,
-            );
-            let frame_type = refine_type(frame_type, js.is_some(), return_addr, &module_ranges);
-            let (js_function_name, script_name, script_line) = js
-                .map(|i| (i.name, i.script_name, i.script_line))
-                .unwrap_or((None, None, None));
-
-            frames.push(V8StackFrame {
-                thread_id: tid,
-                depth,
-                frame_type,
-                native_symbol: sym_name,
-                native_offset: offset,
-                return_address: return_addr,
-                frame_pointer: current_rbp,
-                js_function_name,
-                script_name,
-                script_line,
-            });
-
-            depth += 1;
-
-            if saved_rbp <= current_rbp || saved_rbp >= stack_end {
-                break;
+            // 2. V8-style frame-pointer chain — JIT frames have real frame
+            //    pointers but no RUNTIME_FUNCTION records.
+            let saved_rbp = read_u64(space, rbp);
+            let fp_ret = read_u64(space, rbp.wrapping_add(8));
+            let fp_chain = rbp >= stack_va && saved_rbp > rbp && saved_rbp < stack_end;
+            // Terminal link: the final builtin/C++ boundary frame may have its
+            // fp outside the captured stack; still follow its return address
+            // once when it looks like plausible code.
+            let terminal_link = !fp_chain
+                && rbp >= stack_va
+                && rbp < stack_end
+                && fp_ret != 0
+                && (module_ranges
+                    .iter()
+                    .any(|&(b, s)| fp_ret >= b && fp_ret < b + s)
+                    || space
+                        .region_at(fp_ret)
+                        .map(|r| r.protection & crate::model::Protection::EXECUTE != 0)
+                        .unwrap_or(false));
+            if fp_ret != 0 && (fp_chain || terminal_link) {
+                regs.set(crate::arch::x64_indices::RIP, fp_ret);
+                regs.set(crate::arch::x64_indices::RBP, saved_rbp);
+                regs.set(crate::arch::x64_indices::RSP, rbp + 16);
+                via_leaf = false;
+                continue;
             }
-            current_rbp = saved_rbp;
+            // 3. Leaf function: return address at [rsp]
+            let leaf_ret = read_u64(space, rsp);
+            if leaf_ret != 0 {
+                regs.set(crate::arch::x64_indices::RIP, leaf_ret);
+                regs.set(crate::arch::x64_indices::RSP, rsp + 8);
+                via_leaf = true;
+                continue;
+            }
+            break;
         }
     }
 
