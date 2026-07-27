@@ -547,6 +547,7 @@ pub struct V8StackFrame {
     pub native_symbol: String,
     pub native_offset: u64,
     pub return_address: u64,
+    pub frame_pointer: u64,
     pub js_function_name: Option<String>,
     pub script_name: Option<String>,
     pub script_line: Option<u32>,

@@ -45,7 +45,12 @@ fn main() {
                 process::exit(1);
             }
         }
-        Commands::Analyze { path, plugin, json, symbols } => {
+        Commands::Analyze {
+            path,
+            plugin,
+            json,
+            symbols,
+        } => {
             if let Err(e) = cmd_analyze(&path, plugin.as_deref(), json, symbols.as_deref()) {
                 eprintln!("error: {e}");
                 process::exit(1);
@@ -335,6 +340,10 @@ fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
                 .get("frame_type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
+            let js_name = frame
+                .get("js_function_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             // Shorten long symbols
             let short_sym = if symbol.len() > 80 {
@@ -348,20 +357,29 @@ fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
                 symbol
             };
 
+            let js_part = if js_name.is_empty() {
+                String::new()
+            } else {
+                format!("  [js: {js_name}]")
+            };
             if offset > 0 {
                 println!(
-                    "    #{:<3} {} +0x{:X}  [{ftype}]  {addr}",
+                    "    #{:<3} {} +0x{:X}  [{ftype}]  {addr}{js_part}",
                     depth, short_sym, offset
                 );
             } else {
                 println!(
-                    "    #{:<3} {}  [{ftype}]  {addr}",
+                    "    #{:<3} {}  [{ftype}]  {addr}{js_part}",
                     depth, short_sym
                 );
             }
         }
     }
-    println!("  Total: {} frames across {} threads", frame_count, by_thread.len());
+    println!(
+        "  Total: {} frames across {} threads",
+        frame_count,
+        by_thread.len()
+    );
 }
 
 fn os_name(os: OsPlatform) -> &'static str {
