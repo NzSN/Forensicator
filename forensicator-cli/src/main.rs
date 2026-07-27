@@ -290,7 +290,6 @@ fn cmd_list_plugins() {
 }
 
 fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
-    use forensicator_core::analyzer::AnalyzerOutput;
 
     // Extract v8_frames from custom
     let frames_json = output
@@ -347,6 +346,14 @@ fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
             let script = frame.get("script_name").and_then(|v| v.as_str());
             let line = frame.get("script_line").and_then(|v| v.as_u64());
 
+            let type_short = match ftype {
+                "OptimizedJavaScript" => "Opt JS",
+                "JavaScript" => "JS",
+                "WasmCompiled" => "Wasm",
+                "Cpp" => "C++",
+                other => other,
+            };
+
             // Shorten long symbols
             let short_sym = if symbol.len() > 80 {
                 let bytes = symbol.as_bytes();
@@ -359,27 +366,29 @@ fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
                 symbol
             };
 
-            let js_part = if js_name.is_empty() {
-                String::new()
-            } else {
+            // Description: JS function + source location, or native symbol.
+            let desc = if !js_name.is_empty() {
                 let loc = match (script, line) {
-                    (Some(s), Some(l)) => format!(" @ {s}:{l}"),
-                    (Some(s), None) => format!(" @ {s}"),
+                    (Some(s), Some(l)) => format!(" @ {}:{l}", shorten_script(s)),
+                    (Some(s), None) => format!(" @ {}", shorten_script(s)),
+                    (None, Some(l)) => format!(" @ <script>:{l}"),
                     _ => String::new(),
                 };
-                format!("  [js: {js_name}{loc}]")
-            };
-            if offset > 0 {
-                println!(
-                    "    #{:<3} {} +0x{:X}  [{ftype}]  {addr}{js_part}",
-                    depth, short_sym, offset
-                );
+                let sym_part = if symbol.starts_with("0x") {
+                    String::new()
+                } else if offset > 0 {
+                    format!("  ({short_sym} +0x{offset:X})")
+                } else {
+                    format!("  ({short_sym})")
+                };
+                format!("{js_name}{loc}{sym_part}")
+            } else if offset > 0 {
+                format!("{short_sym} +0x{offset:X}")
             } else {
-                println!(
-                    "    #{:<3} {}  [{ftype}]  {addr}{js_part}",
-                    depth, short_sym
-                );
-            }
+                short_sym.to_string()
+            };
+
+            println!("    #{:<3} {:<10} {:<66} {addr}", depth, type_short, desc);
         }
     }
     println!(
@@ -387,6 +396,29 @@ fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {
         frame_count,
         by_thread.len()
     );
+}
+
+/// Display form of a script name: basename for URLs/paths, `<dynamic script>`
+/// for code snippets (eval/`new Function` sources), truncated otherwise.
+fn shorten_script(s: &str) -> String {
+    if s.contains([';', '{', '\n']) {
+        return "<dynamic script>".to_string();
+    }
+    if s.contains('/')
+        && let Some(base) = s.rsplit('/').next()
+    {
+        // Only treat as a path when the basename looks like a filename.
+        if base.contains('.') && !base.contains(' ') && base.len() <= 128 {
+            return base.to_string();
+        }
+    }
+    if s.chars().count() > 30 {
+        let mut t: String = s.chars().take(27).collect();
+        t.push('…');
+        t
+    } else {
+        s.to_string()
+    }
 }
 
 fn os_name(os: OsPlatform) -> &'static str {
