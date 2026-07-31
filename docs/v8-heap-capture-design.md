@@ -5,7 +5,11 @@ resolution (function names, script names, line numbers) by adding a small,
 surgically-chosen set of V8 memory regions — without paying the cost of a
 full-memory dump.
 
-Status: design (not yet implemented). Companion docs:
+Status: **implemented and live-validated** (V8 14.6 / Electron 41). See §7
+for implementation details, the three live-validation bugs found+fixed, and
+the end-to-end test results.
+
+Companion docs:
 `docs/v8-jit-frame-resolution.md` (decoder mechanics),
 `docs/minidump-support.md` (stack-only handling).
 
@@ -315,3 +319,81 @@ format (§4.1) is identical for all rows.
    decodes like the fulldump (`js: name @ script:line` present).
 4. **Validation corpus**: re-run on `Case/fulldump` (regression: unchanged)
    and `Case/minidump` (unchanged unless recaptured with the collector).
+
+## 7. Implementation & live-validation results
+
+**All phases implemented and live-validated** against a real Electron
+renderer crash (V8 14.6 / Chromium 146 / Electron 41.10.3-jlc-sa).
+
+### 7.1 What was built
+
+**Collector** (standalone crashpad repo, `handler/v8_heap/`):
+- `v8_heap_capture.{h,cc}` — the collector. Reads V8 annotations
+  (`v8_isolate_address`, `v8_ro_space_firstpage_address`) from
+  `ProcessSnapshot`; captures RO space (§3.1), the isolate slice (§3.3),
+  the compressed-pointer object chain (§3.2-A as a **targeted chain-follow**
+  at known V8 14.6 offsets, not a generic BFS scan), and external-string
+  EPT targets (§3.4).
+- `v8_heap_user_stream_data_source.{h,cc}` — `UserStreamDataSource` emitter.
+- `v8_heap_format.h` / `v8_layout.h` — wire format + V8 14.6 offsets.
+- Registered in `run_as_crashpad_handler_win.cc` (one-line `push_back`).
+- 4 unit tests (compiles `/W4 /WX /std:c++20`; all pass).
+
+**Forensicator parser** (`parse/v8heap.rs`):
+- `decode_v8heap` — parses the V8HE wire format into `RawMemoryRange`s.
+- Dispatched from `parse/dump.rs`; V8HE regions **prepended** before
+  `MemoryList` ranges (see §7.3 bug 3).
+- Integration test confirms a hand-built minidump with V8HE → regions land in
+  `AddressSpace` → decoder resolves `name="myFunc"`.
+- 202 tests pass.
+
+**Electron patch** (`patches/chromium/v8_heap_capture.patch`) — applies
+cleanly to `src`; full `electron.exe` builds (exit 0, 224 MB).
+
+### 7.2 What live validation found (three bugs, all fixed)
+
+The synthetic unit tests passed, but a **real** V8 heap exposed three
+discrepancies that only live testing could surface:
+
+| # | Bug | Root cause | Fix |
+|---|---|---|---|
+| 1 | RO not captured | RO space is a **64 KiB** committed read-only region, but `CaptureRange` read 256 KiB chunks — the read overshot into unmapped space and failed, dropping RO entirely | `CaptureRange` now reads **4 KiB sub-chunks** and coalesces contiguous readable ones |
+| 2 | Chase rejects real objects | `IsValidHeapObject` assumed V8 `Map` objects are in RO (cage offset < 4 MiB). In reality Maps live in **old/map space** (observed at cage +16 MiB) — so all real objects were rejected and map pages were never captured | `IsValidHeapObject` now **captures the map's page** (wherever it is) and validates by reading the instance type at map+8 |
+| 3 | V8HE regions silently dropped | Forensicator's `build_address_space` adds `MemoryList` ranges first; small heap fragments in `MemoryList` **overlap** V8HE's larger pages; `add_region` rejects overlaps → V8HE regions invisible | V8HE regions are now **prepended** before `MemoryList` in `dump.rs` |
+
+### 7.3 End-to-end validation result
+
+A crashapp (`D:\Codebase\crashapp`) crashes its renderer from a named
+function (`crashFn`). The resulting ~1.5 MB stack-only dump carries the
+V8HE stream (~36 regions). Forensicator resolves:
+
+```
+#   Type                   JS Function     Native Symbol
+0   Builtin                                 electron::ElectronBindings::Crash
+1   JavaScript             crashFn         Builtins_InterpreterEntryTrampoline
+2   OptimizedJavaScript    <anonymous>     0x7FF66EF4AD1B  (TurboFan JIT code)
+3   Builtin                                 Builtins_JSEntryTrampoline
+4   Builtin                                 Builtins_JSEntry
+5   Builtin                                 v8::Execution::Call
+```
+
+- **JS names resolve**: `crashFn` — from `JSFunction → SFI → ScopeInfo →
+  FunctionName` in the V8HE-captured heap.
+- **TurboFan support**: frame 2 is `OptimizedJavaScript` (TurboFan/Maglev
+  marker detected; JSFunction resolved).
+- **PDB symbolication**: native frames resolve to `ElectronBindings::Crash`,
+  `Builtins_InterpreterEntryTrampoline`, `Builtins_JSEntry`, etc.
+
+### 7.4 Design corrections (vs §3 assumptions)
+
+- **§3.1 RO size**: the design assumed RO is 1–4 MB. In practice it is a
+  **64 KiB** committed region (bug 1 above). The 4 KiB sub-chunk fix handles
+  this.
+- **§3.2-A chase**: the design described a generic BFS scan for cage
+  pointers. The implementation uses a **targeted chain-follow** at known V8
+  14.6 offsets (`JSFunction+16→SFI`, `SFI+12→name`, `SFI+20→Script`,
+  `Script+8→name`, `Script+28→line_ends`) — more precise, avoids the
+  false-positive explosion of generic compressed-pointer scanning.
+- **§3.1 "maps live in RO"**: the design §2/§3.1 stated maps are in RO space.
+  V8 `Map` objects live in **old/map space** (bug 2 above). The collector
+  now captures map pages wherever they are.
