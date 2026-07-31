@@ -748,8 +748,7 @@ fn scope_info_function_name(
 
     let mut candidates = [None, None];
     let alloc =
-        (flags >> layout.scope_function_variable_shift) & layout.scope_function_variable_mask;
-    if alloc != 0 {
+        (flags >> layout.scope_function_variable_shift) & layout.scope_function_variable_mask;    if alloc != 0 {
         candidates[0] = Some(off); // function_variable_info.name
         off += 8; // name + context_or_stack_slot_index
     }
@@ -899,6 +898,146 @@ mod tests {
             .and_then(|(_, v): &(String, serde_json::Value)| v.as_u64().map(|n| n as usize))
             .unwrap_or(0);
         assert!(count >= 2, "expected at least 2 frames, got {count}");
+    }
+
+    /// Stage 3 end-to-end (minus the live crash): populate an AddressSpace with
+    /// exactly the regions the V8HE collector captures (RO space + the decoder's
+    /// JSFunction -> SFI -> Script -> name chain) plus a stack frame, and confirm
+    /// the analyzer resolves a JS function name + script name from them.
+    #[test]
+    fn decodes_js_frame_from_captured_heap() {
+        let cage: u64 = 0x1_0000_0000;
+        let set_u32 = |b: &mut [u8], o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let set_u64 = |b: &mut [u8], o: usize, v: u64| b[o..o + 8].copy_from_slice(&v.to_le_bytes());
+
+        let mut space = AddressSpace::new(64);
+
+        // RO space: a one-byte-string Map at cage+0x100 (instance type 0x08 at
+        // Map+8). The decoder validates names by their map landing in RO.
+        let mut ro = vec![0u8; 0x200];
+        set_u32(&mut ro, 0x108, 0x08);
+        space
+            .add_region(AddressRegion {
+                va_start: cage,
+                size: 0x200,
+                data: ro,
+                protection: 3,
+                state: MemState::Commit,
+                classification: RegionClass::Other,
+            })
+            .unwrap();
+
+        // Heap object helper: a small region at `va` filled by `f`.
+        let heap = |space: &mut AddressSpace, va: u64, f: &dyn Fn(&mut [u8])| {
+            let mut b = vec![0u8; 0x100];
+            f(&mut b);
+            space
+                .add_region(AddressRegion {
+                    va_start: va,
+                    size: 0x100,
+                    data: b,
+                    protection: 3,
+                    state: MemState::Commit,
+                    classification: RegionClass::Other,
+                })
+                .unwrap();
+        };
+
+        // JSFunction @ cage+0x40000: map@0, SFI compressed@16, context@20.
+        heap(&mut space, cage + 0x40000, &|b| {
+            set_u32(b, 0, 0x101);
+            set_u32(b, 16, 0x80001); // SFI @ cage+0x80000
+            set_u32(b, 20, 0x180001); // context @ cage+0x180000
+        });
+        // SFI: name_or_scope@12, script@20.
+        heap(&mut space, cage + 0x80000, &|b| {
+            set_u32(b, 0, 0x101);
+            set_u32(b, 12, 0xC0001); // function name @ cage+0xC0000
+            set_u32(b, 20, 0x100001); // Script @ cage+0x100000
+        });
+        // Function name (one-byte inline string).
+        heap(&mut space, cage + 0xC0000, &|b| {
+            set_u32(b, 0, 0x101);
+            set_u32(b, 8, 6);
+            b[12..18].copy_from_slice(b"myFunc");
+        });
+        // Script: name@8.
+        heap(&mut space, cage + 0x100000, &|b| {
+            set_u32(b, 0, 0x101);
+            set_u32(b, 8, 0x140001); // script name @ cage+0x140000
+        });
+        // Script name (one-byte inline string).
+        heap(&mut space, cage + 0x140000, &|b| {
+            set_u32(b, 0, 0x101);
+            set_u32(b, 8, 7);
+            b[12..19].copy_from_slice(b"test.js");
+        });
+
+        // Stack: one JS frame (marker/function/context at fp-24/-16/-8).
+        let fp = 0x10000u64;
+        let mut stack = vec![0u8; 0x2000];
+        let base = 0xF000u64;
+        set_u64(&mut stack, (fp - 24 - base) as usize, 3); // marker = INTERPRETED
+        set_u64(&mut stack, (fp - 16 - base) as usize, (cage + 0x40000) | 1); // JSFunction
+        set_u64(&mut stack, (fp - 8 - base) as usize, (cage + 0x180000) | 1); // context
+        // [fp]=0, [fp+8]=0 -> walker stops after frame 0.
+        space
+            .add_region(AddressRegion {
+                va_start: base,
+                size: 0x2000,
+                data: stack,
+                protection: 3,
+                state: MemState::Commit,
+                classification: RegionClass::Stack,
+            })
+            .unwrap();
+
+        let dump = Dump {
+            system_info: None,
+            modules: vec![Module {
+                name: "test.dll".into(),
+                base_va: 0x7FFA_0000,
+                size: 0x10000,
+                checksum: 0,
+                codeview_guid: None,
+                pdb_name: None,
+                provenance: Provenance {
+                    stream_type: 2,
+                    file_offset: 0,
+                    rva: 0,
+                },
+            }],
+            threads: vec![make_stack_thread(
+                fp, 0xFF00, 0x7FFA_1000, base, 0x2000,
+            )],
+            memory_regions: vec![],
+            exception: None,
+            anomalies: vec![],
+            annotations: vec![
+                ("ver".into(), "41.0.0".into()),
+                ("v8_isolate_address".into(), format!("{:#x}", cage + 0x1C0000)),
+                (
+                    "v8_ro_space_firstpage_address".into(),
+                    format!("{:#x}", cage),
+                ),
+            ],
+            file_size: 0,
+        };
+
+        let out = V8Analyzer::new().analyze(&dump, &space);
+        let frames = out
+            .custom
+            .iter()
+            .find(|(k, _)| k == "v8_frames")
+            .and_then(|(_, v)| v.as_array())
+            .expect("v8_frames present");
+        let f0 = frames.first().expect("at least one frame");
+        assert_eq!(
+            f0["js_function_name"].as_str(),
+            Some("myFunc"),
+            "frame: {f0}"
+        );
+        assert_eq!(f0["script_name"].as_str(), Some("test.js"));
     }
 
     #[test]

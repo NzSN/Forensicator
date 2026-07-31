@@ -82,9 +82,12 @@ String/ScopeInfo → name` and `SFI → Script → name/line_ends` — continues
 through objects no stack word points at. So the scan must **dereference
 transitively**: every captured page is itself scanned for cage-pointer-like
 words, whose pages are captured in turn (breadth-first closure). **Where this
-chase runs is a safety decision — see the safety model in §4.3: the default
-is the chase-free strategy A′, and the transitive chase below runs
-out-of-process (Crashpad handler) or guarded, never unguarded in-process.**
+chase runs is a safety decision — see the safety model in §4.3: on Windows the
+collector runs in the out-of-process Crashpad handler against the suspended
+renderer, so the chase below is safe by construction (no app locks; reads go
+through a `VirtualQuery`-backed `ProcessMemory` that cannot fault). The
+chase-free superset A′ is an optional smaller capture, not a safety
+requirement.**
 
 ```
 worklist = pages(stack-referenced cage pointers)
@@ -184,13 +187,25 @@ Nothing in the name/line path requires trusted space (SFIs'
 
 ## 4. Crashpad integration
 
-Electron uses Crashpad in-process in the renderer. The extension point is
-`crashpad::CrashpadClient`'s user minidump streams
-(`MinidumpUserExtensionStreamDataSource`), attached via
-`crashpad::CrashpadClient::AddUserMinidumpStream`-style registration (or, on
-older revisions, by patching `crashpad::MinidumpWriter` /
-`CrashReportDatabase` emission — the app already patches Electron for
-`jlc-sa` branding, so a small V8 patch is in scope).
+On Windows the handler runs **out-of-process**: Electron re-invokes its own
+binary as a child process with `--type=crashpad-handler`
+(`RunAsCrashpadHandler` in
+`components/crash/core/app/run_as_crashpad_handler_win.cc`). That child
+receives a `HANDLE` to the crashed renderer, suspends it
+(`ScopedProcessSuspend`), and reads the renderer's memory out-of-process via
+`ProcessSnapshotWin`. (The in-process handler path exists in this revision
+only on iOS and is not used by Electron.)
+
+The extension point is the `crashpad::UserStreamDataSource` interface
+(`handler/user_stream_data_source.h`), whose
+`ProduceStreamData(ProcessSnapshot*)` runs **in that handler child process**,
+with full access to the suspended renderer's memory. There is **no** runtime
+`CrashpadClient::AddUserMinidumpStream` API — the data sources are compiled
+into the handler and passed to `HandlerMain` as a `UserStreamDataSources`
+vector. `RunAsCrashpadHandler` already builds that vector (with
+`stability_report` and `gwp_asan` sources), so the integration seam is a
+one-line `push_back` of a `V8HeapUserStreamDataSource` there — not a separate
+handler binary.
 
 ### 4.1 New user stream: `V8HE` (V8 heap extension)
 
@@ -203,7 +218,7 @@ struct V8HeapExtensionHeader {
     uint64_t cage_base;
     uint64_t isolate_va;
     uint32_t region_count;
-    uint32_t flags;              // bit0: strategy B (whole old space)
+    uint32_t flags;              // bit0: strategy B (whole old space); bit1: partial heap (V8XT omitted)
     // followed by region_count entries:
     struct Region { uint64_t va; uint64_t size; uint64_t file_offset; }[];
 };
@@ -216,11 +231,14 @@ resource/char buffers) so §3.4 can be disabled independently.
 ### 4.2 Collection procedure
 
 1. Read annotations for `v8_isolate_address` / `v8_ro_space_firstpage_address`
-   (also obtainable directly from V8: `v8::Isolate::GetCurrent()`).
+   from the `ProcessSnapshot` (they ride in CrashpadInfo). The collector runs
+   out-of-process, so it reads renderer memory via `ProcessSnapshot::Memory()`,
+   not through V8 APIs directly.
 2. Push RO space range (§3.1).
-3. Heap objects, per the safety model (§4.3): default is the chase-free
-   VirtualQuery superset (§3.2-A′); the transitive chase (§3.2-A) runs only
-   in the handler process or under the in-process guards below.
+3. Heap objects, per the safety model (§4.3): the collector runs in the
+   handler process against the suspended renderer, where the chase (§3.2-A) is
+   safe by construction. The chase-free superset (§3.2-A′) remains available
+   if a page-pool-independent capture is preferred.
 4. Push isolate slice (§3.3).
 5. Locate EPT base via the same end-to-end probe the analyzer uses; push the
    EPT reservation and chase external-string targets of reachable Scripts
@@ -228,20 +246,37 @@ resource/char buffers) so §3.4 can be disabled independently.
 
 ### 4.3 Collector safety model
 
-Dereferencing pointers inside a crashed process is dangerous for three
-reasons: reads against freed/unmapped pages can fault inside the handler,
-any lock acquisition can deadlock against threads frozen mid-operation, and a
-mid-GC heap can be torn. The design therefore layers the collection by risk:
+On Windows the collector runs **inside the handler process**, against a
+**suspended** renderer (`ScopedProcessSuspend`), through `ProcessSnapshotWin`.
+That neutralizes two of the three classic dangers of scanning a crashed heap
+before any code is written:
 
-| Level | Where the chase runs | Rule |
+- **Faults** — reads go through `ProcessMemoryWin::ReadAvailableMemory`, which
+  pre-validates ranges with a `VirtualQuery`-derived `GetReadableRanges()` and
+  then `ReadProcessMemory`s the suspended client; any inaccessible region
+  returns `0` and is skipped. It **cannot fault the handler** — no
+  `__try`/`__except` needed.
+- **Locks** — the handler is a separate process and takes no V8/GC/blink locks;
+  the renderer's threads are frozen by Crashpad.
+- **Mid-GC torn state** — the only residual risk. Capture is best-effort and
+  the decoder validates every object's Map/instance-type, so a torn object
+  degrades that frame to `None`, never to a wrong name.
+
+Because the chase is safe by construction here, strategy A (§3.2) is the
+natural default; the chase-free `VirtualQuery` superset (§3.2-A′) remains
+available for a page-pool-independent capture, but is no longer required for
+safety. The in-process handler path (iOS only in this revision) is not used by
+Electron; if it ever were, the §3.2-A′ superset or the deferred option below
+would apply there.
+
+| Level | Where it runs | Rule |
 |---|---|---|
-| **Safe default** | — | No dereferencing at all: capture RO space, isolate slice, and the chase-free `VirtualQuery` superset (§3.2-A′). Pure OS queries; cannot crash the handler. |
-| **Preferred for precision** | **Out-of-process** | The transitive chase (§3.2-A) and EPT target chasing (§3.4) run in the **Crashpad handler process**, reading the client's memory through OS APIs (`ReadProcessMemory`-equivalent). A bad read fails one region; the crashed app cannot be harmed; no app locks are involved. |
-| **Last resort** | In-process | Only with all guards: threads already suspended by Crashpad, no locks ever taken, every page read preceded by a `VirtualQuery` commit check **and** wrapped in SEH (`__try`/`__except`), hard caps on pages/bytes/depth/time, any fault aborts that region — never the dump. |
-| **Deferred (forced dumps)** | Normal thread, post-handler | `0x80000003` "dump without crash" leaves the app alive: after the handler returns, run the chase on a regular thread and append/rewrite `V8HE`/`V8XT` offline (ingestion format is identical). Not applicable to fatal crashes. |
+| **Default (Windows)** | **Handler, out-of-process** | Transitive chase (§3.2-A) + EPT targets (§3.4) run via `ProcessSnapshot::Memory()`. Safe by construction — see above. |
+| **Smaller capture** | Handler, out-of-process | Chase-free `VirtualQuery` superset (§3.2-A′): pick for size / page-pool independence, not safety. |
+| **Deferred (forced dumps)** | Normal renderer thread, post-handler | `0x80000003` "dump without crash" leaves the app alive: after the handler returns, run the chase on a regular thread and append/rewrite `V8HE`/`V8XT` offline (ingestion format is identical). Not applicable to fatal crashes. |
 
 Forensicator ingestion is unchanged by where bytes came from — the stream
-format (§4.1) is identical for all levels.
+format (§4.1) is identical for all rows.
 
 ### 4.4 Forensicator ingestion
 
@@ -260,15 +295,20 @@ format (§4.1) is identical for all levels.
 | Scavenger moved young-gen objects between crash and capture | a frame's JSFunction read fails | decoder fails closed (`None`); strategy B captures old space wholesale |
 | V8 page pool holds freed pages | §3.2-A misses objects | same closed failure; optional strategy B |
 | Handler runs mid-GC: heap in transient state | torn objects | capture is best-effort; validation in decoder rejects inconsistencies |
-| In-process chase faults (freed/unmapped page) | handler crash, dump lost | chase-free default §3.2-A′, or chase out-of-process / SEH-guarded only (§4.3) |
-| Crashpad version lacks user-stream API | can't attach streams | fallback: patch the writer directly, or post-process: run a helper that rewrites the .dmp adding regions offline (same V8HE format — ingestion code shared) |
+| Chase reads freed/unmapped page | one region skipped | handler reads through `ProcessMemoryWin` (§4.3), which cannot fault; the frame degrades to `None`, never wrong names |
+| Vendoring the collector + Electron patch | changes to `third_party/crashpad/crashpad` + `run_as_crashpad_handler_win.cc` must be exported as Electron patches | the app already patches Electron for branding — add the collector files and the one-line `push_back` as a `patches/crashpad` (or `patches/chromium`) target via `e patches`. Offline-rewrite fallback (same V8HE format — ingestion code shared) if the handler can't be rebuilt |
 | EPT reservation huge / sparse | size blowup | cap at 8 MB; skip V8XT beyond cap |
 | Version drift (V8 ≥ 15 changes layouts) | wrong offsets | decoder layouts are per-version (`v8layout.rs`); V8HE `version` field allows region-format evolution |
 
 ## 6. Implementation plan (suggested phases)
 
-1. **App side**: V8HE collector + Crashpad registration behind a flag; unit
-   test that a synthetic crash yields a dump containing the stream.
+1. **App side**: develop the collector (`V8HeapUserStreamDataSource` + capture
+   logic) in the **crashpad repo** at `handler/v8_heap/`, unit-tested via
+   `crashpad_handler_test` against a `TestProcessSnapshot` + fake
+   `ProcessMemory`. Then register it in Electron's embedded handler by
+   `push_back`-ing it into the `UserStreamDataSources` vector in
+   `run_as_crashpad_handler_win.cc` (alongside `stability_report`/`gwp_asan`)
+   once the crashpad changes are synced into `third_party/crashpad/crashpad/`.
 2. **Forensicator side**: V8HE stream parser + AddressSpace ingestion + kind
    classification; tests with a hand-built stream.
 3. **End-to-end**: crash the instrumented app, verify the crashed thread

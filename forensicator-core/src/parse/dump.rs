@@ -5,7 +5,7 @@ use crate::error::{Anomaly, FatalError, Provenance};
 use crate::model::{Dump, MemState, MemType, MemoryRegionInfo, Protection, RegionClass};
 use crate::parse::{
     comment_a, crashpad, directory, exception, header, memory, memory_info, module_list,
-    system_info, thread_list,
+    system_info, thread_list, v8heap,
 };
 
 /// Open a minidump file and parse it into a `Dump`.
@@ -93,7 +93,7 @@ fn from_bytes_inner(
     )
     .unwrap_or_default();
 
-    let memory_ranges: Vec<memory::RawMemoryRange> = {
+    let mut memory_ranges: Vec<memory::RawMemoryRange> = {
         let mut ranges = decode_optional(
             data,
             &dir,
@@ -125,6 +125,35 @@ fn from_bytes_inner(
         }
         ranges
     };
+
+    // V8 heap snapshot (V8HE user stream): additional heap regions that let a
+    // stack-only dump resolve JIT frames. Ingested into the address space just
+    // like ordinary memory ranges. Absent on dumps not produced with the
+    // instrumented handler.
+    if let Some(entry) = dir.find(v8heap::V8HE_STREAM_TYPE) {
+        let start = entry.rva as usize;
+        let end = start.saturating_add(entry.size as usize).min(data.len());
+        if end > start {
+            let stream_bytes = &data[start..end];
+            let prov = Provenance {
+                stream_type: v8heap::V8HE_STREAM_TYPE,
+                file_offset: start as u64,
+                rva: 0,
+            };
+            match v8heap::decode_v8heap(stream_bytes, prov) {
+                // Prepend V8HE regions BEFORE standard MemoryList ranges so they
+                // take priority: build_address_space's add_region rejects overlaps,
+                // and MemoryList fragments (small heap captures) would otherwise
+                // mask the larger V8HE pages that contain the decoder's objects.
+                Ok(v8_ranges) => {
+                    let mut combined = v8_ranges;
+                    combined.append(&mut memory_ranges);
+                    memory_ranges = combined;
+                }
+                Err(anom) => anomalies.push(anom),
+            }
+        }
+    }
 
     let memory_info_entries: Vec<memory_info::RawMemoryInfoEntry> = decode_optional(
         data,
@@ -378,5 +407,63 @@ mod tests {
         let data = vec![0u8; 10];
         let err = from_bytes(&data).unwrap_err();
         assert!(matches!(err, FatalError::TooSmall { .. }));
+    }
+
+    /// A minimal V8HE stream: 2 regions (16 and 8 bytes). Mirrors the handler's
+    /// V8HeapCapture serialization.
+    fn make_v8he_stream() -> Vec<u8> {
+        const HEADER_SIZE: usize = 32;
+        const REGION_ENTRY_SIZE: usize = 24;
+        let cage_base: u64 = 0x0000_0100_0000_0000;
+        let isolate_va: u64 = 0x0000_0200_0000_0000;
+        let r0_va: u64 = cage_base;
+        let r1_va: u64 = cage_base + 0x1000_0000;
+        let data_start = (HEADER_SIZE + 2 * REGION_ENTRY_SIZE) as u64;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0x45483856u32.to_le_bytes()); // stream_type 'V8HE'
+        buf.extend_from_slice(&1u32.to_le_bytes()); // version
+        buf.extend_from_slice(&cage_base.to_le_bytes());
+        buf.extend_from_slice(&isolate_va.to_le_bytes());
+        buf.extend_from_slice(&2u32.to_le_bytes()); // region_count
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        // region table
+        buf.extend_from_slice(&r0_va.to_le_bytes());
+        buf.extend_from_slice(&16u64.to_le_bytes());
+        buf.extend_from_slice(&data_start.to_le_bytes());
+        buf.extend_from_slice(&r1_va.to_le_bytes());
+        buf.extend_from_slice(&8u64.to_le_bytes());
+        buf.extend_from_slice(&(data_start + 16).to_le_bytes());
+        // region bytes
+        buf.extend_from_slice(&[0xAA; 16]);
+        buf.extend_from_slice(&[0xBB; 8]);
+        buf
+    }
+
+    #[test]
+    fn v8heap_stream_lands_in_memory_regions() {
+        let v8he = make_v8he_stream();
+        let dir_rva: u32 = 32;
+        let stream_rva: u32 = dir_rva + 12;
+        let mut buf = vec![0u8; stream_rva as usize + v8he.len()];
+        buf[0..4].copy_from_slice(b"MDMP");
+        buf[4] = 0x93;
+        buf[5] = 0xA7; // version 0xA793
+        buf[8..12].copy_from_slice(&1u32.to_le_bytes()); // stream_count
+        buf[12..16].copy_from_slice(&dir_rva.to_le_bytes());
+        // directory entry: V8HE
+        let d = dir_rva as usize;
+        buf[d..d + 4].copy_from_slice(&0x45483856u32.to_le_bytes());
+        buf[d + 4..d + 8].copy_from_slice(&(v8he.len() as u32).to_le_bytes());
+        buf[d + 8..d + 12].copy_from_slice(&stream_rva.to_le_bytes());
+        // stream bytes
+        buf[stream_rva as usize..stream_rva as usize + v8he.len()].copy_from_slice(&v8he);
+
+        let dump = from_bytes(&buf).unwrap();
+        assert_eq!(dump.memory_regions.len(), 2, "V8HE regions not ingested");
+        assert_eq!(dump.memory_regions[0].va_start, 0x0000_0100_0000_0000);
+        assert_eq!(dump.memory_regions[0].data.len(), 16);
+        assert_eq!(dump.memory_regions[1].va_start, 0x0000_0100_1000_0000);
+        assert_eq!(dump.memory_regions[1].data, &[0xBB; 8]);
     }
 }
