@@ -222,15 +222,18 @@ struct V8HeapExtensionHeader {
     uint64_t cage_base;
     uint64_t isolate_va;
     uint32_t region_count;
-    uint32_t flags;              // bit0: strategy B (whole old space); bit1: partial heap (V8XT omitted)
+    uint32_t flags;              // bit0: strategy B (whole-cage sweep ran);
+                                 // bit1: partial heap (external-string targets
+                                 //       were referenced but not fully captured)
     // followed by region_count entries:
     struct Region { uint64_t va; uint64_t size; uint64_t file_offset; }[];
 };
 ```
 
-Region bytes are appended after the directory entries. A second, optional
-stream `V8XT` carries the external-string targets (EPT reservation +
-resource/char buffers) so §3.4 can be disabled independently.
+Region bytes are appended after the directory entries. The external-string
+targets (EPT reservation + resource/char buffers, §3.4) are folded into the
+same `V8HE` stream as ordinary regions — there is no separate stream; when
+they cannot be captured the collector sets `flags.bit1` (partial heap) instead.
 
 ### 4.2 Collection procedure
 
@@ -246,7 +249,7 @@ resource/char buffers) so §3.4 can be disabled independently.
 4. Push isolate slice (§3.3).
 5. Locate EPT base via the same end-to-end probe the analyzer uses; push the
    EPT reservation and chase external-string targets of reachable Scripts
-   (§3.4) into `V8XT`.
+   (§3.4) as additional `V8HE` regions.
 
 ### 4.3 Collector safety model
 
@@ -277,14 +280,14 @@ would apply there.
 |---|---|---|
 | **Default (Windows)** | **Handler, out-of-process** | Transitive chase (§3.2-A) + EPT targets (§3.4) run via `ProcessSnapshot::Memory()`. Safe by construction — see above. |
 | **Smaller capture** | Handler, out-of-process | Chase-free `VirtualQuery` superset (§3.2-A′): pick for size / page-pool independence, not safety. |
-| **Deferred (forced dumps)** | Normal renderer thread, post-handler | `0x80000003` "dump without crash" leaves the app alive: after the handler returns, run the chase on a regular thread and append/rewrite `V8HE`/`V8XT` offline (ingestion format is identical). Not applicable to fatal crashes. |
+| **Deferred (forced dumps)** | Normal renderer thread, post-handler | `0x80000003` "dump without crash" leaves the app alive: after the handler returns, run the chase on a regular thread and append/rewrite `V8HE` offline (ingestion format is identical). Not applicable to fatal crashes. |
 
 Forensicator ingestion is unchanged by where bytes came from — the stream
 format (§4.1) is identical for all rows.
 
 ### 4.4 Forensicator ingestion
 
-- Parse `V8HE`/`V8XT` in `parse/` (new stream decoder, provenance-tagged as
+- Parse `V8HE` in `parse/` (new stream decoder, provenance-tagged as
   usual), and `AddressSpace::add_region` each region **before** analysis —
   the existing decoder then works unmodified.
 - `DumpKind` classification: treat a dump with `V8HE` as
@@ -301,7 +304,7 @@ format (§4.1) is identical for all rows.
 | Handler runs mid-GC: heap in transient state | torn objects | capture is best-effort; validation in decoder rejects inconsistencies |
 | Chase reads freed/unmapped page | one region skipped | handler reads through `ProcessMemoryWin` (§4.3), which cannot fault; the frame degrades to `None`, never wrong names |
 | Vendoring the collector + Electron patch | changes to `third_party/crashpad/crashpad` + `run_as_crashpad_handler_win.cc` must be exported as Electron patches | the app already patches Electron for branding — add the collector files and the one-line `push_back` as a `patches/crashpad` (or `patches/chromium`) target via `e patches`. Offline-rewrite fallback (same V8HE format — ingestion code shared) if the handler can't be rebuilt |
-| EPT reservation huge / sparse | size blowup | cap at 8 MB; skip V8XT beyond cap |
+| EPT reservation huge / sparse | size blowup | cap at 8 MB; set partial-heap flag beyond cap |
 | Version drift (V8 ≥ 15 changes layouts) | wrong offsets | decoder layouts are per-version (`v8layout.rs`); V8HE `version` field allows region-format evolution |
 
 ## 6. Implementation plan (suggested phases)
@@ -327,17 +330,22 @@ renderer crash (V8 14.6 / Chromium 146 / Electron 41.10.3-jlc-sa).
 
 ### 7.1 What was built
 
-**Collector** (standalone crashpad repo, `handler/v8_heap/`):
+**Collector** (standalone crashpad repo, `handler/v8_heap/`; synced into
+`third_party/crashpad/crashpad/` in the Electron tree):
 - `v8_heap_capture.{h,cc}` — the collector. Reads V8 annotations
   (`v8_isolate_address`, `v8_ro_space_firstpage_address`) from
   `ProcessSnapshot`; captures RO space (§3.1), the isolate slice (§3.3),
   the compressed-pointer object chain (§3.2-A as a **targeted chain-follow**
-  at known V8 14.6 offsets, not a generic BFS scan), and external-string
-  EPT targets (§3.4).
+  at known V8 14.6 offsets, not a generic BFS scan — including the
+  ScopeInfo → function-variable/inferred-name hop), and external-string
+  EPT targets (§3.4, folded into V8HE). Strategy B (§3.2-B whole-cage
+  sweep) is available behind the `V8_HEAP_CAPTURE_STRATEGY=b` environment
+  variable in the handler process; when it runs the stream's `flags.bit0`
+  is set, and incomplete external-string capture sets `flags.bit1`.
 - `v8_heap_user_stream_data_source.{h,cc}` — `UserStreamDataSource` emitter.
 - `v8_heap_format.h` / `v8_layout.h` — wire format + V8 14.6 offsets.
 - Registered in `run_as_crashpad_handler_win.cc` (one-line `push_back`).
-- 4 unit tests (compiles `/W4 /WX /std:c++20`; all pass).
+- 8 unit tests (compiles `/W4 /WX /std:c++20`; all pass).
 
 **Forensicator parser** (`parse/v8heap.rs`):
 - `decode_v8heap` — parses the V8HE wire format into `RawMemoryRange`s.
@@ -347,8 +355,8 @@ renderer crash (V8 14.6 / Chromium 146 / Electron 41.10.3-jlc-sa).
   `AddressSpace` → decoder resolves `name="myFunc"`.
 - 202 tests pass.
 
-**Electron patch** (`patches/chromium/v8_heap_capture.patch`) — applies
-cleanly to `src`; full `electron.exe` builds (exit 0, 224 MB).
+**Electron patch** (`electron/patches/chromium/v8_heap_user_stream_registration.patch`)
+— applies cleanly to `src`; full `electron.exe` builds (exit 0, 224 MB).
 
 ### 7.2 What live validation found (three bugs, all fixed)
 
