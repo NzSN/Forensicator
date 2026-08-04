@@ -9,8 +9,14 @@ pub enum InstrKind {
     Ud2,
     /// base = RegisterSet index when the memory operand is [reg + disp]
     /// (None for RIP-relative or absolute forms).
-    MemRead { base: Option<usize>, disp: i64 },
-    MemWrite { base: Option<usize>, disp: i64 },
+    MemRead {
+        base: Option<usize>,
+        disp: i64,
+    },
+    MemWrite {
+        base: Option<usize>,
+        disp: i64,
+    },
     IndirectCall,
     IndirectJump,
     Other,
@@ -219,7 +225,10 @@ mod tests {
     fn call_through_register_is_indirect() {
         // call rax
         let s = space_with(0x1000, &[0xFF, 0xD0]);
-        assert_eq!(decode_window(&s, 0x1000, 4)[0].kind, InstrKind::IndirectCall);
+        assert_eq!(
+            decode_window(&s, 0x1000, 4)[0].kind,
+            InstrKind::IndirectCall
+        );
     }
 
     #[test]

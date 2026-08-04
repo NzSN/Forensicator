@@ -1,4 +1,4 @@
-﻿//! Model-Based Testing for Forensicator S1 using MirrorRust.
+//! Model-Based Testing for Forensicator S1 using MirrorRust.
 //! Validates the Rust Dump model (model.rs) against the TLA+ Model.tla spec via trace replay.
 //!
 //! Requires ModelMirros binary. Set MIRROR_BIN env var to run.
@@ -62,7 +62,7 @@ impl ModelComputer {
                 annotations: vec![],
                 memory_info: vec![],
                 v8heap_ext: None,
-            file_size: 0,
+                file_size: 0,
             },
             annotations: vec![],
         }

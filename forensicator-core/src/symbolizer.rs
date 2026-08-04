@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
@@ -68,13 +68,13 @@ pub struct ModuleSymbols {
 
 impl ModuleSymbols {
     #[doc(hidden)]
-    pub fn new(
-        module_name: String,
-        base_va: u64,
-        size: u64,
-        symbols: Vec<SymbolEntry>,
-    ) -> Self {
-        ModuleSymbols { module_name, base_va, size, symbols }
+    pub fn new(module_name: String, base_va: u64, size: u64, symbols: Vec<SymbolEntry>) -> Self {
+        ModuleSymbols {
+            module_name,
+            base_va,
+            size,
+            symbols,
+        }
     }
 }
 
@@ -101,12 +101,7 @@ impl Symbolizer {
                 Err(e) => return Err(e),
             };
 
-            match load_module_symbols(
-                &pdb_path,
-                &module.name,
-                module.base_va,
-                module.size,
-            ) {
+            match load_module_symbols(&pdb_path, &module.name, module.base_va, module.size) {
                 Ok(ms) => modules.push(ms),
                 Err(SymbolizerError::Io(_)) => continue,
                 Err(SymbolizerError::NoSymbols(_)) => continue,
@@ -253,9 +248,10 @@ fn load_module_symbols(
     })?;
 
     let mut symbols = symbol_table.iter();
-    while let Some(symbol) = symbols.next().map_err(|e| {
-        SymbolizerError::PdbParse(format!("symbol iteration error: {e}"))
-    })? {
+    while let Some(symbol) = symbols
+        .next()
+        .map_err(|e| SymbolizerError::PdbParse(format!("symbol iteration error: {e}")))?
+    {
         let parsed: Result<pdb::SymbolData<'_>, _> = symbol.parse();
         let Ok(pdb::SymbolData::Public(data)) = parsed else {
             continue;
@@ -302,12 +298,11 @@ fn load_module_symbols(
                                         };
                                         let va = base_va.wrapping_add(rva.0 as u64);
                                         if let Some(entry) = symbol_map.get_mut(&va) {
-                                            let file = match line_program
-                                                .get_file_info(line.file_index)
-                                            {
-                                                Ok(fi) => fi.name.to_string(),
-                                                Err(_) => continue,
-                                            };
+                                            let file =
+                                                match line_program.get_file_info(line.file_index) {
+                                                    Ok(fi) => fi.name.to_string(),
+                                                    Err(_) => continue,
+                                                };
                                             entry.1 = Some(file);
                                             entry.2 = Some(line.line_start);
                                             break;
@@ -527,9 +522,7 @@ mod tests {
             if let Some(resolved) = sym.resolve(exc.address) {
                 eprintln!(
                     "  -> {}!{}+0x{:X}",
-                    resolved.function_name,
-                    resolved.function_name,
-                    resolved.offset
+                    resolved.function_name, resolved.function_name, resolved.offset
                 );
                 if let (Some(file), Some(line)) =
                     (resolved.source_file.as_deref(), resolved.source_line)
@@ -546,10 +539,9 @@ mod tests {
             eprintln!("Thread TID {} RIP 0x{:016X}", first_thread.id, rip);
             if rip != 0 {
                 if let Some(resolved) = sym.resolve(rip) {
-                    eprintln!("  -> {}!{}+0x{:X}",
-                        resolved.function_name,
-                        resolved.function_name,
-                        resolved.offset
+                    eprintln!(
+                        "  -> {}!{}+0x{:X}",
+                        resolved.function_name, resolved.function_name, resolved.offset
                     );
                 }
             }

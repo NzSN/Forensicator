@@ -19,15 +19,14 @@ Rust workspace (edition 2024) for forensic analysis of Windows x64 minidumps. Cu
 
 **Two crates** in workspace: `forensicator-core` (lib) + `forensicator-cli` (bin, depends on core).
 
-**Pipeline (S1 → S2 → S3):**
+**Pipeline (S1 → S2):**
 1. **Parse** — validate minidump header → stream directory → per-stream decoders → typed `Dump` with provenance
 2. **AddressSpace** — sorted, non-overlapping memory regions with `RegionClass` classification (Image/Stack/Private/Mapped/Other)
-3. **Scan** — 8-byte stride pointer scanning with configurable `PointerPattern` matchers → `CandidatePointer` + `Root` extraction
-4. **Graph** — `build_graph()` produces `PointerGraph` (dual adjacency, va→node map, capacity caps)
-5. **Query** — `GraphQuery` provides BFS reachability, path-to-root, DOT/JSON export, degree/confidence distributions
-6. **Recover** — 6 trait-based detectors: StringDetector, VTableDetector, ListDetector, ArrayDetector, ChunkDetector, ShapeClusterer → unified `StructureCatalog`
+3. **Analyze** — pluggable `Analyzer` pipeline: `cause` (crash-cause diagnosis), `strings`, `vtables`, `lists`, `arrays`, `chunks`, `shapes`, `v8` (JS stack recovery)
 
-**`pipeline` module** — global workflow orchestrator (`Forensicator` struct) mirroring `specs/Forensicator.tla`. Composes all stages into `open()` → `s2()` → `s3()` → `run_full()`.
+**`pipeline` module** — global workflow orchestrator (`Forensicator` struct) mirroring `specs/Forensicator.tla`. Composes `open()` → `analyze()` → `run_full()`.
+
+**Utility modules** — `disasm` (iced-x86 window decode + `InstrKind` classification), `v8obj` (cage-aware object walking: decompress/smi/instance_type/strings), `v8layout` (version-pinned V8 offsets), `symbolizer` (PDB), `unwind` (.pdata), `image` (on-disk module backing).
 
 ## Key conventions
 
@@ -57,7 +56,11 @@ forensicator recover <dump.dmp>        # structure recovery (--strings, --vtable
 
 `specs/` contains TLA+ specs (AddressSpace, Arch, Model, etc.) with corresponding `forensicator-core/tests/mbt_*.rs` integration tests via `mirrorrust`. MBT tests are **opt-in** (require `MIRROR_BIN` + `APALACHE_MC` env vars). State traces in `states/` are TLA+ model-checking output, excluded from git.
 
-MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`. Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
+MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`, `mbt_crash_cause.rs` (spec-only stub). Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
+
+## Custom minidump streams
+
+**V8HE** (stream type `0x45483856`, emitted by the instrumented handler): cage base + isolate VA + captured V8 heap regions, ingested as ordinary memory ranges. Version 2 adds a 32-byte extension after the header — allocation top/limit, `gc_state`, `last_gc_reason`, and a fatal-message string — decoded into `Dump.v8heap_ext` and consumed by the `cause` analyzer's OOM/CHECK rules.
 
 ## Development approach
 

@@ -670,7 +670,8 @@ fn scope_info_function_name(
 
     let mut candidates = [None, None];
     let alloc =
-        (flags >> layout.scope_function_variable_shift) & layout.scope_function_variable_mask;    if alloc != 0 {
+        (flags >> layout.scope_function_variable_shift) & layout.scope_function_variable_mask;
+    if alloc != 0 {
         candidates[0] = Some(off); // function_variable_info.name
         off += 8; // name + context_or_stack_slot_index
     }
@@ -825,8 +826,10 @@ mod tests {
     #[test]
     fn decodes_js_frame_from_captured_heap() {
         let cage: u64 = 0x1_0000_0000;
-        let set_u32 = |b: &mut [u8], o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
-        let set_u64 = |b: &mut [u8], o: usize, v: u64| b[o..o + 8].copy_from_slice(&v.to_le_bytes());
+        let set_u32 =
+            |b: &mut [u8], o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let set_u64 =
+            |b: &mut [u8], o: usize, v: u64| b[o..o + 8].copy_from_slice(&v.to_le_bytes());
 
         let mut space = AddressSpace::new(64);
 
@@ -925,15 +928,16 @@ mod tests {
                     rva: 0,
                 },
             }],
-            threads: vec![make_stack_thread(
-                fp, 0xFF00, 0x7FFA_1000, base, 0x2000,
-            )],
+            threads: vec![make_stack_thread(fp, 0xFF00, 0x7FFA_1000, base, 0x2000)],
             memory_regions: vec![],
             exception: None,
             anomalies: vec![],
             annotations: vec![
                 ("ver".into(), "41.0.0".into()),
-                ("v8_isolate_address".into(), format!("{:#x}", cage + 0x1C0000)),
+                (
+                    "v8_isolate_address".into(),
+                    format!("{:#x}", cage + 0x1C0000),
+                ),
                 (
                     "v8_ro_space_firstpage_address".into(),
                     format!("{:#x}", cage),

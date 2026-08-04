@@ -187,7 +187,9 @@ fn rule_breakpoint(c: &Ctx) -> Option<Hit> {
     }
     let mut evidence = Vec::new();
     if code_hit {
-        evidence.push(format!("exception code 0x{EXCEPTION_BREAKPOINT:08X} (breakpoint)"));
+        evidence.push(format!(
+            "exception code 0x{EXCEPTION_BREAKPOINT:08X} (breakpoint)"
+        ));
     }
     if disasm_hit {
         evidence.push(format!(
@@ -231,8 +233,7 @@ fn rule_stack_overflow(c: &Ctx) -> Option<Hit> {
     let near_stack = c.dump.threads.iter().any(|t| {
         let s = t.stack_va;
         let e = t.stack_va.saturating_add(t.stack_size);
-        guard.va_start >= s.saturating_sub(0x10000)
-            && guard.va_start <= e.saturating_add(0x10000)
+        guard.va_start >= s.saturating_sub(0x10000) && guard.va_start <= e.saturating_add(0x10000)
     });
     Some(Hit {
         rule: 3,
@@ -322,8 +323,14 @@ fn rule_object_access(c: &Ctx) -> Option<Hit> {
     let exc = c.dump.exception.as_ref()?;
     let regs = exc.context.as_ref()?;
     let (base, disp) = match c.disasm.first().map(|i| &i.kind) {
-        Some(InstrKind::MemRead { base: Some(b), disp })
-        | Some(InstrKind::MemWrite { base: Some(b), disp }) => (*b, *disp),
+        Some(InstrKind::MemRead {
+            base: Some(b),
+            disp,
+        })
+        | Some(InstrKind::MemWrite {
+            base: Some(b),
+            disp,
+        }) => (*b, *disp),
         _ => return None,
     };
     let tagged = regs.get(base);
@@ -498,9 +505,7 @@ fn scan_stack_for_fatal(dump: &Dump, space: &AddressSpace, thread_id: u32) -> Op
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn layout_name(dump: &Dump) -> String {
@@ -553,7 +558,7 @@ mod tests {
     use crate::arch::x64_indices;
     use crate::error::Provenance;
     use crate::model::{
-        ExceptionInfo, MemoryInfoEntry, MemType, Module, RegionClass, Thread, V8HeapExt,
+        ExceptionInfo, MemType, MemoryInfoEntry, Module, RegionClass, Thread, V8HeapExt,
     };
     use crate::space::{AddressRegion, AddressSpace};
 
@@ -626,7 +631,12 @@ mod tests {
         let mut dump = base_dump();
         dump.exception = Some(exception(EXCEPTION_BREAKPOINT, 0x5000, vec![]));
         let mut space = AddressSpace::new(4);
-        add_region(&mut space, 0x5000, vec![0xCC, 0x90, 0x90], RegionClass::Image);
+        add_region(
+            &mut space,
+            0x5000,
+            vec![0xCC, 0x90, 0x90],
+            RegionClass::Image,
+        );
         let d = diagnose(&dump, &space);
         assert_eq!(d.verdict, CrashVerdict::V8CheckFailure);
         assert_eq!(d.confidence, Confidence::High);
@@ -635,7 +645,11 @@ mod tests {
     #[test]
     fn fatal_message_in_v8heap_ext_wins() {
         let mut dump = base_dump();
-        dump.exception = Some(exception(EXCEPTION_ACCESS_VIOLATION, 0x7FF0_1000, vec![0, 0xDEAD]));
+        dump.exception = Some(exception(
+            EXCEPTION_ACCESS_VIOLATION,
+            0x7FF0_1000,
+            vec![0, 0xDEAD],
+        ));
         dump.v8heap_ext = Some(V8HeapExt {
             alloc_top_va: 0,
             alloc_limit_va: 0,
@@ -722,10 +736,7 @@ mod tests {
     fn object_access_in_cage_decodes_instance_type() {
         const CAGE: u64 = 0x1_0000_0000;
         let mut dump = base_dump();
-        dump.annotations = vec![(
-            "v8_ro_space_firstpage_address".into(),
-            format!("{CAGE:#x}"),
-        )];
+        dump.annotations = vec![("v8_ro_space_firstpage_address".into(), format!("{CAGE:#x}"))];
         let obj = CAGE + 0x40000;
         let mut regs = RegisterSet::new();
         regs.set(x64_indices::RCX, obj | 1);
@@ -780,7 +791,11 @@ mod tests {
     #[test]
     fn rip_into_unmapped_is_corrupted_code_pointer() {
         let mut dump = base_dump();
-        dump.exception = Some(exception(EXCEPTION_ACCESS_VIOLATION, 0xDEAD_0000, vec![8, 0xDEAD_0000]));
+        dump.exception = Some(exception(
+            EXCEPTION_ACCESS_VIOLATION,
+            0xDEAD_0000,
+            vec![8, 0xDEAD_0000],
+        ));
         let space = AddressSpace::new(4);
         let d = diagnose(&dump, &space);
         assert_eq!(d.verdict, CrashVerdict::CorruptedCodePointer);
@@ -789,7 +804,11 @@ mod tests {
     #[test]
     fn null_page_fault_is_null_deref() {
         let mut dump = base_dump();
-        dump.exception = Some(exception(EXCEPTION_ACCESS_VIOLATION, 0x7FF0_1000, vec![0, 0x18]));
+        dump.exception = Some(exception(
+            EXCEPTION_ACCESS_VIOLATION,
+            0x7FF0_1000,
+            vec![0, 0x18],
+        ));
         let space = AddressSpace::new(4);
         let d = diagnose(&dump, &space);
         assert_eq!(d.verdict, CrashVerdict::NullDeref);

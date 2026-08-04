@@ -10,10 +10,7 @@ pub struct Annotation {
 /// Decode CommentStreamA (stream type 0x0A): a buffer of null-terminated
 /// key=value pairs. Chromium-derived dumps use a single key=value;
 /// other implementations may concatenate multiple pairs.
-pub fn decode_comment_a(
-    data: &[u8],
-    provenance: Provenance,
-) -> Result<Vec<Annotation>, Anomaly> {
+pub fn decode_comment_a(data: &[u8], provenance: Provenance) -> Result<Vec<Annotation>, Anomaly> {
     let mut annotations = Vec::new();
     let s = String::from_utf8_lossy(data);
     for pair in s.split('\0') {
@@ -42,7 +39,11 @@ mod tests {
     use super::*;
 
     fn dummy_prov() -> Provenance {
-        Provenance { stream_type: 0x0A, file_offset: 0, rva: 0 }
+        Provenance {
+            stream_type: 0x0A,
+            file_offset: 0,
+            rva: 0,
+        }
     }
 
     #[test]

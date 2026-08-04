@@ -73,7 +73,10 @@ impl SymbolizerComputer {
                 Value::Record(
                     vec![
                         ("name".to_string(), Value::Str(name.clone())),
-                        ("base_va".to_string(), Value::Int(BigInt::from(*base as i64))),
+                        (
+                            "base_va".to_string(),
+                            Value::Int(BigInt::from(*base as i64)),
+                        ),
                         ("size".to_string(), Value::Int(BigInt::from(*sz as i64))),
                     ]
                     .into_iter()

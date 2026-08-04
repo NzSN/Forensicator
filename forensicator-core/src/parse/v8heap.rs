@@ -11,10 +11,10 @@ use crate::parse::memory::RawMemoryRange;
 pub const V8HE_STREAM_TYPE: u32 = 0x45483856;
 
 const HEADER_SIZE: usize = 32; // stream_type(4) version(4) cage_base(8)
-                               // isolate_va(8) region_count(4) flags(4)
+// isolate_va(8) region_count(4) flags(4)
 const REGION_ENTRY_SIZE: usize = 24; // va(8) size(8) file_offset(8)
 const V2_EXT_SIZE: usize = 32; // alloc_top(8) alloc_limit(8) gc_state(4)
-                               // last_gc_reason(4) fatal_msg_len(4) reserved(4)
+// last_gc_reason(4) fatal_msg_len(4) reserved(4)
 const MAX_FATAL_MSG_LEN: usize = 4096;
 
 /// Decode the V8HE user-extension stream into memory ranges, plus the
@@ -41,9 +41,7 @@ pub fn decode_v8heap(
     if stream_type != V8HE_STREAM_TYPE {
         return Err(Anomaly {
             provenance: prov,
-            description: format!(
-                "V8HE stream has unexpected stream_type 0x{stream_type:08X}"
-            ),
+            description: format!("V8HE stream has unexpected stream_type 0x{stream_type:08X}"),
         });
     }
     let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
@@ -87,8 +85,7 @@ pub fn decode_v8heap(
         }
         let va = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
         let size = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap()) as usize;
-        let file_offset =
-            u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap()) as usize;
+        let file_offset = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap()) as usize;
 
         let fend = match file_offset.checked_add(size) {
             Some(e) => e,
@@ -134,7 +131,11 @@ mod tests {
         let r1_size: u64 = 8;
 
         let msg = b"Check failed: !ptr->IsSmi().";
-        let ext_size = if version >= 2 { V2_EXT_SIZE + msg.len() } else { 0 };
+        let ext_size = if version >= 2 {
+            V2_EXT_SIZE + msg.len()
+        } else {
+            0
+        };
         let data_start = (HEADER_SIZE + ext_size + 2 * REGION_ENTRY_SIZE) as u64;
         let r0_off = data_start;
         let r1_off = data_start + r0_size;
