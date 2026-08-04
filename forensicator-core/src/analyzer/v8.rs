@@ -7,6 +7,7 @@ use crate::analyzer::{Analyzer, AnalyzerOutput};
 use crate::model::{Dump, V8FrameType, V8StackFrame};
 use crate::space::AddressSpace;
 use crate::symbolizer::Symbolizer;
+use crate::v8obj::{decompress, instance_type, read_u32, read_v8_string, smi, try_read_u64};
 
 pub struct V8Analyzer {
     pdb_dir: Option<String>,
@@ -99,34 +100,20 @@ impl Analyzer for V8Analyzer {
 /// dump or, for stack-only minidumps, from the supplemented module image).
 fn disassemble_exception(dump: &Dump, space: &AddressSpace) -> Option<serde_json::Value> {
     let exc = dump.exception.as_ref()?;
-    let pc = exc.address;
-    let bytes = space.read(pc, 64)?;
-    let mut decoder = iced_x86::Decoder::with_ip(64, bytes, pc, iced_x86::DecoderOptions::NONE);
-    let mut lines = Vec::new();
-    let mut instr = iced_x86::Instruction::default();
-    let mut output = FormatterOutputImpl(String::new());
-    while lines.len() < 10 && decoder.can_decode() {
-        decoder.decode_out(&mut instr);
-        output.0.clear();
-        let mut formatter = iced_x86::IntelFormatter::new();
-        iced_x86::Formatter::format(&mut formatter, &instr, &mut output);
-        lines.push(serde_json::json!({
-            "va": format!("0x{:X}", instr.ip()),
-            "text": output.0.clone(),
-        }));
-    }
-    if lines.is_empty() {
+    let window = crate::disasm::decode_window(space, exc.address, 10);
+    if window.is_empty() {
         return None;
     }
+    let lines: Vec<serde_json::Value> = window
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "va": format!("0x{:X}", i.va),
+                "text": i.text,
+            })
+        })
+        .collect();
     Some(serde_json::Value::Array(lines))
-}
-
-struct FormatterOutputImpl(String);
-
-impl iced_x86::FormatterOutput for FormatterOutputImpl {
-    fn write(&mut self, text: &str, _kind: iced_x86::FormatterTextKind) {
-        self.0.push_str(text);
-    }
 }
 
 fn resolve_v8_isolate(dump: &Dump) -> Option<u64> {
@@ -356,20 +343,6 @@ fn read_u64(space: &AddressSpace, va: u64) -> u64 {
         }
         None => 0,
     }
-}
-
-fn read_u32(space: &AddressSpace, va: u64) -> Option<u32> {
-    let bytes = space.read(va, 4)?;
-    Some(u32::from_le_bytes(bytes.try_into().ok()?))
-}
-
-/// Decompress a 32-bit tagged pointer within the pointer-compression cage.
-/// Returns the untagged heap address, or None for Smis/null.
-fn decompress(cage_base: u64, compressed: u32) -> Option<u64> {
-    if compressed == 0 || compressed & 1 == 0 {
-        return None;
-    }
-    Some(cage_base + (compressed & !1) as u64)
 }
 
 /// Everything decoded from a JavaScript stack frame's JSFunction.
@@ -663,57 +636,6 @@ fn decode_script_line(
     u32::try_from(lo + line_offset + 1).ok()
 }
 
-fn try_read_u64(space: &AddressSpace, va: u64) -> Option<u64> {
-    let bytes = space.read(va, 8)?;
-    Some(u64::from_le_bytes(bytes.try_into().ok()?))
-}
-
-/// Read a heap object's instance type: Map at +0 (compressed), u16 at Map+8.
-fn instance_type(space: &AddressSpace, cage: u64, heap: u64) -> Option<u16> {
-    let map_c = read_u32(space, heap)?;
-    let map = decompress(cage, map_c)?;
-    let b = space.read(map + 8, 2)?;
-    Some(u16::from_le_bytes([b[0], b[1]]))
-}
-
-/// Read an inline (Seq*/Internalized) string payload with structural
-/// validation. Layout: map(0), raw_hash(4), length(8), chars(12).
-fn read_v8_string(
-    space: &AddressSpace,
-    va: u64,
-    itype: u16,
-    layout: &crate::v8layout::V8Layout,
-) -> Option<String> {
-    let len = read_u32(space, va + layout.string_length)?;
-    if len == 0 || len > layout.max_js_name_len {
-        return None;
-    }
-    let len = len as usize;
-
-    if itype & layout.string_one_byte_bit != 0 {
-        let bytes = space.read(va + layout.string_chars, len)?;
-        if bytes
-            .iter()
-            .all(|&b| (0x20..=0x7e).contains(&b) || b >= 0x80)
-        {
-            return Some(String::from_utf8_lossy(bytes).into_owned());
-        }
-    } else {
-        let bytes = space.read(va + layout.string_chars, len.checked_mul(2)?)?;
-        let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        if units
-            .iter()
-            .all(|&u| (0x20..=0x7e).contains(&u) || u >= 0x80)
-        {
-            return String::from_utf16(&units).ok();
-        }
-    }
-    None
-}
-
 /// Extract a function name from a ScopeInfo when the SFI has no direct name.
 /// Walks the flag-dependent slots to function_variable_info.name and
 /// inferred_function_name (both String|Undefined|Zero).
@@ -770,14 +692,6 @@ fn scope_info_function_name(
         }
     }
     None
-}
-
-/// Decode a 31-bit compressed Smi (low 32 bits, tag bit 0).
-fn smi(raw: u32) -> Option<i32> {
-    if raw & 1 != 0 {
-        return None;
-    }
-    Some((raw as i32) >> 1)
 }
 
 #[cfg(test)]

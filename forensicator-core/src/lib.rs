@@ -3,6 +3,7 @@
 
 pub mod analyzer;
 pub mod arch;
+pub mod disasm;
 pub mod image;
 pub mod error;
 pub mod model;
@@ -12,5 +13,6 @@ pub mod pipeline;
 pub mod space;
 pub mod symbolizer;
 pub mod v8layout;
+pub mod v8obj;
 pub mod unwind;
 
