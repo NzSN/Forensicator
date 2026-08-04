@@ -183,7 +183,7 @@ All rules are pure functions over `(dump, space)` → `Option<(CrashVerdict, Con
 Version field already exists in the v1 header; v2 extends it. All additions live **between the header and the region table**, gated by `version >= 2`:
 
 ```
-V8HeapExtensionHeader (v1, 32 B)          v2 extension (48 B, immediately after header)
+V8HeapExtensionHeader (v1, 32 B)          v2 extension (32 B, immediately after header)
   +0  u32 stream_type ('V8HE')              +0  u64 alloc_top_va      (0 = unknown)
   +4  u32 version (=2)                      +8  u64 alloc_limit_va
   +8  u64 cage_base                         +16 u32 gc_state          (v8::internal::Heap::GCState)

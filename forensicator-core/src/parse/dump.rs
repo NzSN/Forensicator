@@ -130,6 +130,7 @@ fn from_bytes_inner(
     // stack-only dump resolve JIT frames. Ingested into the address space just
     // like ordinary memory ranges. Absent on dumps not produced with the
     // instrumented handler.
+    let mut v8heap_ext = None;
     if let Some(entry) = dir.find(v8heap::V8HE_STREAM_TYPE) {
         let start = entry.rva as usize;
         let end = start.saturating_add(entry.size as usize).min(data.len());
@@ -145,7 +146,8 @@ fn from_bytes_inner(
                 // take priority: build_address_space's add_region rejects overlaps,
                 // and MemoryList fragments (small heap captures) would otherwise
                 // mask the larger V8HE pages that contain the decoder's objects.
-                Ok(v8_ranges) => {
+                Ok((v8_ranges, ext)) => {
+                    v8heap_ext = ext;
                     let mut combined = v8_ranges;
                     combined.append(&mut memory_ranges);
                     memory_ranges = combined;
@@ -247,6 +249,7 @@ fn from_bytes_inner(
         exception,
         anomalies,
         annotations,
+        v8heap_ext,
         file_size,
     })
 }

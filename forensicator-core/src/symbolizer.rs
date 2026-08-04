@@ -359,6 +359,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let tmp = std::env::temp_dir();
@@ -377,6 +378,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let tmp = std::env::temp_dir();
@@ -407,6 +409,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let tmp = std::env::temp_dir();
@@ -436,6 +439,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let sym = Symbolizer::load(&dump, Path::new("/nonexistent/path")).unwrap();
@@ -452,6 +456,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let tmp = std::env::temp_dir();
@@ -482,6 +487,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let tmp = std::env::temp_dir();

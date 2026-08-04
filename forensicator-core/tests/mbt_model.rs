@@ -60,6 +60,7 @@ impl ModelComputer {
                 exception: None,
                 anomalies: vec![],
                 annotations: vec![],
+                v8heap_ext: None,
             file_size: 0,
             },
             annotations: vec![],

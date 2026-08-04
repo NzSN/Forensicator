@@ -189,6 +189,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let space = AddressSpace::new(4);
@@ -210,6 +211,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let space = AddressSpace::new(4);

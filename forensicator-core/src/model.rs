@@ -152,6 +152,21 @@ pub struct ExceptionInfo {
     pub provenance: Provenance,
 }
 
+/// Optional V8HE v2 extension facts captured by the instrumented handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V8HeapExt {
+    /// New-space linear allocation top (0 = not captured).
+    pub alloc_top_va: u64,
+    /// New-space allocation limit (0 = not captured).
+    pub alloc_limit_va: u64,
+    /// Raw `v8::internal::Heap::GCState` at capture time.
+    pub gc_state: u32,
+    /// Raw `v8::internal::GarbageCollectionReason` of the last GC.
+    pub last_gc_reason: u32,
+    /// Message captured by the handler's fatal/OOM error hooks.
+    pub fatal_message: Option<String>,
+}
+
 /// The assembled dump — the output of the parse pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dump {
@@ -162,6 +177,7 @@ pub struct Dump {
     pub exception: Option<ExceptionInfo>,
     pub anomalies: Vec<Anomaly>,
     pub annotations: Vec<(String, String)>,
+    pub v8heap_ext: Option<V8HeapExt>,
     pub file_size: u64,
 }
 
@@ -600,6 +616,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         assert_eq!(d.modules.len(), 0);
@@ -789,6 +806,7 @@ mod tests {
             exception: Some(exc),
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 1024,
         };
         assert_eq!(d.modules.len(), 1);

@@ -775,6 +775,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
 
@@ -792,6 +793,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let a = V8Analyzer::new();
@@ -935,6 +937,7 @@ mod tests {
                     format!("{:#x}", cage),
                 ),
             ],
+            v8heap_ext: None,
             file_size: 0,
         };
 
@@ -1001,6 +1004,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
 
@@ -1025,6 +1029,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![("v8_isolate_address".into(), "0x68340051c000".into())],
+            v8heap_ext: None,
             file_size: 0,
         };
         let iso = resolve_v8_isolate(&dump);
@@ -1041,6 +1046,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         assert_eq!(resolve_v8_isolate(&dump), None);

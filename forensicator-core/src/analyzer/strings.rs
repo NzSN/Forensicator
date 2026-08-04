@@ -172,6 +172,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let a = StringAnalyzer::default();
@@ -202,6 +203,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let a = StringAnalyzer::default();
@@ -220,6 +222,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            v8heap_ext: None,
             file_size: 0,
         };
         let a = StringAnalyzer::default();
