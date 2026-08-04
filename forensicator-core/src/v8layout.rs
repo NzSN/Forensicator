@@ -216,6 +216,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![("ver".into(), ver.into())],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         }

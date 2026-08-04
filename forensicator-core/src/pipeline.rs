@@ -296,6 +296,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -313,6 +314,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -347,6 +349,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -370,6 +373,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -397,6 +401,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -421,6 +426,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -437,6 +443,6 @@ mod tests {
     fn pipeline_registered_count_matches_tla_spec() {
         // Mirror: RegisteredAnalyzers == Len(pipeline)
         let pipeline = Pipeline::default_pipeline();
-        assert_eq!(pipeline.registered_count(), 7);
+        assert_eq!(pipeline.registered_count(), 8);
     }
 }

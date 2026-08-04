@@ -152,6 +152,18 @@ pub struct ExceptionInfo {
     pub provenance: Provenance,
 }
 
+/// A MemoryInfoList entry: virtual-address metadata for a region, including
+/// reserve/free regions that carry no data payload. Protection is the raw
+/// Win32 PAGE_* bitmask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryInfoEntry {
+    pub va_start: u64,
+    pub size: u64,
+    pub protection: u32,
+    pub state: MemState,
+    pub mem_type: MemType,
+}
+
 /// Optional V8HE v2 extension facts captured by the instrumented handler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V8HeapExt {
@@ -177,6 +189,7 @@ pub struct Dump {
     pub exception: Option<ExceptionInfo>,
     pub anomalies: Vec<Anomaly>,
     pub annotations: Vec<(String, String)>,
+    pub memory_info: Vec<MemoryInfoEntry>,
     pub v8heap_ext: Option<V8HeapExt>,
     pub file_size: u64,
 }
@@ -616,6 +629,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -806,6 +820,7 @@ mod tests {
             exception: Some(exc),
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 1024,
         };

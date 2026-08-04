@@ -189,6 +189,17 @@ fn from_bytes_inner(
         })
         .collect();
 
+    let memory_info: Vec<crate::model::MemoryInfoEntry> = memory_info_entries
+        .iter()
+        .map(|mi| crate::model::MemoryInfoEntry {
+            va_start: mi.va_start,
+            size: mi.size,
+            protection: mi.protection,
+            state: MemState::from_u32(mi.state).unwrap_or(MemState::Free),
+            mem_type: MemType::from_u32(mi.mem_type).unwrap_or(MemType::Private),
+        })
+        .collect();
+
     let exception = decode_optional_with_dump(
         data,
         &dir,
@@ -249,6 +260,7 @@ fn from_bytes_inner(
         exception,
         anomalies,
         annotations,
+        memory_info,
         v8heap_ext,
         file_size,
     })

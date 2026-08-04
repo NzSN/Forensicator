@@ -2,6 +2,7 @@
 use crate::space::AddressSpace;
 
 pub mod arrays;
+pub mod cause;
 pub mod chunks;
 pub mod lists;
 pub mod scan;
@@ -100,6 +101,7 @@ impl Pipeline {
 
     pub fn default_pipeline() -> Self {
         let mut p = Pipeline::new();
+        p.register(cause::CrashCauseAnalyzer);
         p.register(strings::StringAnalyzer::default());
         p.register(vtables::VTableAnalyzer::default());
         p.register(lists::ListAnalyzer::default());
@@ -189,6 +191,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -211,6 +214,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };

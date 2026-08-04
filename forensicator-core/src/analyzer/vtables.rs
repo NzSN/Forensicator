@@ -149,6 +149,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -169,6 +170,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -212,6 +214,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };

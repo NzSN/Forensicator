@@ -120,7 +120,7 @@ fn resolve_v8_isolate(dump: &Dump) -> Option<u64> {
     annotation_hex(dump, "v8_isolate_address")
 }
 
-fn annotation_hex(dump: &Dump, key: &str) -> Option<u64> {
+pub(crate) fn annotation_hex(dump: &Dump, key: &str) -> Option<u64> {
     for (k, v) in &dump.annotations {
         if k == key {
             let hex = v.trim_start_matches("0x").trim_start_matches("0X");
@@ -775,6 +775,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -793,6 +794,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -937,6 +939,7 @@ mod tests {
                     format!("{:#x}", cage),
                 ),
             ],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -1004,6 +1007,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -1029,6 +1033,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![("v8_isolate_address".into(), "0x68340051c000".into())],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
@@ -1046,6 +1051,7 @@ mod tests {
             exception: None,
             anomalies: vec![],
             annotations: vec![],
+            memory_info: vec![],
             v8heap_ext: None,
             file_size: 0,
         };
