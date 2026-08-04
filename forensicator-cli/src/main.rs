@@ -63,6 +63,19 @@ fn main() {
 fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dump = dump::open(path)?;
     if json {
+        let diagnosis = if dump.exception.is_some() {
+            let space = Forensicator::build_address_space(&dump);
+            let d = forensicator_core::analyzer::cause::diagnose(&dump, &space);
+            serde_json::json!({
+                "verdict": format!("{:?}", d.verdict),
+                "confidence": format!("{:?}", d.confidence),
+                "evidence": d.evidence,
+                "fault_va": d.fault_va.map(|v| format!("0x{v:X}")),
+                "fatal_message": d.fatal_message,
+            })
+        } else {
+            serde_json::Value::Null
+        };
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -75,6 +88,7 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
                 "thread_count": dump.threads.len(),
                 "memory_regions": dump.memory_regions.len(),
                 "exception": dump.exception.is_some(),
+                "diagnosis": diagnosis,
                 "anomaly_count": dump.anomalies.len(),
                 "annotation_count": dump.annotations.len(),
                 "annotations": dump.annotations.iter().map(|(k, v)| serde_json::json!({ k: v })).collect::<Vec<_>>(),
@@ -132,6 +146,23 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
             "├── Exception: code 0x{:08X} at 0x{:016X} (thread {})",
             exc.code, exc.address, exc.thread_id
         );
+        let space = Forensicator::build_address_space(&dump);
+        let d = forensicator_core::analyzer::cause::diagnose(&dump, &space);
+        let detail = d
+            .fatal_message
+            .clone()
+            .or_else(|| d.evidence.first().cloned())
+            .unwrap_or_default();
+        println!(
+            "├── Diagnosis: {:?} ({:?}){}",
+            d.verdict,
+            d.confidence,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" — {detail}")
+            }
+        );
     }
     if !dump.anomalies.is_empty() {
         println!("├── Anomalies: {}", dump.anomalies.len());
@@ -184,6 +215,7 @@ fn cmd_analyze(
 
     let pipeline = if let Some(pdb_dir) = symbols {
         let mut p = Pipeline::new();
+        p.register(forensicator_core::analyzer::cause::CrashCauseAnalyzer);
         p.register(forensicator_core::analyzer::strings::StringAnalyzer::default());
         p.register(forensicator_core::analyzer::vtables::VTableAnalyzer::default());
         p.register(forensicator_core::analyzer::lists::ListAnalyzer::default());
