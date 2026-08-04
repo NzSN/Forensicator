@@ -145,6 +145,9 @@ pub struct ExceptionInfo {
     pub address: u64,
     pub thread_id: u32,
     pub flags: u32,
+    /// ExceptionInformation[0..NumberParameters]. For 0xC0000005:
+    /// [0]=access (0 read, 1 write, 8 exec), [1]=fault VA.
+    pub parameters: Vec<u64>,
     pub context: Option<RegisterSet>,
     pub provenance: Provenance,
 }
@@ -302,6 +305,7 @@ impl Dump {
             address,
             thread_id,
             flags,
+            parameters: vec![],
             context: None,
             provenance,
         });
@@ -701,6 +705,7 @@ mod tests {
             address: 0x7FFA_1234,
             thread_id: 42,
             flags: 0,
+            parameters: vec![],
             context: Some(ctx.clone()),
             provenance: dummy_prov(),
         };
@@ -716,6 +721,7 @@ mod tests {
             address: 0x1000,
             thread_id: 1,
             flags: 1,
+            parameters: vec![],
             context: None,
             provenance: dummy_prov(),
         };
@@ -771,6 +777,7 @@ mod tests {
             address: 0,
             thread_id: 1,
             flags: 0,
+            parameters: vec![],
             context: None,
             provenance: dummy_prov(),
         };
