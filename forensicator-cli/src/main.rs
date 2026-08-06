@@ -33,6 +33,18 @@ enum Commands {
         #[arg(long)]
         symbols: Option<String>,
     },
+    /// Verify a dump matches given build artifacts (RSDS GUID/age, checksum)
+    Match {
+        path: String,
+        /// PE image (.exe/.dll) to check; matched to a dump module by basename
+        #[arg(long)]
+        exe: Vec<String>,
+        /// PDB file to check; matched to a dump module by pdb_name
+        #[arg(long)]
+        pdb: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     ListPlugins,
 }
 
@@ -57,6 +69,18 @@ fn main() {
             }
         }
         Commands::ListPlugins => cmd_list_plugins(),
+        Commands::Match {
+            path,
+            exe,
+            pdb,
+            json,
+        } => match cmd_match(&path, &exe, &pdb, json) {
+            Ok(code) => process::exit(code),
+            Err(e) => {
+                eprintln!("error: {e}");
+                process::exit(1);
+            }
+        },
     }
 }
 
@@ -85,6 +109,14 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
                     "version": format!("{}.{}.{}.{}", si.version.0, si.version.1, si.version.2, si.version.3),
                 })),
                 "module_count": dump.modules.len(),
+                "modules": dump.modules.iter().map(|m| serde_json::json!({
+                    "name": m.name,
+                    "base_va": format!("0x{:016X}", m.base_va),
+                    "size": m.size,
+                    "checksum": format!("0x{:08X}", m.checksum),
+                    "codeview_guid": m.codeview_uuid().map(|u| u.to_string()),
+                    "pdb_name": m.pdb_name,
+                })).collect::<Vec<_>>(),
                 "thread_count": dump.threads.len(),
                 "memory_regions": dump.memory_regions.len(),
                 "exception": dump.exception.is_some(),
@@ -180,6 +212,276 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
         }
     }
     Ok(())
+}
+
+fn basename(p: &str) -> &str {
+    p.rsplit(['/', '\\']).next().unwrap_or(p)
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum CheckResult {
+    Match,
+    Mismatch,
+    Unknown,
+}
+
+impl CheckResult {
+    fn as_str(self) -> &'static str {
+        match self {
+            CheckResult::Match => "match",
+            CheckResult::Mismatch => "mismatch",
+            CheckResult::Unknown => "unknown",
+        }
+    }
+}
+
+struct Check {
+    field: &'static str,
+    result: CheckResult,
+    file_value: String,
+    dump_value: String,
+    note: Option<String>,
+}
+
+struct MatchItem {
+    kind: &'static str,
+    path: String,
+    module: Option<String>,
+    checks: Vec<Check>,
+}
+
+impl MatchItem {
+    fn result(&self) -> CheckResult {
+        if self.module.is_none()
+            || self
+                .checks
+                .iter()
+                .any(|c| c.result == CheckResult::Mismatch)
+        {
+            return CheckResult::Mismatch;
+        }
+        if self.checks.iter().any(|c| c.result == CheckResult::Match) {
+            CheckResult::Match
+        } else {
+            CheckResult::Unknown
+        }
+    }
+}
+
+fn compare<T: PartialEq + ToString>(
+    field: &'static str,
+    dump_side: Option<T>,
+    file_side: Option<T>,
+    absent_note: &'static str,
+) -> Check {
+    let mk = |r: CheckResult, f: Option<T>, d: Option<T>, note: Option<String>| Check {
+        field,
+        result: r,
+        file_value: f.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        dump_value: d.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        note,
+    };
+    match (dump_side, file_side) {
+        (Some(d), Some(f)) => mk(
+            if d == f {
+                CheckResult::Match
+            } else {
+                CheckResult::Mismatch
+            },
+            Some(f),
+            Some(d),
+            None,
+        ),
+        (None, f) => mk(CheckResult::Unknown, f, None, Some(absent_note.to_string())),
+        (d, None) => mk(
+            CheckResult::Unknown,
+            None,
+            d,
+            Some("not present in file".to_string()),
+        ),
+    }
+}
+
+fn cmd_match(
+    path: &str,
+    exes: &[String],
+    pdbs: &[String],
+    json: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    use forensicator_core::model::codeview_guid_to_uuid;
+
+    if exes.is_empty() && pdbs.is_empty() {
+        return Err("nothing to match: pass --exe and/or --pdb".into());
+    }
+    let dump = dump::open(path)?;
+    let mut items: Vec<MatchItem> = Vec::new();
+
+    for exe in exes {
+        let img =
+            forensicator_core::image::ImageFile::open(exe, 0).map_err(|e| format!("{exe}: {e}"))?;
+        let rsds = img.rsds();
+        let pe_checksum = img.pe_checksum();
+        let want = basename(exe);
+        let module = dump
+            .modules
+            .iter()
+            .find(|m| basename(&m.name).eq_ignore_ascii_case(want));
+        let Some(module) = module else {
+            items.push(MatchItem {
+                kind: "exe",
+                path: exe.clone(),
+                module: None,
+                checks: vec![],
+            });
+            continue;
+        };
+        let checks = vec![
+            compare(
+                "guid",
+                module.codeview_guid.map(|g| codeview_guid_to_uuid(&g)),
+                rsds.as_ref().map(|r| codeview_guid_to_uuid(&r.guid)),
+                "module has no RSDS record",
+            ),
+            compare(
+                "age",
+                module.codeview_age,
+                rsds.as_ref().map(|r| r.age),
+                "module has no RSDS record",
+            ),
+            if module.checksum != 0 {
+                compare(
+                    "checksum",
+                    Some(module.checksum),
+                    pe_checksum,
+                    "module has no RSDS record",
+                )
+            } else {
+                Check {
+                    field: "checksum",
+                    result: CheckResult::Unknown,
+                    file_value: pe_checksum
+                        .map(|c| format!("0x{c:08X}"))
+                        .unwrap_or_else(|| "-".into()),
+                    dump_value: "-".into(),
+                    note: Some("dump module checksum is 0".into()),
+                }
+            },
+        ];
+        items.push(MatchItem {
+            kind: "exe",
+            path: exe.clone(),
+            module: Some(module.name.clone()),
+            checks,
+        });
+    }
+
+    for pdb in pdbs {
+        let (guid, age) = forensicator_core::symbolizer::pdb_identity(std::path::Path::new(pdb))
+            .map_err(|e| format!("{pdb}: {e}"))?;
+        let want = basename(pdb);
+        let module = dump.modules.iter().find(|m| {
+            m.pdb_name
+                .as_deref()
+                .is_some_and(|n| basename(n).eq_ignore_ascii_case(want))
+        });
+        let Some(module) = module else {
+            items.push(MatchItem {
+                kind: "pdb",
+                path: pdb.clone(),
+                module: None,
+                checks: vec![],
+            });
+            continue;
+        };
+        let checks = vec![
+            compare(
+                "guid",
+                module.codeview_guid.map(|g| codeview_guid_to_uuid(&g)),
+                Some(guid),
+                "module has no RSDS record",
+            ),
+            compare(
+                "age",
+                module.codeview_age,
+                Some(age),
+                "module has no RSDS record",
+            ),
+        ];
+        items.push(MatchItem {
+            kind: "pdb",
+            path: pdb.clone(),
+            module: Some(module.name.clone()),
+            checks,
+        });
+    }
+
+    let failed = items.iter().any(|i| i.result() == CheckResult::Mismatch);
+    let overall = if failed {
+        CheckResult::Mismatch
+    } else if items.iter().all(|i| i.result() == CheckResult::Unknown) {
+        CheckResult::Unknown
+    } else {
+        CheckResult::Match
+    };
+
+    if json {
+        let items_json: Vec<_> = items
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "kind": i.kind,
+                    "path": i.path,
+                    "module": i.module,
+                    "result": i.result().as_str(),
+                    "checks": i.checks.iter().map(|c| serde_json::json!({
+                        "field": c.field,
+                        "result": c.result.as_str(),
+                        "file": c.file_value,
+                        "dump": c.dump_value,
+                        "note": c.note,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "items": items_json, "overall": overall.as_str() })
+            )?
+        );
+    } else {
+        for i in &items {
+            match &i.module {
+                Some(m) => println!("{} {} ↔ module {}", i.kind.to_uppercase(), i.path, m),
+                None => {
+                    println!(
+                        "{} {} ↔ no matching module in dump",
+                        i.kind.to_uppercase(),
+                        i.path
+                    );
+                    continue;
+                }
+            }
+            for c in &i.checks {
+                let note = c
+                    .note
+                    .as_ref()
+                    .map(|n| format!("  ({n})"))
+                    .unwrap_or_default();
+                println!(
+                    "  {:<9} {:<9} file={}  dump={}{}",
+                    c.field,
+                    c.result.as_str().to_uppercase(),
+                    c.file_value,
+                    c.dump_value,
+                    note
+                );
+            }
+        }
+        println!("overall: {}", overall.as_str().to_uppercase());
+    }
+
+    Ok(if failed { 2 } else { 0 })
 }
 
 fn cmd_analyze(
