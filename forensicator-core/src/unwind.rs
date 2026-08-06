@@ -394,6 +394,7 @@ mod tests {
             size: 0x5000,
             checksum: 0,
             codeview_guid: None,
+            codeview_age: None,
             pdb_name: None,
             provenance: crate::error::Provenance {
                 stream_type: 0,

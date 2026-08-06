@@ -764,6 +764,7 @@ mod tests {
                 size: 0x10000,
                 checksum: 0,
                 codeview_guid: None,
+                codeview_age: None,
                 pdb_name: None,
                 provenance: Provenance {
                     stream_type: 2,
@@ -921,6 +922,7 @@ mod tests {
                 size: 0x10000,
                 checksum: 0,
                 codeview_guid: None,
+                codeview_age: None,
                 pdb_name: None,
                 provenance: Provenance {
                     stream_type: 2,
@@ -999,6 +1001,7 @@ mod tests {
                 size: 0x10000,
                 checksum: 0,
                 codeview_guid: None,
+                codeview_age: None,
                 pdb_name: None,
                 provenance: Provenance {
                     stream_type: 2,

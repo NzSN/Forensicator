@@ -56,7 +56,7 @@ pub fn decode_module_list(
         let cv_size = u32::from_le_bytes(data[off + 76..off + 80].try_into().unwrap());
         let cv_rva = u32::from_le_bytes(data[off + 80..off + 84].try_into().unwrap());
 
-        let (codeview_guid, pdb_name) = if cv_size >= 24 {
+        let (codeview_guid, codeview_age, pdb_name) = if cv_size >= 24 {
             let cv_start = cv_rva as usize;
             let cv_end = cv_start.saturating_add(cv_size as usize);
             if cv_end <= full_data.len() {
@@ -66,6 +66,12 @@ pub fn decode_module_list(
                 if sig == 0x53445352 && cv_bytes.len() >= 24 {
                     let mut guid = [0u8; 16];
                     guid.copy_from_slice(&cv_bytes[4..20]);
+                    let age = u32::from_le_bytes([
+                        cv_bytes[20],
+                        cv_bytes[21],
+                        cv_bytes[22],
+                        cv_bytes[23],
+                    ]);
                     let pdb = if cv_bytes.len() > 24 {
                         let pdb_end = cv_bytes[24..]
                             .iter()
@@ -75,15 +81,15 @@ pub fn decode_module_list(
                     } else {
                         None
                     };
-                    (Some(guid), pdb)
+                    (Some(guid), Some(age), pdb)
                 } else {
-                    (None, None)
+                    (None, None, None)
                 }
             } else {
-                (None, None)
+                (None, None, None)
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         modules.push(Module {
@@ -92,6 +98,7 @@ pub fn decode_module_list(
             size: mod_size,
             checksum,
             codeview_guid,
+            codeview_age,
             pdb_name,
             provenance: Provenance {
                 stream_type: prov.stream_type,

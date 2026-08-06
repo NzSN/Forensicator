@@ -4,7 +4,7 @@ use std::path::Path;
 
 use pdb::FallibleIterator;
 
-use crate::model::Dump;
+use crate::model::{Dump, codeview_guid_to_uuid};
 
 // ── Error ──
 
@@ -162,12 +162,19 @@ impl ModuleSymbols {
     }
 }
 
-fn codeview_guid_to_uuid(guid: &[u8; 16]) -> uuid::Uuid {
-    let data1 = u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]);
-    let data2 = u16::from_le_bytes([guid[4], guid[5]]);
-    let data3 = u16::from_le_bytes([guid[6], guid[7]]);
-    let data4: [u8; 8] = guid[8..16].try_into().unwrap();
-    uuid::Uuid::from_fields(data1, data2, data3, &data4)
+/// Read a PDB's own identity (GUID + age) from its information stream.
+pub fn pdb_identity(path: &Path) -> Result<(uuid::Uuid, u32), SymbolizerError> {
+    let file = std::fs::File::open(path)?;
+    let mut pdb = pdb::PDB::open(file).map_err(|e| {
+        SymbolizerError::PdbParse(format!("failed to open PDB {}: {e}", path.display()))
+    })?;
+    let info = pdb.pdb_information().map_err(|e| {
+        SymbolizerError::PdbParse(format!(
+            "failed to read PDB info from {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok((info.guid, info.age))
 }
 
 fn find_pdb(
@@ -394,6 +401,7 @@ mod tests {
                 size: 0x1000,
                 checksum: 0,
                 codeview_guid: None,
+                codeview_age: None,
                 pdb_name: None,
                 provenance: Provenance {
                     stream_type: 2,
@@ -425,6 +433,7 @@ mod tests {
                 size: 0x1000,
                 checksum: 0,
                 codeview_guid: Some([0xAA; 16]),
+                codeview_age: None,
                 pdb_name: Some("test.pdb".into()),
                 provenance: Provenance {
                     stream_type: 2,
@@ -475,6 +484,7 @@ mod tests {
                 size: 0x1000,
                 checksum: 0,
                 codeview_guid: Some([0xBB; 16]),
+                codeview_age: None,
                 pdb_name: Some("nonexistent.pdb".into()),
                 provenance: Provenance {
                     stream_type: 2,

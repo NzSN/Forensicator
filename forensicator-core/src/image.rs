@@ -19,7 +19,16 @@ pub struct ImageFile {
     pub size_of_image: u64,
     data: Vec<u8>,
     header_size: u32,
+    opt_off: usize,
     sections: Vec<Section>,
+}
+
+/// RSDS record from the PE debug directory (IMAGE_DEBUG_TYPE_CODEVIEW).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rsds {
+    pub guid: [u8; 16],
+    pub age: u32,
+    pub pdb_path: String,
 }
 
 impl ImageFile {
@@ -79,8 +88,66 @@ impl ImageFile {
             size_of_image: size_of_image as u64,
             data,
             header_size,
+            opt_off: opt,
             sections,
         })
+    }
+
+    fn r32at(&self, off: usize) -> Option<u32> {
+        self.data
+            .get(off..off + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    }
+
+    fn rva_to_off(&self, rva: u32) -> Option<usize> {
+        if (rva as u64) < self.header_size as u64 {
+            return Some(rva as usize);
+        }
+        let sec = self.sections.iter().find(|s| {
+            let span = s.va_size.max(s.raw_size);
+            rva >= s.va_start && rva < s.va_start + span
+        })?;
+        Some((sec.raw_ptr + (rva - sec.va_start)) as usize)
+    }
+
+    /// PE optional-header CheckSum (0 when the linker left it unset).
+    pub fn pe_checksum(&self) -> Option<u32> {
+        self.r32at(self.opt_off + 64)
+    }
+
+    /// RSDS record from the debug directory, if the image carries one.
+    pub fn rsds(&self) -> Option<Rsds> {
+        // PE32+ data directories start at opt+112; entry 6 = Debug.
+        let dir_rva = self.r32at(self.opt_off + 112 + 6 * 8)?;
+        let dir_size = self.r32at(self.opt_off + 112 + 6 * 8 + 4)? as usize;
+        if dir_rva == 0 {
+            return None;
+        }
+        let dir_off = self.rva_to_off(dir_rva)?;
+        // IMAGE_DEBUG_DIRECTORY entries are 28 bytes each.
+        for i in 0..dir_size / 28 {
+            let e = dir_off + i * 28;
+            if self.r32at(e + 12)? != 2 {
+                continue; // IMAGE_DEBUG_TYPE_CODEVIEW
+            }
+            let raw = self.r32at(e + 24)? as usize; // PointerToRawData
+            let cv = self.data.get(raw..raw.checked_add(24)?)?;
+            if &cv[0..4] != b"RSDS" {
+                return None;
+            }
+            let mut guid = [0u8; 16];
+            guid.copy_from_slice(&cv[4..20]);
+            let age = u32::from_le_bytes(cv[20..24].try_into().unwrap());
+            let rest = self.data.get(raw + 24..)?;
+            let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+            let pdb_path = String::from_utf8_lossy(&rest[..end]).to_string();
+            return Some(Rsds {
+                guid,
+                age,
+                pdb_path,
+            });
+        }
+        None
     }
 
     /// Read `len` bytes at virtual address `va`, mapping through the section
@@ -90,15 +157,7 @@ impl ImageFile {
             return None;
         }
         let rva = (va - self.base_va) as u32;
-        let file_off = if (rva as u64) < self.header_size as u64 {
-            rva as usize
-        } else {
-            let sec = self.sections.iter().find(|s| {
-                let span = s.va_size.max(s.raw_size);
-                rva >= s.va_start && rva < s.va_start + span
-            })?;
-            (sec.raw_ptr + (rva - sec.va_start)) as usize
-        };
+        let file_off = self.rva_to_off(rva)?;
         self.data.get(file_off..file_off.checked_add(len)?)
     }
 }
@@ -168,6 +227,21 @@ mod tests {
         d[opt..opt + 2].copy_from_slice(&0x20Bu16.to_le_bytes());
         d[opt + 56..opt + 60].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage
         d[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfHeaders
+        d[opt + 64..opt + 68].copy_from_slice(&0xDEADBEEFu32.to_le_bytes()); // CheckSum
+        // Debug data directory (entry 6) → IMAGE_DEBUG_DIRECTORY at RVA 0x1D8
+        // (free tail of the headers; the optional header occupies 0x98..0x188).
+        d[opt + 112 + 48..opt + 112 + 52].copy_from_slice(&0x1D8u32.to_le_bytes());
+        d[opt + 112 + 52..opt + 112 + 56].copy_from_slice(&28u32.to_le_bytes());
+        // IMAGE_DEBUG_DIRECTORY at file offset 0x1D8
+        d[0x1E4..0x1E8].copy_from_slice(&2u32.to_le_bytes()); // Type = CODEVIEW
+        d[0x1E8..0x1EC].copy_from_slice(&33u32.to_le_bytes()); // SizeOfData
+        d[0x1EC..0x1F0].copy_from_slice(&0x1100u32.to_le_bytes()); // AddressOfRawData
+        d[0x1F0..0x1F4].copy_from_slice(&0x300u32.to_le_bytes()); // PointerToRawData
+        // RSDS record in .text slack at file offset 0x300
+        d[0x300..0x304].copy_from_slice(b"RSDS");
+        d[0x304..0x314].copy_from_slice(&[0x11u8; 16]); // guid
+        d[0x314..0x318].copy_from_slice(&7u32.to_le_bytes()); // age
+        d[0x318..0x320].copy_from_slice(b"test.pdb"); // nul follows (zero-filled)
         let s0 = opt + 0xF0;
         d[s0..s0 + 5].copy_from_slice(b".text");
         d[s0 + 8..s0 + 12].copy_from_slice(&0x100u32.to_le_bytes());
@@ -194,6 +268,25 @@ mod tests {
         assert_eq!(img.read(0x1_0000_2000, 1), Some(&[0x90][..]));
         assert!(img.read(0x1_0000_3000, 1).is_none());
         assert!(img.read(0x9999, 1).is_none());
+    }
+
+    #[test]
+    fn reads_rsds_and_checksum() {
+        let img = ImageFile::from_bytes(make_pe(), 0).unwrap();
+        let r = img.rsds().unwrap();
+        assert_eq!(r.guid, [0x11; 16]);
+        assert_eq!(r.age, 7);
+        assert_eq!(r.pdb_path, "test.pdb");
+        assert_eq!(img.pe_checksum(), Some(0xDEADBEEF));
+    }
+
+    #[test]
+    fn rsds_none_without_debug_directory() {
+        let mut d = make_pe();
+        let opt = 0x98; // coff(0x84) + 20
+        d[opt + 112 + 48..opt + 112 + 56].copy_from_slice(&[0; 8]);
+        let img = ImageFile::from_bytes(d, 0).unwrap();
+        assert!(img.rsds().is_none());
     }
 
     #[test]

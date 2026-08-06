@@ -34,8 +34,28 @@ pub struct Module {
     pub size: u64,
     pub checksum: u32,
     pub codeview_guid: Option<[u8; 16]>,
+    /// RSDS age field — PDB generation counter, must match the PDB's age.
+    pub codeview_age: Option<u32>,
     pub pdb_name: Option<String>,
     pub provenance: Provenance,
+}
+
+/// Convert a CodeView RSDS GUID (first three fields little-endian on disk)
+/// into a standard `Uuid`.
+pub fn codeview_guid_to_uuid(guid: &[u8; 16]) -> uuid::Uuid {
+    let data1 = u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]);
+    let data2 = u16::from_le_bytes([guid[4], guid[5]]);
+    let data3 = u16::from_le_bytes([guid[6], guid[7]]);
+    let data4: [u8; 8] = guid[8..16].try_into().unwrap();
+    uuid::Uuid::from_fields(data1, data2, data3, &data4)
+}
+
+impl Module {
+    /// CodeView RSDS GUID in standard UUID text form, for comparison
+    /// against a PDB's own GUID.
+    pub fn codeview_uuid(&self) -> Option<uuid::Uuid> {
+        self.codeview_guid.as_ref().map(codeview_guid_to_uuid)
+    }
 }
 
 /// A thread in the process.
@@ -251,6 +271,7 @@ impl Dump {
             size,
             checksum: 0,
             codeview_guid: None,
+            codeview_age: None,
             pdb_name: None,
             provenance,
         });
@@ -705,12 +726,36 @@ mod tests {
             size: 0x200000,
             checksum: 0x12345678,
             codeview_guid: Some(guid),
+            codeview_age: None,
             pdb_name: Some("ntdll.pdb".into()),
             provenance: dummy_prov(),
         };
         assert_eq!(m.name, "ntdll.dll");
         assert!(m.codeview_guid.is_some());
         assert_eq!(m.pdb_name.as_deref(), Some("ntdll.pdb"));
+    }
+
+    #[test]
+    fn codeview_guid_converts_to_uuid_string() {
+        // RSDS bytes: data1/2/3 little-endian, data4 as-is.
+        let guid: [u8; 16] = [
+            0x78, 0x56, 0x34, 0x12, 0xBC, 0x9A, 0xF0, 0xDE, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB,
+            0xCD, 0xEF,
+        ];
+        let m = Module {
+            name: "x.dll".into(),
+            base_va: 0,
+            size: 0,
+            checksum: 0,
+            codeview_guid: Some(guid),
+            codeview_age: None,
+            pdb_name: None,
+            provenance: dummy_prov(),
+        };
+        assert_eq!(
+            m.codeview_uuid().unwrap().to_string(),
+            "12345678-9abc-def0-0123-456789abcdef"
+        );
     }
 
     #[test]
@@ -721,6 +766,7 @@ mod tests {
             size: 0x5000,
             checksum: 0,
             codeview_guid: None,
+            codeview_age: None,
             pdb_name: None,
             provenance: dummy_prov(),
         };
@@ -792,6 +838,7 @@ mod tests {
             size: 0x1000,
             checksum: 0,
             codeview_guid: None,
+            codeview_age: None,
             pdb_name: None,
             provenance: dummy_prov(),
         };

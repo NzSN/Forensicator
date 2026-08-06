@@ -579,6 +579,7 @@ mod tests {
                 size: 0x1_0000,
                 checksum: 0,
                 codeview_guid: None,
+                codeview_age: None,
                 pdb_name: None,
                 provenance: prov(),
             }],
