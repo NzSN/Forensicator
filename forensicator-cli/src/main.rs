@@ -2,9 +2,11 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use forensicator_core::analyzer::Pipeline;
-use forensicator_core::model::{CpuArch, OsPlatform};
+use forensicator_core::model::{CpuArch, Dump, OsPlatform};
 use forensicator_core::parse::dump;
-use forensicator_core::pipeline::Forensicator;
+use forensicator_core::pipeline::{Forensicator, S1Output};
+
+mod session;
 
 #[derive(Parser)]
 #[command(name = "forensicator")]
@@ -46,6 +48,12 @@ enum Commands {
         json: bool,
     },
     ListPlugins,
+    /// Interactive session: load one dump, run commands against it repeatedly
+    Shell {
+        path: String,
+        #[arg(long)]
+        symbols: Option<String>,
+    },
 }
 
 fn main() {
@@ -81,14 +89,24 @@ fn main() {
                 process::exit(1);
             }
         },
+        Commands::Shell { path, symbols } => {
+            if let Err(e) = session::run(&path, symbols.as_deref()) {
+                eprintln!("error: {e}");
+                process::exit(1);
+            }
+        }
     }
 }
 
 fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dump = dump::open(path)?;
+    print_inspect(&dump, json, quiet)
+}
+
+fn print_inspect(dump: &Dump, json: bool, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     if json {
         let diagnosis = if dump.exception.is_some() {
-            let space = Forensicator::build_address_space(&dump);
+            let space = Forensicator::build_address_space(dump);
             let d = forensicator_core::analyzer::cause::diagnose(&dump, &space);
             serde_json::json!({
                 "verdict": format!("{:?}", d.verdict),
@@ -178,7 +196,7 @@ fn inspect(path: &str, json: bool, quiet: bool) -> Result<(), Box<dyn std::error
             "├── Exception: code 0x{:08X} at 0x{:016X} (thread {})",
             exc.code, exc.address, exc.thread_id
         );
-        let space = Forensicator::build_address_space(&dump);
+        let space = Forensicator::build_address_space(dump);
         let d = forensicator_core::analyzer::cause::diagnose(&dump, &space);
         let detail = d
             .fatal_message
@@ -308,12 +326,21 @@ fn cmd_match(
     pdbs: &[String],
     json: bool,
 ) -> Result<i32, Box<dyn std::error::Error>> {
-    use forensicator_core::model::codeview_guid_to_uuid;
-
     if exes.is_empty() && pdbs.is_empty() {
         return Err("nothing to match: pass --exe and/or --pdb".into());
     }
     let dump = dump::open(path)?;
+    match_dump(&dump, exes, pdbs, json)
+}
+
+fn match_dump(
+    dump: &Dump,
+    exes: &[String],
+    pdbs: &[String],
+    json: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    use forensicator_core::model::codeview_guid_to_uuid;
+
     let mut items: Vec<MatchItem> = Vec::new();
 
     for exe in exes {
@@ -491,30 +518,46 @@ fn cmd_analyze(
     symbols: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut s1 = Forensicator::open(path)?;
-
-    // Stack-only minidumps: supplement module bytes (.pdata/.text) from
-    // on-disk images discovered next to the dump.
-    let image_count = {
-        let dir = std::path::Path::new(path)
-            .parent()
-            .unwrap_or(std::path::Path::new("."));
-        let names: Vec<String> = s1.dump.modules.iter().map(|m| m.name.clone()).collect();
-        let bases: Vec<u64> = s1.dump.modules.iter().map(|m| m.base_va).collect();
-        let images = forensicator_core::image::ImageSet::discover(dir, &names, &bases);
-        let n = images.len();
-        if !images.is_empty() {
-            s1.space.set_backing(images);
-        }
-        n
-    };
+    let image_count = supplement_images(&mut s1, path);
     if !json {
-        let kind = match s1.kind {
-            forensicator_core::pipeline::DumpKind::FullMemory => "full-memory",
-            forensicator_core::pipeline::DumpKind::StackOnly => "stack-only",
-        };
-        eprintln!("dump: {kind}, {image_count} image(s) supplemented");
+        eprintln!(
+            "dump: {}, {} image(s) supplemented",
+            kind_str(&s1),
+            image_count
+        );
     }
+    run_analyze(&s1, plugin, json, symbols)
+}
 
+/// Stack-only minidumps: supplement module bytes (.pdata/.text) from
+/// on-disk images discovered next to the dump. Returns images found.
+fn supplement_images(s1: &mut S1Output, path: &str) -> usize {
+    let dir = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let names: Vec<String> = s1.dump.modules.iter().map(|m| m.name.clone()).collect();
+    let bases: Vec<u64> = s1.dump.modules.iter().map(|m| m.base_va).collect();
+    let images = forensicator_core::image::ImageSet::discover(dir, &names, &bases);
+    let n = images.len();
+    if !images.is_empty() {
+        s1.space.set_backing(images);
+    }
+    n
+}
+
+fn kind_str(s1: &S1Output) -> &'static str {
+    match s1.kind {
+        forensicator_core::pipeline::DumpKind::FullMemory => "full-memory",
+        forensicator_core::pipeline::DumpKind::StackOnly => "stack-only",
+    }
+}
+
+fn run_analyze(
+    s1: &S1Output,
+    plugin: Option<&str>,
+    json: bool,
+    symbols: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = if let Some(pdb_dir) = symbols {
         let mut p = Pipeline::new();
         p.register(forensicator_core::analyzer::cause::CrashCauseAnalyzer);
@@ -532,7 +575,7 @@ fn cmd_analyze(
     let filter: Vec<&str> = plugin
         .map(|p| p.split(',').map(|s| s.trim()).collect())
         .unwrap_or_default();
-    let catalog = Forensicator::analyze(&s1, &pipeline, &filter);
+    let catalog = Forensicator::analyze(s1, &pipeline, &filter);
 
     if json {
         let outputs: Vec<serde_json::Value> = catalog
