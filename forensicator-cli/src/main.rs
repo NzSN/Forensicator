@@ -54,6 +54,18 @@ enum Commands {
         #[arg(long)]
         symbols: Option<String>,
     },
+    /// Inspect a .ttfx trace: summary, optional position snapshot and write query
+    Trace {
+        path: String,
+        /// Position to materialize (decimal or 0x hex; default: frontier)
+        #[arg(long)]
+        pos: Option<String>,
+        /// Recorded writes overlapping [va, va+len)
+        #[arg(long, num_args = 2, value_names = ["VA", "LEN"])]
+        writes: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -95,6 +107,17 @@ fn main() {
                 process::exit(1);
             }
         }
+        Commands::Trace {
+            path,
+            pos,
+            writes,
+            json,
+        } => {
+            if let Err(e) = cmd_trace(&path, pos.as_deref(), &writes, json) {
+                eprintln!("error: {e}");
+                process::exit(1);
+            }
+        }
     }
 }
 
@@ -107,7 +130,7 @@ fn print_inspect(dump: &Dump, json: bool, quiet: bool) -> Result<(), Box<dyn std
     if json {
         let diagnosis = if dump.exception.is_some() {
             let space = Forensicator::build_address_space(dump);
-            let d = forensicator_core::analyzer::cause::diagnose(&dump, &space);
+            let d = forensicator_core::analyzer::cause::diagnose(dump, &space);
             serde_json::json!({
                 "verdict": format!("{:?}", d.verdict),
                 "confidence": format!("{:?}", d.confidence),
@@ -197,7 +220,7 @@ fn print_inspect(dump: &Dump, json: bool, quiet: bool) -> Result<(), Box<dyn std
             exc.code, exc.address, exc.thread_id
         );
         let space = Forensicator::build_address_space(dump);
-        let d = forensicator_core::analyzer::cause::diagnose(&dump, &space);
+        let d = forensicator_core::analyzer::cause::diagnose(dump, &space);
         let detail = d
             .fatal_message
             .clone()
@@ -688,6 +711,133 @@ fn cmd_list_plugins() {
     for (name, desc) in pipeline.list_analyzers() {
         println!("  {name}: {desc}");
     }
+}
+
+fn cmd_trace(
+    path: &str,
+    pos: Option<&str>,
+    writes: &[String],
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use forensicator_core::parse::ttfx::decode_ttfx;
+    use session::parse_u64;
+
+    let data = std::fs::read(path)?;
+    let trace = decode_ttfx(&data).map_err(|a| a.description)?;
+
+    let pos = match pos {
+        Some(p) => parse_u64(p)?,
+        None => trace.frontier,
+    };
+
+    if json {
+        let write_hits = if writes.len() == 2 {
+            let (va, len) = (parse_u64(&writes[0])?, parse_u64(&writes[1])?);
+            Some(
+                trace
+                    .writes_between(va, len, 0, pos)
+                    .iter()
+                    .map(|w| {
+                        serde_json::json!({
+                            "pos": format!("0x{:X}", w.pos),
+                            "va": format!("0x{:X}", w.va),
+                            "end_va": format!("0x{:X}", w.end_va()),
+                            "data": w.data,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "frontier": format!("0x{:X}", trace.frontier),
+                "position": format!("0x{pos:X}"),
+                "init_regions": trace.init_mem.len(),
+                "writes": trace.writes.len(),
+                "events": trace.events.len(),
+                "threads": trace.threads.len(),
+                "calls": trace.calls.len(),
+                "anomalies": trace.anomalies.iter().map(|a| a.description.clone()).collect::<Vec<_>>(),
+                "write_hits": write_hits,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Trace: frontier {:#X}, {} init region(s), {} write(s), {} event(s), {} thread(s), {} call(s)",
+        trace.frontier,
+        trace.init_mem.len(),
+        trace.writes.len(),
+        trace.events.len(),
+        trace.threads.len(),
+        trace.calls.len()
+    );
+    for a in &trace.anomalies {
+        println!("  anomaly: {a}");
+    }
+    for (id, iv) in &trace.threads {
+        let end = iv
+            .end
+            .map(|e| format!("{e:#X}"))
+            .unwrap_or_else(|| "open".into());
+        println!("  thread {id}: [{:#X}, {end})", iv.start);
+    }
+    for c in &trace.calls {
+        let end = c
+            .interval
+            .end
+            .map(|e| format!("{e:#X}"))
+            .unwrap_or_else(|| "open".into());
+        println!(
+            "  call on {}: [{:#X}, {end})",
+            c.thread_id, c.interval.start
+        );
+    }
+
+    if writes.len() == 2 {
+        let (va, len) = (parse_u64(&writes[0])?, parse_u64(&writes[1])?);
+        let hits = trace.writes_between(va, len, 0, pos);
+        println!(
+            "writes to [0x{va:X}, 0x{:X}) up to {pos:#X}: {}",
+            va + len,
+            hits.len()
+        );
+        let last = trace.last_writer(va, pos);
+        for w in hits {
+            let marker = if last.is_some_and(|i| std::ptr::eq(&trace.writes[i], w)) {
+                "  <-- last writer"
+            } else {
+                ""
+            };
+            println!(
+                "  @{:#X}  [0x{:X}, 0x{:X})  {:02X?}{}",
+                w.pos,
+                w.va,
+                w.end_va(),
+                w.data,
+                marker
+            );
+        }
+    } else if !writes.is_empty() {
+        return Err("--writes takes exactly two values: <va> <len>".into());
+    }
+
+    if pos != trace.frontier || writes.is_empty() {
+        let snap = trace
+            .snapshot(pos)
+            .ok_or_else(|| format!("position {pos:#X} beyond frontier {:#X}", trace.frontier))?;
+        println!(
+            "snapshot @ {pos:#X}: {} region(s), {} module(s), exception: {}",
+            snap.dump.memory_regions.len(),
+            snap.dump.modules.len(),
+            snap.dump.exception.is_some()
+        );
+    }
+    Ok(())
 }
 
 fn print_v8_frames(output: &forensicator_core::analyzer::AnalyzerOutput) {

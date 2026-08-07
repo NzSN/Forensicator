@@ -41,12 +41,16 @@ Rust workspace (edition 2024) for forensic analysis of Windows x64 minidumps. Cu
 
 ```
 forensicator inspect <dump.dmp>        # structural inventory (--json, --quiet)
-forensicator scan <dump.dmp>           # pointer candidate scan (--pattern, --json)
-forensicator graph <dump.dmp>          # build pointer graph (--dot, --json, --min-conf)
-forensicator query <dump.dmp>          # reachability queries (--reachable, --stats)
-forensicator patterns list|show        # list/show pointer patterns
-forensicator recover <dump.dmp>        # structure recovery (--strings, --vtables, --lists, --arrays, --chunks, --shapes, --all, --json)
+forensicator analyze <dump.dmp>        # run analyzers (--plugin, --json, --symbols <pdb_dir>)
+forensicator match <dump.dmp>          # verify dump ↔ exe/PDB build artifacts (--exe, --pdb, --json)
+forensicator list-plugins              # list registered analyzers
+forensicator shell <dump.dmp|trace.ttfx>  # interactive session (inspect/analyze/match/load/symbols/seek/t+/t-/writes/intervals/quit)
+forensicator trace <trace.ttfx>        # trace summary + queries (--pos, --writes <va> <len>, --json)
 ```
+
+## TTD trace support (.ttfx)
+
+`specs/Timeline.tla` is the formal contract (Apalache-verified); design in `docs/superpowers/specs/2026-08-07-timeline-design.md`. `.ttfx` is our own versioned container for TTD trace data (initial memory + write/event logs + thread/call intervals), emitted by a Windows-side extractor from TTDReplay — `.run` files are never parsed directly. Core: `model::trace::Trace` (views `value_at`/`last_writer`/`writes_between`/`exceptions_at`/`snapshot(t)`), decoder `parse/ttfx.rs` (Timeline invariants → anomalies). Fixture: `Case/ttfx/minimal.ttfx` (regenerate: `cargo test -p forensicator-core --lib -- parse::ttfx --ignored`).
 
 ## Built-in pointer patterns
 
@@ -56,7 +60,7 @@ forensicator recover <dump.dmp>        # structure recovery (--strings, --vtable
 
 `specs/` contains TLA+ specs (AddressSpace, Arch, Model, etc.) with corresponding `forensicator-core/tests/mbt_*.rs` integration tests via `mirrorrust`. MBT tests are **opt-in** (require `MIRROR_BIN` + `APALACHE_MC` env vars). State traces in `states/` are TLA+ model-checking output, excluded from git.
 
-MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`, `mbt_crash_cause.rs` (spec-only stub). Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
+MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`, `mbt_crash_cause.rs` (spec-only stub), `mbt_timeline.rs` (spec-only stub). Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
 
 ## Custom minidump streams
 
