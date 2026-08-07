@@ -1,24 +1,31 @@
 # Forensicator
 
-Forensic analysis of Windows x64 minidumps. Custom hand-written parser, pointer graph inference, structure recovery, and V8 JavaScript stack analysis.
+Forensic analysis of Windows x64 minidumps and TTD-style execution traces. Custom hand-written parsers, pointer graph inference, structure recovery, V8 JavaScript stack analysis, and crash-cause diagnosis — all over a formal (TLA+) contract.
 
 ## Architecture
 
 **Workspace:** `forensicator-core` (lib) + `forensicator-cli` (bin)
 
-**Pipeline (S1 → S2):**
-1. **Parse** — validate minidump header → stream directory → per-stream decoders → typed `Dump` with provenance
-2. **AddressSpace** — sorted, non-overlapping memory regions classified as Image/Stack/Private/Mapped/Other
-3. **Analyze** — pluggable analyzer pipeline: crash-cause diagnosis plus 7 detectors scanning memory for structures, strings, vtables, linked lists, arrays, heap chunks, shape clusters, and V8 JavaScript frames
+**Two input formats, one analysis pipeline:**
+1. **Minidump (`.dmp`)** — validate header → stream directory → per-stream decoders → typed `Dump` with provenance; regions → sorted, non-overlapping `AddressSpace` (Image/Stack/Private/Mapped/Other)
+2. **Trace (`.ttfx`)** — our versioned container for TTD trace data (initial memory + append-only write/event logs + thread/call intervals). `Trace::snapshot(t)` materializes any position into the same `(Dump, AddressSpace)` pair, so analyzers run unchanged at any recorded instant
+
+3. **Analyze** — pluggable analyzer pipeline: crash-cause diagnosis plus detectors for strings, vtables, linked lists, arrays, heap chunks, shape clusters, and V8 JavaScript frames
+
+Microsoft `.run` files are never parsed directly; a Windows-side extractor (TTDReplay SDK) emits `.ttfx`. The trace semantics are pinned by `specs/Timeline.tla` (Apalache-verified).
 
 ## CLI
 
 ```
-forensicator inspect <dump.dmp>        # structural inventory (--json, --quiet)
-forensicator analyze <dump.dmp>        # run analyzer pipeline (--plugin, --json, --symbols)
-forensicator match <dump.dmp>          # verify dump ↔ build artifacts (--exe, --pdb, --json)
-forensicator list-plugins              # list available analyzers
+forensicator inspect <dump.dmp>           # structural inventory (--json, --quiet)
+forensicator analyze <dump.dmp>           # run analyzer pipeline (--plugin, --json, --symbols)
+forensicator match <dump.dmp>             # verify dump ↔ build artifacts (--exe, --pdb, --json)
+forensicator list-plugins                 # list available analyzers
+forensicator shell <dump.dmp|trace.ttfx>  # interactive session
+forensicator trace <trace.ttfx>           # trace summary + queries (--pos, --writes <va> <len>, --json)
 ```
+
+**Interactive shell** — load once, then run commands repeatedly: `inspect`, `analyze`, `match`, `load`, `symbols <dir>`. On a `.ttfx` trace the session owns a cursor: `seek <pos>`, `t+`, `t-`, `position`, `writes <va> <len>` (who wrote this address), `intervals` — with `inspect`/`analyze` operating on the snapshot at the cursor. Positions are bounded by the trace frontier; no travel to unrecorded time.
 
 **`--symbols <pdb_dir>`** enables PDB-based symbol resolution (V8 analyzer); a PDB is only accepted when its GUID matches the dump's RSDS record.
 
@@ -79,7 +86,7 @@ Built-in presets for pointer scanning:
 
 ## TLA+ Model-Based Testing
 
-`specs/` contains TLA+ specifications for the parse pipeline, address space, architecture model, and symbol resolution. MBT integration tests in `forensicator-core/tests/` validate the implementation against these specs using `mirrorrust` and Apalache — opt-in, require `MIRROR_BIN` and `APALACHE_MC` environment variables.
+`specs/` contains TLA+ specifications for the parse pipeline, address space, architecture model, symbol resolution, crash-cause diagnosis, and the trace timeline (`Timeline.tla` — the formal contract for `.ttfx`). MBT integration tests in `forensicator-core/tests/` validate the implementation against these specs using `mirrorrust` and Apalache — opt-in, require `MIRROR_BIN` and `APALACHE_MC` environment variables.
 
 ## License
 
