@@ -25,8 +25,8 @@ hand-written; builds and runs on Linux and Windows hosts.
 │ .dmp (minidump)  │──▶│ parse/ ──▶ Dump (facts + provenance)    │
 └──────────────────┘   │            + AddressSpace (regions)     │     ┌──────────────┐
                        │                    = S1Output           │────▶│ text / JSON  │
-┌──────────────────┐   │                    │                   │     │ StructureCat.│
-│ .ttfx (TTD trace)│──▶│ parse/ttfx ──▶ Trace ──snapshot(t)─────┘     └──────────────┘
+┌──────────────────┐   │                     │                   │     │ StructureCat.│
+│ .ttfx (TTD trace)│──▶│ parse/ttfx ──▶  Trace ──snapshot(t)─────┘     └──────────────┘
 └──────────────────┘   │                    ▼                             ▲
         ▲              │ analyzer::Pipeline (8 analyzers, panic-isolated)─┘
         │              └─────────────────────────────────────────┘
