@@ -1,6 +1,51 @@
 ---- MODULE Model ----
 EXTENDS Integers, Sequences, FiniteSets
 
+\* ── Model — the abstract structure of a decoded minidump (Dump) ─────────
+\*
+\* WHAT THIS SPEC MODELS
+\*   The *content* of a parsed minidump: the normalized collection of facts
+\*   that S2 analyzers consume (Rust counterpart: model::Dump). It is a
+\*   time-point spec — one frozen instant of one process. It models neither
+\*   the file's byte layout nor the parse *process* (that is
+\*   ParsePipeline.tla), and memory regions carry metadata only: byte
+\*   contents first appear in Timeline.tla (init_mem / wr_*).
+\*
+\* STATE FORMAT
+\*   Entities are stored as flat parallel sequences (Apalache-friendly —
+\*   no record-typed tables): the i-th element of each sequence in a group
+\*   describes the i-th entity. Every entity group carries a provenance
+\*   triple (prov_sid, prov_off, prov_rva): which stream the fact came from,
+\*   and where inside the file (sid > 0 = present).
+\*
+\*   sysinfo    = <<os, cpu, maj, min, bld, rev, sid, off, rva>>  (one-shot)
+\*                os ∈ {0=Windows,1=Linux,2=macOS}, cpu = 1 (x64),
+\*                sid/off/rva = provenance, stored at slots 7..9.
+\*   modules    : mod_va[i] base VA, mod_sz[i] size (+ mod_prov_*[i]).
+\*                Invariant: pairwise VA-disjoint; overlap decodes as an
+\*                "overlapping module" anomaly instead (degrade, not fail).
+\*   threads    : thr_id[i] OS thread id, thr_stack_va[i]/thr_stack_sz[i]
+\*                stack range (+ thr_prov_*[i]). Stack size must be > 0.
+\*   regions    : mem_va[i]/mem_sz[i] range; mem_prot[i] protection bitmask
+\*                (READ=1 WRITE=2 EXECUTE=4, so prot ≤ 7); mem_state[i] ∈
+\*                {0=Commit,1=Reserve,2=Free}; mem_type[i] ∈ {0=Private,
+\*                1=Mapped,2=Image}; mem_cls[i] ∈ {0..4} (Image/Stack/
+\*                Mapped/Private/Other) (+ mem_prov_*[i]).
+\*   exc_info   = <<code, addr, tid, flg, sid, off, rva>>  (one-shot)
+\*                exception code/address/thread + provenance (slot 5 = sid).
+\*   anomalies  : Seq([desc |-> Str]) — non-fatal decode problems.
+\*   annotations: ann_key[i] = ann_val[i] — Crashpad CommentStreamA/W
+\*                key=value pairs; sequences stay in lockstep, values
+\*                non-empty.
+\*
+\* CONVENTIONS
+\*   * Append-only: facts are never updated or removed; the only sequencing
+\*     is empty → non-empty (one-shot latches for sysinfo/exc_info).
+\*   * Bounds (Max* below) keep the state space tiny for exhaustive
+\*     checking; they are verification artifacts, not format limits.
+\*   * Timeline.tla re-indexes this state by position t to model TTD
+\*     traces; nothing here knows about time.
+
 \* Normalized data types for S1 — what S2+ consume.
 \* Every fact carries Provenance: which stream + offset it came from.
 \* Crash annotations from CommentStreamA/W are modeled as key-value pairs.
@@ -14,56 +59,69 @@ MaxAnnotations == 4
 \* ---- STATE ----
 
 VARIABLES
+    \* ── system info (one-shot record, see STATE FORMAT above) ──
     \* @type: Seq(Int);
-    sysinfo,
+    sysinfo,        \* <<os, cpu, maj, min, bld, rev, prov_sid, prov_off, prov_rva>>; empty until SetSysInfo
+
+    \* ── module table: i-th module = (mod_va[i], mod_sz[i]) + provenance ──
     \* @type: Seq(Int);
-    mod_va,
+    mod_va,         \* base VA of module i (pairwise VA-disjoint — ModulesDisjoint)
     \* @type: Seq(Int);
-    mod_sz,
+    mod_sz,         \* size of module i (> 0)
     \* @type: Seq(Int);
-    mod_prov_sid,
+    mod_prov_sid,   \* provenance: stream id the module was decoded from (> 0)
     \* @type: Seq(Int);
-    mod_prov_off,
+    mod_prov_off,   \* provenance: file offset of the module entry
     \* @type: Seq(Int);
-    mod_prov_rva,
+    mod_prov_rva,   \* provenance: RVA within the stream
+
+    \* ── thread table: i-th thread = id + stack range + provenance ──
     \* @type: Seq(Int);
-    thr_id,
+    thr_id,         \* OS thread id
     \* @type: Seq(Int);
-    thr_stack_va,
+    thr_stack_va,   \* stack base VA (thr_stack_va + thr_stack_sz ≤ 65535)
     \* @type: Seq(Int);
-    thr_stack_sz,
+    thr_stack_sz,   \* stack size (> 0)
     \* @type: Seq(Int);
     thr_prov_sid,
     \* @type: Seq(Int);
     thr_prov_off,
     \* @type: Seq(Int);
     thr_prov_rva,
+
+    \* ── memory-region table: metadata only — no byte contents in this spec ──
     \* @type: Seq(Int);
-    mem_va,
+    mem_va,         \* region start VA
     \* @type: Seq(Int);
-    mem_sz,
+    mem_sz,         \* region size (> 0)
     \* @type: Seq(Int);
-    mem_prot,
+    mem_prot,       \* protection bitmask: READ=1, WRITE=2, EXECUTE=4 (so ≤ 7)
     \* @type: Seq(Int);
-    mem_state,
+    mem_state,      \* 0=Commit, 1=Reserve, 2=Free
     \* @type: Seq(Int);
-    mem_type,
+    mem_type,       \* 0=Private, 1=Mapped, 2=Image
     \* @type: Seq(Int);
-    mem_cls,
+    mem_cls,        \* classification: 0..4 = Image/Stack/Mapped/Private/Other
     \* @type: Seq(Int);
     mem_prov_sid,
     \* @type: Seq(Int);
     mem_prov_off,
     \* @type: Seq(Int);
     mem_prov_rva,
+
+    \* ── exception (one-shot record) ──
     \* @type: Seq(Int);
-    exc_info,
+    exc_info,       \* <<code, addr, tid, flg, prov_sid, prov_off, prov_rva>>; empty until SetException
+
+    \* ── non-fatal decode problems ──
     \* @type: Seq([desc: Str]);
-    anomalies,
+    anomalies,      \* e.g. "overlapping module" recorded instead of failing
+
+    \* ── Crashpad annotations (CommentStreamA/W key=value pairs, lockstep) ──
     \* @type: Seq(Str);
     ann_key,
     \* @type: Seq(Str);
-    ann_val
+    ann_val         \* non-empty; Len(ann_val) = Len(ann_key) (AnnKeyValMatch)
 
 \* ---- Helpers ----
 
