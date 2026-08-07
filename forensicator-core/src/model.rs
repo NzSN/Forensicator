@@ -1,6 +1,9 @@
 use crate::arch::RegisterSet;
 use crate::error::{Anomaly, Provenance};
 
+#[path = "model/trace.rs"]
+pub mod trace;
+
 /// OS platform identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsPlatform {

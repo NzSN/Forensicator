@@ -9,6 +9,7 @@ pub mod memory_info;
 pub mod module_list;
 pub mod system_info;
 pub mod thread_list;
+pub mod ttfx;
 pub mod v8heap;
 
 #[cfg(test)]
