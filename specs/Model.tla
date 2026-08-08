@@ -50,7 +50,8 @@ EXTENDS Integers, Sequences, FiniteSets
 \* Every fact carries Provenance: which stream + offset it came from.
 \* Crash annotations from CommentStreamA/W are modeled as key-value pairs.
 
-MaxModules    == 2
+MaxModules    == 3  \* raised from 2 for Snapshot.tla: Timeline admits
+                    \* MaxEvents = 3 simultaneous open module loads
 MaxThreads    == 2
 MaxRegions    == 2
 MaxAnomalies  == 4

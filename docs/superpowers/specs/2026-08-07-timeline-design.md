@@ -15,7 +15,7 @@ Post-mortem minidump analysis answers *what state was the process in when it cra
 1. run the **existing 8 analyzers at any recorded position** (`snapshot(t)` → `Pipeline::run`), and
 2. answer queries no single snapshot can: `writes_between(va, t1, t2)` (pointer-corruption provenance), verdict timelines (`ExceptionsAt` → `cause` per position), per-position stack recovery (`v8` at t).
 
-`Timeline.tla` (committed, Apalache-verified to depth 10) already pins the semantics; this design is its Rust realization.
+`Timeline.tla` (committed, Apalache-verified to depth 10) already pins the semantics; this design is its Rust realization. The follow-up `Snapshot.tla` (Apalache-verified, `--features=no-rows`) formalizes the link to `Model.tla`: `EXTENDS Timeline`, an explicit re-indexing operator `ModelAt(t)` mapping each timeline position to a Model-shaped state, and an `INSTANCE Model WITH ModelAt(cursor).f` anchor — checked properties: `SnapshotValid` (real `M!ModelInvariant` at the cursor), `SnapshotsAreModels` (`∀ t ≤ frontier`), `LinkAtCursor` (restatement ≡ real invariant). Together: `Trace::snapshot(t)` yields a valid `Dump` at every recorded position.
 
 ## Non-goals
 

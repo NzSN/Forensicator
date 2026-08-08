@@ -60,7 +60,7 @@ forensicator trace <trace.ttfx>        # trace summary + queries (--pos, --write
 
 `specs/` contains TLA+ specs (AddressSpace, Arch, Model, etc.) with corresponding `forensicator-core/tests/mbt_*.rs` integration tests via `mirrorrust`. MBT tests are **opt-in** (require `MIRROR_BIN` + `APALACHE_MC` env vars). State traces in `states/` are TLA+ model-checking output, excluded from git.
 
-MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`, `mbt_crash_cause.rs` (spec-only stub), `mbt_timeline.rs` (spec-only stub). Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
+MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`, `mbt_crash_cause.rs` (spec-only stub), `mbt_timeline.rs` (spec-only stub), `mbt_snapshot.rs` (spec-only stub). Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
 
 ## Custom minidump streams
 
