@@ -10,6 +10,13 @@
 //!   end = -1            → Interval.end = None
 //!   frontier            → Trace.frontier
 //!   CursorBounded       → Trace::snapshot returns None for t > frontier
+//!
+//! Snapshot.tla mapping (see docs/superpowers/specs/2026-08-08-snapshot-rust-design.md):
+//!   ModelAt(t)                       → Trace::snapshot(t)
+//!   EvUpto / ExcUpto                 → event-log prefix scans in snapshot/exceptions_at
+//!   OpenMods (LIFO load−unload)      → module push/retain loop in snapshot
+//!   SnapshotValid/SnapshotsAreModels → Dump::validate_model + tests/mbt_snapshot.rs
+//!   LinkAtCursor                     → MBT-only drift guard; no Rust counterpart (by design)
 
 use crate::error::{Anomaly, Provenance};
 use crate::model::{Dump, ExceptionInfo, MemoryRegionInfo, Module, RegionClass};
@@ -221,7 +228,7 @@ impl Trace {
             file_offset: 0,
             rva: 0,
         };
-        let dump = Dump {
+        let mut dump = Dump {
             system_info: None,
             modules,
             threads: Vec::new(), // register files are per-position; out of scope for v1
@@ -233,6 +240,11 @@ impl Trace {
             v8heap_ext: None,
             file_size: 0,
         };
+        // Snapshot.tla SnapshotValid: degrade Model-invariant violations of the
+        // materialized view into anomalies (never fail — CursorBounded above
+        // remains the only hard failure).
+        let mut validation = dump.validate_model();
+        dump.anomalies.append(&mut validation);
 
         let mut space = AddressSpace::new(1_000_000);
         for region in &dump.memory_regions {
@@ -456,5 +468,44 @@ mod tests {
         }
         assert_eq!(tr.snapshot(1).unwrap().dump.modules.len(), 1);
         assert_eq!(tr.snapshot(2).unwrap().dump.modules.len(), 0);
+    }
+
+    #[test]
+    fn snapshot_clean_dump_has_no_validation_anomalies() {
+        let tr = fixture();
+        let snap = tr.snapshot(3).unwrap();
+        assert!(snap.dump.anomalies.is_empty());
+    }
+
+    #[test]
+    fn snapshot_surfaces_overlapping_module_anomaly() {
+        // Snapshot.tla SnapshotValid: ModuleLoads with overlapping VAs
+        // materialize into a Dump whose ModulesDisjoint violation degrades
+        // into an "overlapping module" anomaly (Model.tla:225).
+        let mut tr = fixture();
+        for (pos, address) in [(1, 0x7000_0000u64), (2, 0x7000_0800)] {
+            tr.events.push(TraceEvent {
+                pos,
+                kind: TraceEventKind::ModuleLoad,
+                code: 0,
+                address,
+                thread_id: 0,
+                name: format!("m{pos}"),
+                size: 0x1000,
+                provenance: prov(),
+            });
+        }
+        let snap = tr.snapshot(2).unwrap();
+        assert_eq!(snap.dump.modules.len(), 2);
+        let overlapping: Vec<_> = snap
+            .dump
+            .anomalies
+            .iter()
+            .filter(|a| a.description == "overlapping module")
+            .collect();
+        assert_eq!(overlapping.len(), 1);
+        // Before the second load the snapshot is clean.
+        let snap1 = tr.snapshot(1).unwrap();
+        assert!(snap1.dump.anomalies.is_empty());
     }
 }

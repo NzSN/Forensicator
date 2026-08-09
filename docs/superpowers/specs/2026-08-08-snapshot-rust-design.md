@@ -1,9 +1,57 @@
 # Snapshot.tla → Rust landing design
 
 Date: 2026-08-08
-Status: design
+Status: landed (2026-08-09, with adjustments — see "Landed adjustments" below)
 Spec: `specs/Snapshot.tla` (Apalache-verified, commit bd0736a)
 Predecessor: `docs/superpowers/specs/2026-08-07-timeline-design.md`
+
+## Landed adjustments (2026-08-09)
+
+The design as written assumed the mirror compares the computer's state
+against the spec's `View` projection. It does not: `--view` only
+deduplicates traces under `--max-error > 1`, and the mirror's `diffState`
+exact-matches the spec's raw **variables**. Also, `InitialState` delivers
+the spec's initial variables but never `parameters`. Landing therefore
+diverged as follows:
+
+1. **`snapshot` variable, not View keys.** SnapshotMBT carries a real
+   `snapshot` variable (ModelAt(cursor)'s fields plus `cell_values`),
+   re-assigned by every MBT wrapper from the primed constituents via
+   `SnapshotOf`. `ModelAt`/`ValueAt` and the `OpenMods` chain were
+   re-derived parameterized over the log variables (`ModelAtOf`,
+   `ValueAtOf`, `EvUptoOf`, …) because TLA+ cannot evaluate an operator
+   in the next state. The design's `View` survives for trace
+   deduplication only.
+2. **`parameters` dropped `im`.** Init reads `init_mem` from the
+   delivered initial state instead (it is always delivered).
+3. **`CellsOf`/`CellValues` are 2-cell literals** — Snowcat types
+   `[c \in 1..MaxAddr |-> e]` as a function, not a Seq; the spec's
+   existing unroll idiom (`OpenMods`, `ConstSeq`) applies.
+4. **Assign-before-use ordering** in `MBTRecordStep`: the `UNCHANGED`
+   for init_mem/cursor/threads/calls precedes the `snapshot'`
+   assignment (Apalache rejects primed uses before assignment).
+5. **init_mem wire shape**: the canonical (pre-VSeq) mirror protocol
+   parses `{"#map": [[k,v]]}` into a VRecord with stringified keys, so
+   the computer emits a plain record `{"1": v, "2": v}`; the Init parser
+   additionally accepts the newer VMap re-encoding.
+6. **Toolchain skew (resolved).** ModelMirrors commit 87ab0d9 (adding
+   VSeq/VMap/VVariant) briefly wire-broke the mirrorrust client; both
+   sides were then upgraded (MirrorRust 1c8af5b adds the Seq/Map/Variant/
+   Unserializable variants) and all Forensicator MBT computers now emit
+   `Value::Seq` for spec sequences and `Value::Map` for ITF functions.
+   Landing-era collateral on the current Apalache (0.58.3): Snowcat
+   requires CONSTANT annotations placed between the keyword and the name
+   (AddressSpace.tla), rejects the CONSTANT+operator-redefinition idiom
+   (Symbolizer.tla), admits no recursive LETs (Find rewritten as a
+   bounded CHOOSE) and no dynamic quantifier ranges; AddressSpaceMBT
+   gained a `ConstInit` (MaxAddr = 4) and SymbolizerMBT exports the
+   fabricated-table `count` through `parameters` (sym_tables is compared
+   raw now). Full replays green on the upgraded stack: mbt_snapshot
+   (342 s), mbt_model, mbt_arch, mbt_address_space, mbt_symbolizer.
+
+Verified: unit tests (`cargo test -p forensicator-core`), clippy clean
+(no new warnings), `cargo test --workspace` green, SnapshotMBT typecheck
++ `SnapshotValid` check at length 6 clean (340 s), full replay green.
 
 ## Context
 

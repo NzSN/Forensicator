@@ -378,6 +378,83 @@ impl Dump {
             description: description.to_string(),
         });
     }
+
+    /// Structural conjuncts of Model.tla ModelInvariant that Rust types do
+    /// not already enforce (Snapshot.tla SnapshotValid/SnapshotsAreModels).
+    /// Degrades into anomalies; never fails.
+    ///
+    /// Deliberately not checked: prot ≤ 7, state/cls domains (Rust enums and
+    /// the Protection bitflags make violations unrepresentable), and the
+    /// *CountBound conjuncts (verification artifacts — Model.tla:44).
+    pub fn validate_model(&self) -> Vec<Anomaly> {
+        fn anomaly(description: &str) -> Anomaly {
+            Anomaly {
+                provenance: Provenance {
+                    stream_type: 0,
+                    file_offset: 0,
+                    rva: 0,
+                },
+                description: description.to_string(),
+            }
+        }
+        let mut out = Vec::new();
+
+        // ModulesDisjoint — the "overlapping module" anomaly (Model.tla:225).
+        for (i, a) in self.modules.iter().enumerate() {
+            for b in self.modules.iter().skip(i + 1) {
+                if a.base_va < b.base_va + b.size && b.base_va < a.base_va + a.size {
+                    out.push(anomaly("overlapping module"));
+                }
+            }
+        }
+
+        // AllModulesHaveProv / AllThreadsHaveProv / AllRegionsHaveProv /
+        // SysInfoProv / ExcHasProv (sid > 0).
+        for m in &self.modules {
+            if m.provenance.stream_type == 0 {
+                out.push(anomaly("module without provenance"));
+            }
+        }
+        for t in &self.threads {
+            if t.provenance.stream_type == 0 {
+                out.push(anomaly("thread without provenance"));
+            }
+        }
+        for r in &self.memory_regions {
+            if r.provenance.stream_type == 0 {
+                out.push(anomaly("region without provenance"));
+            }
+        }
+        if let Some(si) = &self.system_info
+            && si.provenance.stream_type == 0
+        {
+            out.push(anomaly("system info without provenance"));
+        }
+        if let Some(e) = &self.exception
+            && e.provenance.stream_type == 0
+        {
+            out.push(anomaly("exception without provenance"));
+        }
+
+        // ThreadStacksPositive.
+        for t in &self.threads {
+            if t.stack_size == 0 {
+                out.push(anomaly("thread stack size zero"));
+            }
+        }
+
+        // AnnValNonEmpty (and the AddAnnotation key discipline).
+        for (k, v) in &self.annotations {
+            if k.is_empty() {
+                out.push(anomaly("annotation key empty"));
+            }
+            if v.is_empty() {
+                out.push(anomaly("annotation value empty"));
+            }
+        }
+
+        out
+    }
 }
 
 /// Byte-level predicate on a raw 8-byte value.
@@ -1070,5 +1147,95 @@ mod tests {
             members: vec![],
         };
         assert_eq!(g.member_count, 5);
+    }
+
+    fn valid_prov() -> Provenance {
+        Provenance {
+            stream_type: 1,
+            file_offset: 0,
+            rva: 0,
+        }
+    }
+
+    fn bare_module(base_va: u64, size: u64) -> Module {
+        Module {
+            name: String::new(),
+            base_va,
+            size,
+            checksum: 0,
+            codeview_guid: None,
+            codeview_age: None,
+            pdb_name: None,
+            provenance: valid_prov(),
+        }
+    }
+
+    fn empty_dump() -> Dump {
+        Dump {
+            system_info: None,
+            modules: vec![],
+            threads: vec![],
+            memory_regions: vec![],
+            exception: None,
+            anomalies: vec![],
+            annotations: vec![],
+            memory_info: vec![],
+            v8heap_ext: None,
+            file_size: 0,
+        }
+    }
+
+    #[test]
+    fn validate_model_clean_dump_is_empty() {
+        assert!(empty_dump().validate_model().is_empty());
+    }
+
+    #[test]
+    fn validate_model_overlapping_modules() {
+        let mut d = empty_dump();
+        d.modules = vec![bare_module(0x1000, 0x100), bare_module(0x1050, 0x100)];
+        let anomalies = d.validate_model();
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(anomalies[0].description, "overlapping module");
+        // Disjoint modules validate clean.
+        d.modules[1].base_va = 0x2000;
+        assert!(d.validate_model().is_empty());
+    }
+
+    #[test]
+    fn validate_model_zero_size_thread_stack() {
+        let mut d = empty_dump();
+        d.threads.push(Thread {
+            id: 1,
+            registers: RegisterSet::new(),
+            stack_va: 0x1000,
+            stack_size: 0,
+            teb_va: 0,
+            provenance: valid_prov(),
+        });
+        let anomalies = d.validate_model();
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(anomalies[0].description, "thread stack size zero");
+        d.threads[0].stack_size = 0x100;
+        assert!(d.validate_model().is_empty());
+    }
+
+    #[test]
+    fn validate_model_missing_provenance() {
+        let mut d = empty_dump();
+        d.modules.push(bare_module(0x1000, 0x100));
+        d.modules[0].provenance.stream_type = 0;
+        let anomalies = d.validate_model();
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(anomalies[0].description, "module without provenance");
+    }
+
+    #[test]
+    fn validate_model_empty_annotation() {
+        let mut d = empty_dump();
+        d.annotations.push(("k".to_string(), String::new()));
+        let anomalies = d.validate_model();
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(anomalies[0].description, "annotation value empty");
     }
 }
