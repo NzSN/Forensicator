@@ -7,8 +7,7 @@ EXTENDS Integers, Sequences, FiniteSets
 \* ResolveAddress(va) finds the module containing va, then binary-searches
 \* its symbol table for the nearest function ≤ va.
 
-CONSTANTS MaxModules, MaxSymbols
-
+\* Model-checking bounds (verification artifacts, not format limits).
 MaxModules  == 2
 MaxSymbols  == 4
 MaxAnomalies == 4
@@ -35,36 +34,38 @@ ModuleContains(i, va) ==
     i <= Len(sym_modules) /\ ModuleBase(i) <= va /\ va < ModuleBase(i) + ModuleSize(i)
 
 FindModule(va) ==
-    CHOOSE i \in 1..Len(sym_modules) : ModuleContains(i, va)
+    \* ModuleContains(i, va) already Len-guards; the constant domain is
+    \* the Apalache discipline (no dynamic ranges in set/quantifier bounds).
+    CHOOSE i \in 1..MaxModules : ModuleContains(i, va)
 
-\* Nearest function ≤ va in module i's symbol table.
-\* Returns <<va, name, file, line>> or <<0, "", "", 0>> if none.
+\* Nearest function ≤ va in module i's symbol table: the last table
+\* entry whose va is ≤ va (tables are sorted). Returns
+\* <<va, name, file, line>> or <<0, "", "", 0>> if none.
+\* (Constant quantifier domain with a Len guard — Apalache-friendly;
+\* Apalache admits no recursive LET definitions.)
 NearestSymbol(i, va) ==
     LET tbl == sym_tables[i]
-    IN  IF tbl = <<>>
+        idxs == {j \in 1..MaxSymbols : j <= Len(tbl) /\ tbl[j][1] <= va}
+    IN  IF idxs = {}
         THEN <<0, "", "", 0>>
-        ELSE LET
-            Find(t, idx, best) ==
-                IF idx > Len(t)
-                THEN best
-                ELSE IF t[idx][1] <= va
-                     THEN Find(t, idx+1, t[idx])
-                     ELSE Find(t, idx+1, best)
-        IN Find(tbl, 1, <<0, "", "", 0>>)
+        ELSE LET m == CHOOSE j \in idxs : \A k \in idxs : k <= j
+             IN tbl[m]
 
 \* ---- Invariants ----
 
 TablesSorted ==
-    \A i \in 1..Len(sym_modules):
-      LET tbl == sym_tables[i]
-      IN  \A j \in 1..(Len(tbl)-1):
-            j > 0 => tbl[j][1] <= tbl[j+1][1]
+    \A i \in 1..MaxModules:
+      i <= Len(sym_modules) =>
+        LET tbl == sym_tables[i]
+        IN  \A j \in 1..MaxSymbols:
+              j <= Len(tbl) - 1 => tbl[j][1] <= tbl[j+1][1]
 
 ModulesNonOverlapping ==
-    \A i \in 1..Len(sym_modules):
-      \A j \in 1..Len(sym_modules):
-        (i # j) => ~(ModuleBase(i) < ModuleBase(j) + ModuleSize(j)
-                     /\ ModuleBase(j) < ModuleBase(i) + ModuleSize(i))
+    \A i \in 1..MaxModules:
+      \A j \in 1..MaxModules:
+        (i <= Len(sym_modules) /\ j <= Len(sym_modules) /\ i # j) =>
+          ~(ModuleBase(i) < ModuleBase(j) + ModuleSize(j)
+            /\ ModuleBase(j) < ModuleBase(i) + ModuleSize(i))
 
 AnomaliesBounded == Len(sym_anomalies) <= MaxAnomalies
 
@@ -75,24 +76,32 @@ SymbolizerInvariant ==
 
 \* ---- Operations ----
 
+\* Fabricated per-k names (4 literals suffice because MaxSymbols = 4;
+\* extend the chains if MaxSymbols grows — string concatenation is not
+\* typeable as \o over Str for Snowcat, and TLC!ToString is deprecated).
+\* @type: (Int) => Str;
+SymName(k) == SubSeq(<<"func1", "func2", "func3", "func4">>, 1, 4)[k]
+\* @type: (Int) => Str;
+SymFile(k) == SubSeq(<<"src1.cpp", "src2.cpp", "src3.cpp", "src4.cpp">>, 1, 4)[k]
+
 \* Load a PDB for a module at base_va with size, producing a sorted
 \* symbol table of public functions. Module base+VAs are used so resolve
-\* works with absolute addresses.
-LoadPdb(name, base_va, size) ==
+\* works with absolute addresses. count is a parameter (not an internal
+\* choice) so SymbolizerMBT can export it to the Rust mirror.
+LoadPdb(name, base_va, size, count) ==
     /\ Len(sym_modules) < MaxModules
     /\ size > 0
-    /\ \E count \in 1..MaxSymbols:
-         LET Build(k) ==
-             IF k = 0 THEN <<>>
-             ELSE LET va   == base_va + (k * 256)
-                      fn   == "func" \o ToString(k)
-                      file == "src" \o ToString(k) \o ".cpp"
-                      line == k * 10
-                  IN  <<va, fn, file, line>>
-         IN  LET entries == [j \in 1..count |-> Build(j)]
-             IN  /\ sym_modules' = Append(sym_modules, <<name, base_va, size>>)
-                 /\ sym_tables'  = Append(sym_tables, entries)
-                 /\ UNCHANGED sym_anomalies
+    /\ count \in 1..MaxSymbols
+    /\ LET Build(k) == <<base_va + (k * 256), SymName(k), SymFile(k), k * 10>>
+           \* 4 literals suffice because MaxSymbols = 4 (extend if it
+           \* grows); [j \in 1..count |-> ...] is function-typed to
+           \* Snowcat, so the table is materialized as a Seq literal.
+           \* @type: Seq(<<Int, Str, Str, Int>>);
+           All == <<Build(1), Build(2), Build(3), Build(4)>>
+           entries == SubSeq(All, 1, count)
+       IN  /\ sym_modules' = Append(sym_modules, <<name, base_va, size>>)
+           /\ sym_tables'  = Append(sym_tables, entries)
+           /\ UNCHANGED sym_anomalies
 
 LoadPdbEmpty(name, base_va, size) ==
     /\ Len(sym_modules) < MaxModules
@@ -106,7 +115,7 @@ LoadPdbEmpty(name, base_va, size) ==
 \* then binary-searches its symbol table for the nearest function.
 \* Records an anomaly if the VA is not in any loaded module.
 ResolveAddress(va) ==
-    IF \E i \in 1..Len(sym_modules): ModuleContains(i, va)
+    IF \E i \in 1..MaxModules: ModuleContains(i, va)
     THEN LET i == FindModule(va)
              entry == NearestSymbol(i, va)
          IN  IF entry[1] > 0
@@ -131,7 +140,8 @@ Next ==
     \/ \E name \in {"module_a", "module_b"}:
          \E base_va \in {0, 4096, 8192}:
            \E size \in {4096, 8192}:
-             LoadPdb(name, base_va, size)
+             \E count \in 1..MaxSymbols:
+               LoadPdb(name, base_va, size, count)
     \/ \E name \in {"module_a", "module_b"}:
          \E base_va \in {0, 4096, 8192}:
            \E size \in {4096, 8192}:

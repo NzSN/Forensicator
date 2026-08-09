@@ -16,17 +16,114 @@ EXTENDS Integers, Sequences, FiniteSets
 \* Panic isolation: one analyzer failing does not affect others.
 
 \* ---- Imports ----
+\*
+\* Instance state lives in explicitly declared host variables with WITH
+\* substitutions: Apalache cannot resolve primed instance references
+\* (S!sym_modules') in UNCHANGED/subscript contexts, so those name the
+\* host variables directly (SubVars below). Unprimed M!/A!/R!/S!
+\* references expand through the substitution as usual.
 
-M == INSTANCE Model
-A == INSTANCE AddressSpace WITH MaxAddr <- 255
-R == INSTANCE Arch
-S == INSTANCE Symbolizer
+VARIABLES
+    \* ── Model.tla ──
+    \* @type: Seq(Int);
+    m_sysinfo,
+    \* @type: Seq(Int);
+    m_mod_va,
+    \* @type: Seq(Int);
+    m_mod_sz,
+    \* @type: Seq(Int);
+    m_mod_prov_sid,
+    \* @type: Seq(Int);
+    m_mod_prov_off,
+    \* @type: Seq(Int);
+    m_mod_prov_rva,
+    \* @type: Seq(Int);
+    m_thr_id,
+    \* @type: Seq(Int);
+    m_thr_stack_va,
+    \* @type: Seq(Int);
+    m_thr_stack_sz,
+    \* @type: Seq(Int);
+    m_thr_prov_sid,
+    \* @type: Seq(Int);
+    m_thr_prov_off,
+    \* @type: Seq(Int);
+    m_thr_prov_rva,
+    \* @type: Seq(Int);
+    m_mem_va,
+    \* @type: Seq(Int);
+    m_mem_sz,
+    \* @type: Seq(Int);
+    m_mem_prot,
+    \* @type: Seq(Int);
+    m_mem_state,
+    \* @type: Seq(Int);
+    m_mem_type,
+    \* @type: Seq(Int);
+    m_mem_cls,
+    \* @type: Seq(Int);
+    m_mem_prov_sid,
+    \* @type: Seq(Int);
+    m_mem_prov_off,
+    \* @type: Seq(Int);
+    m_mem_prov_rva,
+    \* @type: Seq(Int);
+    m_exc_info,
+    \* @type: Seq([desc: Str]);
+    m_anomalies,
+    \* @type: Seq(Str);
+    m_ann_key,
+    \* @type: Seq(Str);
+    m_ann_val,
+    \* ── AddressSpace.tla ──
+    \* @type: Seq(Int);
+    a_reg_va,
+    \* @type: Seq(Int);
+    a_reg_sz,
+    \* @type: Seq(Str);
+    a_reg_cl,
+    \* @type: Seq([desc: Str]);
+    a_anomalies,
+    \* ── Arch.tla ──
+    \* @type: Seq(Int);
+    r_regs,
+    \* @type: Seq([desc: Str]);
+    r_anomalies,
+    \* ── Symbolizer.tla ──
+    \* @type: Seq(<<Str, Int, Int>>);
+    s_sym_modules,
+    \* @type: Seq(Seq(<<Int, Str, Str, Int>>));
+    s_sym_tables,
+    \* @type: Seq([desc: Str]);
+    s_sym_anomalies
+
+M == INSTANCE Model WITH
+    sysinfo <- m_sysinfo,
+    mod_va <- m_mod_va, mod_sz <- m_mod_sz,
+    mod_prov_sid <- m_mod_prov_sid, mod_prov_off <- m_mod_prov_off, mod_prov_rva <- m_mod_prov_rva,
+    thr_id <- m_thr_id, thr_stack_va <- m_thr_stack_va, thr_stack_sz <- m_thr_stack_sz,
+    thr_prov_sid <- m_thr_prov_sid, thr_prov_off <- m_thr_prov_off, thr_prov_rva <- m_thr_prov_rva,
+    mem_va <- m_mem_va, mem_sz <- m_mem_sz, mem_prot <- m_mem_prot,
+    mem_state <- m_mem_state, mem_type <- m_mem_type, mem_cls <- m_mem_cls,
+    mem_prov_sid <- m_mem_prov_sid, mem_prov_off <- m_mem_prov_off, mem_prov_rva <- m_mem_prov_rva,
+    exc_info <- m_exc_info, anomalies <- m_anomalies,
+    ann_key <- m_ann_key, ann_val <- m_ann_val
+
+A == INSTANCE AddressSpace WITH MaxAddr <- 255,
+    reg_va <- a_reg_va, reg_sz <- a_reg_sz, reg_cl <- a_reg_cl, anomalies <- a_anomalies
+
+R == INSTANCE Arch WITH
+    regs <- r_regs, anomalies <- r_anomalies
+
+S == INSTANCE Symbolizer WITH
+    sym_modules <- s_sym_modules, sym_tables <- s_sym_tables, sym_anomalies <- s_sym_anomalies
 
 \* ---- Constants ----
 
 CONSTANTS
+    \* @type: Set(Int);
     StreamTypeSet,        \* {1,2,3,4,5,6} — known stream type identifiers
-    MaxStreams,           \* max entries in stream directory
+    \* @type: Set(Str);
     AnalyzerPool          \* set of analyzer names (e.g. {"strings","vtables","lists","arrays","chunks","shapes"})
 
 MaxStreams == 4
@@ -38,9 +135,9 @@ VARIABLES
     p_header_parsed,
     \* @type: Int;
     p_dir_parsed,
-    \* @type: Seq(Int);
+    \* @type: Int -> Int;
     p_stream_types,
-    \* @type: Seq(Int);
+    \* @type: Int -> Int;
     p_stream_parsed,
     \* @type: Int;
     s1_complete
@@ -48,14 +145,14 @@ VARIABLES
 \* ---- Helper: all sub-module variables (for UNCHANGED lists) ----
 
 SubVars ==
-    <<M!sysinfo, M!mod_va, M!mod_sz, M!mod_prov_sid, M!mod_prov_off, M!mod_prov_rva,
-      M!thr_id, M!thr_stack_va, M!thr_stack_sz, M!thr_prov_sid, M!thr_prov_off, M!thr_prov_rva,
-      M!mem_va, M!mem_sz, M!mem_prot, M!mem_state, M!mem_type, M!mem_cls,
-      M!mem_prov_sid, M!mem_prov_off, M!mem_prov_rva, M!exc_info, M!anomalies,
-      M!ann_key, M!ann_val,
-      A!reg_va, A!reg_sz, A!reg_cl, A!anomalies,
-      R!regs, R!anomalies,
-      S!sym_modules, S!sym_tables, S!sym_anomalies>>
+    <<m_sysinfo, m_mod_va, m_mod_sz, m_mod_prov_sid, m_mod_prov_off, m_mod_prov_rva,
+      m_thr_id, m_thr_stack_va, m_thr_stack_sz, m_thr_prov_sid, m_thr_prov_off, m_thr_prov_rva,
+      m_mem_va, m_mem_sz, m_mem_prot, m_mem_state, m_mem_type, m_mem_cls,
+      m_mem_prov_sid, m_mem_prov_off, m_mem_prov_rva, m_exc_info, m_anomalies,
+      m_ann_key, m_ann_val,
+      a_reg_va, a_reg_sz, a_reg_cl, a_anomalies,
+      r_regs, r_anomalies,
+      s_sym_modules, s_sym_tables, s_sym_anomalies>>
 
 \* ---- S2: Analyzer Pipeline ----
 
@@ -82,6 +179,11 @@ VARIABLES
 \* ---- Helpers ----
 
 RegisteredAnalyzers == Len(pipeline)
+
+\* The pipeline's analyzer names as a set (sequence-as-set; a bare
+\* { a \in pipeline : ... } is untypeable — a Seq is not a Set).
+\* @type: (Seq(Str)) => Set(Str);
+NameSet(p) == { p[i] : i \in DOMAIN p }
 
 \* ── S1 Operations ──
 
@@ -110,7 +212,7 @@ ParseDirectory ==
 DecodeStream(stream_type) ==
     /\ p_dir_parsed = 1
     /\ \E idx \in 1..MaxStreams:
-         /\ idx <= Len(p_stream_types)
+         /\ idx \in DOMAIN p_stream_types
          /\ p_stream_types[idx] = stream_type
          /\ p_stream_parsed[idx] = 0
          /\ \/ (stream_type = 1 /\ M!SetSysInfo(0, 1, 0, 0, 0, 0, 1, 0, 0))
@@ -130,7 +232,7 @@ DecodeStream(stream_type) ==
 BuildAddressSpace ==
     /\ p_dir_parsed = 1
     /\ \A idx \in 1..MaxStreams:
-         idx <= Len(p_stream_types) => p_stream_parsed[idx] = 1
+         idx \in DOMAIN p_stream_types => p_stream_parsed[idx] = 1
     /\ s1_complete = 0
     /\ \E va_start \in 0..255:
          \E size \in 1..255:
@@ -150,11 +252,12 @@ BuildAddressSpace ==
 LoadSymbolizer ==
     /\ s1_complete = 1
     /\ M!ModuleCount > 0
-    /\ Len(S!sym_modules) = 0
+    /\ Len(s_sym_modules) = 0
     /\ \E name \in {"module_a"}:
          \E base_va \in {0, 4096}:
            \E size \in {4096, 8192}:
-             S!LoadPdb(name, base_va, size)
+             \E count \in 1..S!MaxSymbols:
+               S!LoadPdb(name, base_va, size, count)
     /\ UNCHANGED <<p_header_parsed, p_dir_parsed, p_stream_types, p_stream_parsed, s1_complete,
                    pipeline, completed, failed,
                    catalog_strings, catalog_vtables, catalog_lists,
@@ -164,7 +267,7 @@ LoadSymbolizer ==
 
 RegisterAnalyzer(name) ==
     /\ name \in AnalyzerPool
-    /\ name \notin { a \in pipeline : TRUE }
+    /\ name \notin NameSet(pipeline)
     /\ pipeline' = Append(pipeline, name)
     /\ UNCHANGED <<p_header_parsed, p_dir_parsed, p_stream_types, p_stream_parsed, s1_complete,
                    completed, failed,
@@ -175,7 +278,7 @@ RegisterAnalyzer(name) ==
 AnalyzerRun ==
     /\ s1_complete = 1
     /\ pipeline /= <<>>
-    /\ \E a \in (AnalyzerPool \cap { x \in pipeline : TRUE }) \ completed:
+    /\ \E a \in (AnalyzerPool \cap NameSet(pipeline)) \ completed:
          /\ completed' = completed \cup {a}
          /\ \/ /\ failed' = failed
                /\ catalog_strings' = catalog_strings \cup IF a = "strings" THEN {a} ELSE {}
@@ -198,7 +301,7 @@ S1ParseSequence ==
     /\ s1_complete = 1 => p_dir_parsed = 1
 
 S2PipelineInvariant ==
-    /\ completed \subseteq { a \in pipeline : TRUE }
+    /\ completed \subseteq NameSet(pipeline)
     /\ failed \subseteq completed
     /\ catalog_strings \subseteq completed
     /\ catalog_vtables \subseteq completed
@@ -240,8 +343,8 @@ Init ==
     /\ S!Init
     /\ p_header_parsed  = 0
     /\ p_dir_parsed     = 0
-    /\ p_stream_types   = <<>>
-    /\ p_stream_parsed  = <<>>
+    /\ p_stream_types   = [i \in {} |-> 0]
+    /\ p_stream_parsed  = [i \in {} |-> 0]
     /\ s1_complete      = 0
     /\ pipeline         = <<>>
     /\ completed        = {}

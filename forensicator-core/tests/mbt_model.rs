@@ -21,11 +21,11 @@ fn st(pairs: Vec<(&str, Value)>) -> State {
 }
 
 fn seq_to_value(seq: &[i64]) -> Value {
-    Value::Set(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
+    Value::Seq(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
 }
 
 fn anomalies_to_value(dump: &Dump) -> Value {
-    Value::Set(
+    Value::Seq(
         dump.anomalies
             .iter()
             .map(|a| {
@@ -40,7 +40,7 @@ fn anomalies_to_value(dump: &Dump) -> Value {
 }
 
 fn str_seq_to_value(seq: &[&str]) -> Value {
-    Value::Set(seq.iter().map(|&s| Value::Str(s.to_string())).collect())
+    Value::Seq(seq.iter().map(|&s| Value::Str(s.to_string())).collect())
 }
 
 /// Mirrors the TLA+ `State` produced by Model.tla.

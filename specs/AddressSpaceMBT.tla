@@ -45,5 +45,10 @@ MBTNext ==
 
 MBTSpec == MBTInit /\ [][MBTNext]_<<reg_va, reg_sz, reg_cl, anomalies, action_taken, parameters>>
 
+\* Constant assignment for mirrorrust runs: the server passes no TLC
+\* config, so MaxAddr (AddressSpace.cfg pins 4 for the deep check) is
+\* bound here instead; mbt_address_space.rs sets const_init to ConstInit.
+ConstInit == MaxAddr = 4
+
 TraceComplete == TRUE
 ====

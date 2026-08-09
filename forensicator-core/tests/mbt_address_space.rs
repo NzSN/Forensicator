@@ -19,15 +19,15 @@ fn st(pairs: Vec<(&str, Value)>) -> State {
 }
 
 fn seq_to_value(seq: &[i64]) -> Value {
-    Value::Set(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
+    Value::Seq(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
 }
 
 fn str_seq_to_value(seq: &[&str]) -> Value {
-    Value::Set(seq.iter().map(|&s| Value::Str(s.to_string())).collect())
+    Value::Seq(seq.iter().map(|&s| Value::Str(s.to_string())).collect())
 }
 
 fn anomalies_to_value(anomalies: &[String]) -> Value {
-    Value::Set(
+    Value::Seq(
         anomalies
             .iter()
             .map(|a| {
@@ -168,7 +168,7 @@ fn apalache_config() -> ApalacheConfig {
         spec_path,
         invariant: "TypeInvariant".into(),
         length_bound: 4,
-        const_init: None,
+        const_init: Some("ConstInit".into()),
         param_vars: Some("parameters".into()),
         init_predicate: Some("MBTInit".into()),
         next_predicate: Some("MBTNext".into()),

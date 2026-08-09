@@ -5,8 +5,6 @@
 //! Requires Apalache. Set APALACHE_MC env var.
 //!   e.g. MIRROR_BIN=D:\Tools\ModelMirrors.exe APALACHE_MC=...\wrapper.bat cargo test --test mbt_symbolizer -- --nocapture
 
-use std::collections::BTreeMap;
-
 use forensicator_core::symbolizer::{ModuleSymbols, SymbolEntry, Symbolizer};
 use mirrorrust::{
     ApalacheConfig, State, StateComputer, TraceGenerationConfig, Value, as_int, as_str, get_param,
@@ -20,7 +18,7 @@ fn st(pairs: Vec<(&str, Value)>) -> State {
 }
 
 fn anomalies_to_value(anomalies: &[String]) -> Value {
-    Value::Set(
+    Value::Seq(
         anomalies
             .iter()
             .map(|a| {
@@ -52,7 +50,6 @@ struct SymbolizerComputer {
     anomalies: Vec<String>,
 }
 
-const MAX_SYMBOLS: usize = 4;
 const MAX_ANOMALIES: usize = 4;
 
 impl SymbolizerComputer {
@@ -66,27 +63,47 @@ impl SymbolizerComputer {
     }
 
     fn to_state(&self) -> State {
+        // sym_modules is Seq(<<name, base_va, size>>) — tuples, matching the
+        // spec's raw variable (the mirror compares raw variables).
         let mods: Vec<Value> = self
             .modules
             .iter()
             .map(|(name, base, sz)| {
-                Value::Record(
-                    vec![
-                        ("name".to_string(), Value::Str(name.clone())),
-                        (
-                            "base_va".to_string(),
-                            Value::Int(BigInt::from(*base as i64)),
-                        ),
-                        ("size".to_string(), Value::Int(BigInt::from(*sz as i64))),
-                    ]
-                    .into_iter()
-                    .collect::<BTreeMap<_, _>>(),
-                )
+                Value::Tuple(vec![
+                    Value::Str(name.clone()),
+                    Value::Int(BigInt::from(*base as i64)),
+                    Value::Int(BigInt::from(*sz as i64)),
+                ])
             })
             .collect();
 
         st(vec![
-            ("sym_modules", Value::Set(mods)),
+            ("sym_modules", Value::Seq(mods)),
+            // sym_tables is Seq(Seq(<<va, name, file, line>>)).
+            (
+                "sym_tables",
+                Value::Seq(
+                    self.tables
+                        .iter()
+                        .map(|tbl| {
+                            Value::Seq(
+                                tbl.iter()
+                                    .map(|e| {
+                                        Value::Tuple(vec![
+                                            Value::Int(BigInt::from(e.va as i64)),
+                                            Value::Str(e.function_name.clone()),
+                                            Value::Str(e.source_file.clone().unwrap_or_default()),
+                                            Value::Int(BigInt::from(
+                                                e.source_line.unwrap_or(0) as i64
+                                            )),
+                                        ])
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                ),
+            ),
             ("sym_anomalies", anomalies_to_value(&self.anomalies)),
         ])
     }
@@ -126,9 +143,12 @@ impl StateComputer for SymbolizerComputer {
                 let name = get_str("name");
                 let base_va = get_int("base_va");
                 let size = get_int("size");
+                // The spec exports its chosen count through parameters.
+                let count = get_int("count") as usize;
 
-                if !name.is_empty() && !self.modules.iter().any(|(n, _, _)| n == &name) {
-                    let count = (self.modules.len() % MAX_SYMBOLS) + 1;
+                // The spec admits duplicate module names (LoadPdb has no
+                // uniqueness guard), so the mirror appends unconditionally.
+                if !name.is_empty() && count > 0 {
                     let mut entries: Vec<SymbolEntry> = (1..=count)
                         .map(|k| symbol_entry(base_va + (k * 256) as u64, k))
                         .collect();
@@ -143,7 +163,7 @@ impl StateComputer for SymbolizerComputer {
                 let base_va = get_int("base_va");
                 let size = get_int("size");
 
-                if !name.is_empty() && !self.modules.iter().any(|(n, _, _)| n == &name) {
+                if !name.is_empty() {
                     self.tables.push(vec![]);
                     self.modules.push((name.clone(), base_va, size));
                     self.rebuild_symbolizer();

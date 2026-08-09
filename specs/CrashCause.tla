@@ -11,8 +11,7 @@ EXTENDS Integers, Sequences, FiniteSets
 \* Mirrors analyzer/cause.rs. See
 \* docs/superpowers/specs/2026-08-04-crash-cause-design.md.
 
-CONSTANTS MaxRules
-
+\* Model-checking bound (verification artifact, not a format limit).
 MaxRules == 10
 
 \* ---- State ----
@@ -51,11 +50,14 @@ ConfRank(c) ==
       [] OTHER        -> 0
 
 \* The confidence of the strongest match in S, or "LOW" if empty.
+\* (Membership phrasing — Snowcat cannot project m[2] out of set elements.)
 BestConfidence(S) ==
     IF S = {} THEN "LOW"
     ELSE CHOOSE c \in Confidences :
-           /\ \E m \in S : m[2] = c
-           /\ \A m \in S : ConfRank(m[2]) <= ConfRank(c)
+           /\ \E r \in 1..MaxRules : <<r, c>> \in S
+           /\ \A c2 \in Confidences :
+                (\E r \in 1..MaxRules : <<r, c2>> \in S) =>
+                  ConfRank(c2) <= ConfRank(c)
 
 \* ---- Actions ----
 

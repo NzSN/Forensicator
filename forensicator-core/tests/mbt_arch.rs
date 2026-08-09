@@ -13,11 +13,11 @@ fn st(pairs: Vec<(&str, Value)>) -> State {
 }
 
 fn seq_to_value(seq: &[i64]) -> Value {
-    Value::Set(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
+    Value::Seq(seq.iter().map(|&n| Value::Int(BigInt::from(n))).collect())
 }
 
 fn anomalies_to_value(anomalies: &[String]) -> Value {
-    Value::Set(
+    Value::Seq(
         anomalies
             .iter()
             .map(|a| {

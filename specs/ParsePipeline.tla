@@ -87,7 +87,10 @@ M == INSTANCE Model WITH
     mem_va <- mem_va, mem_sz <- mem_sz, mem_prot <- mem_prot,
     mem_state <- mem_state, mem_type <- mem_type, mem_cls <- mem_cls,
     mem_prov_sid <- mem_prov_sid, mem_prov_off <- mem_prov_off, mem_prov_rva <- mem_prov_rva,
-    exc_info <- exc_info, anomalies <- anomalies
+    exc_info <- exc_info, anomalies <- anomalies,
+    \* ParsePipeline never records annotations; the instance exists for
+    \* M!ModelInvariant/M!Init only, where empty annotations hold vacuously.
+    ann_key <- <<>>, ann_val <- <<>>
 
 \* ---- Helpers ----
 

@@ -2,7 +2,9 @@
 EXTENDS Integers, Sequences, FiniteSets
 
 \* Model-checking bounds (edit these for larger state spaces)
-CONSTANT MaxAddr
+CONSTANT
+    \* @type: Int;
+    MaxAddr
 MaxRegions   == 2
 MaxAnomalies == 2
 
