@@ -14,6 +14,7 @@ hand-written; builds and runs on Linux and Windows hosts.
 | [parse-pipeline.md](parse-pipeline.md) | S1: minidump parsing, `Dump`, `AddressSpace`, provenance, V8HE custom stream |
 | [analyzers.md](analyzers.md) | S2: `Analyzer` trait, `Pipeline`, the 8 built-in analyzers, shared utilities |
 | [timeline.md](timeline.md) | TTD support: `Timeline.tla`, `Trace` model, `.ttfx` container, extractor boundary |
+| [ttfx-format.md](ttfx-format.md) | `.ttfx` v1 byte-level reference: sections, payload pool, anomalies, worked fixture dump |
 | [cli.md](cli.md) | One-shot subcommands and the interactive `shell` session (trace cursor) |
 | [verification.md](verification.md) | TLA+ specs, model-based tests, fixtures, test strategy |
 

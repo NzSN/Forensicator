@@ -9,9 +9,10 @@ Code: `forensicator-core/src/model/trace.rs`, `forensicator-core/src/parse/ttfx.
 
 Microsoft's `.run` trace format is proprietary and its only reader
 (`TTDReplay.dll`) is Windows-only COM. Forensicator never parses `.run`.
-Instead a Windows-side **extractor** (TTDReplay SDK → TTFX; separate
-component, not yet built) emits our own versioned container, and everything
-downstream is pure Rust, specifiable, and testable with synthetic fixtures.
+Instead a Windows-side **extractor** (`ttfx-extract`, at `D:\Repositories\TTFX`
+— design: `docs/superpowers/specs/2026-08-09-ttfx-extractor-design.md`) emits
+our own versioned container, and everything downstream is pure Rust,
+specifiable, and testable with synthetic fixtures.
 `Timeline.tla` is the formal contract the extractor's output must satisfy —
 the same capture-side/analysis-side split as the V8HE crash handler.
 
@@ -50,9 +51,10 @@ then a standard `AddressSpace`. The existing 8 analyzers consume it unchanged.
 
 32-byte header (`TTFX` magic, version, flags, section count, frontier) → fixed
 -record sections (`INITMEM`, `WRITES`, `EVENTS`, `THREADS`, `CALLS`) → payload
-pool referenced by absolute offsets. Versioned, truncation-tolerant; full byte
-layout in the format spec. Reader and writer are both in `parse/ttfx.rs`
-(writer serves tests/fixtures and the future extractor).
+pool referenced by absolute offsets. Versioned, truncation-tolerant; the full
+byte-level reference with a worked fixture dump is
+[ttfx-format.md](ttfx-format.md). Reader and writer are both in
+`parse/ttfx.rs` (writer serves tests/fixtures and the future extractor).
 
 ## Invariants as decode-time validation
 
