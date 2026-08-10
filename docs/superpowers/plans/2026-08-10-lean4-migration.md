@@ -218,10 +218,10 @@ First fixture: `Case/ttfx/minimal.ttfx` — zero anomalies, JSON equal.
 - Create: `Forensicator/Model/Dump.lean`
 - Reference: `forensicator-core/src/parse/*.rs` (13 modules), `model.rs`
 
-- [ ] **Step 1: `Model/Dump.lean`** — port the `Dump` record (model.rs) field-for-field, including `V8HeapExt` (v2: alloc top/limit, `gcState`, `lastGcReason`, fatal message) and `setException` semantics.
-- [ ] **Step 2: streams in dependency order** — header → directory → memory(64)list → memory_info → module_list → thread_list → exception → system_info → comment_a → crashpad → v8heap (version-gated v2 ext). One task-checkbox per stream; each keeps Rust's provenance (stream_type + file_offset + rva) and fail-closed anomalies.
-- [ ] **Step 3: `inspect --json` parity** — extend CLI; conformance gate now covers all three dumps (`minidump`, `minidump_v2`, `fulldump`).
-- [ ] **Step 4: all-prefixes fuzz** on the three `.dmp` fixtures (same rule as Task 4 Step 5).
+- [x] **Step 1: `Model/Dump.lean`** — port the `Dump` record (model.rs) field-for-field, including `V8HeapExt` (v2: alloc top/limit, `gcState`, `lastGcReason`, fatal message) and `setException` semantics.
+- [x] **Step 2: streams in dependency order** — header → directory → memory(64)list → memory_info → module_list → thread_list → exception → system_info → comment_a → crashpad → v8heap (version-gated v2 ext). One task-checkbox per stream; each keeps Rust's provenance (stream_type + file_offset + rva) and fail-closed anomalies.
+- [x] **Step 3: `inspect --json` parity** — extend CLI; conformance gate now covers all three dumps (`minidump`, `minidump_v2`, `fulldump`).
+- [x] **Step 4: all-prefixes fuzz** on the three `.dmp` fixtures (same rule as Task 4 Step 5).
 
 ---
 
@@ -231,9 +231,9 @@ First fixture: `Case/ttfx/minimal.ttfx` — zero anomalies, JSON equal.
 - Create: `Forensicator/Model/AddressSpace.lean` (executable inst of Spec/AddressSpace)
 - Modify: `scripts/conformance-lean.sh` (space-dependent output)
 
-- [ ] **Step 1: build space from Dump** — port the S1→S2 assembly (region classification via MemoryInfoList + module images; RegionClass rules from space.rs).
-- [ ] **Step 2: theorems apply for free** — this is the Task 2 structure instantiated; add `buildSpace_satisfies_invariant` (construction proof, mostly `simp` over the fold).
-- [ ] **Step 3: perf gate** — `fulldump` fixture decode+build under (say) 30 s; if not, switch region storage to refcount-1 `Array` folds before proceeding (design §Perf rules). Record timing in commit message.
+- [x] **Step 1: build space from Dump** — port the S1→S2 assembly (region classification via MemoryInfoList + module images; RegionClass rules from space.rs).
+- [x] **Step 2: theorems apply for free** — this is the Task 2 structure instantiated; add `buildSpace_satisfies_invariant` (construction proof, mostly `simp` over the fold).
+- [x] **Step 3: perf gate** — `fulldump` fixture decode+build under (say) 30 s; if not, switch region storage to refcount-1 `Array` folds before proceeding (design §Perf rules). Record timing in commit message.
 
 ---
 
@@ -243,9 +243,9 @@ First fixture: `Case/ttfx/minimal.ttfx` — zero anomalies, JSON equal.
 - Create: `Forensicator/Analyzer/{Analyzer,Strings,Vtables,Lists,Arrays,Chunks,Shapes,Scan}.lean`, `Forensicator/Util/Pattern.lean`
 - Reference: `forensicator-core/src/analyzer/*.rs`, `pattern.rs`
 
-- [ ] **Step 1: framework** — `Analyzer` structure (name, description, run : `Dump → AddressSpace → Array Finding`), `Catalog` (all_strings/all_vtables/… accessors), `Pipeline.run` with `--plugin` filter; `Confidence` as ordered `inductive` (Low/Medium/High — match Rust variants exactly).
-- [ ] **Step 2: PointerGraph** (`Util/Pattern.lean`) — port `all_strict`, `all_loose`, `saved_frame_pointers`, `vtables`, `heap_references`; caps as `fuel : Nat` (1M nodes/10M edges), termination by fuel.
-- [ ] **Steps 3–9: one analyzer per step** — strings → vtables → lists → arrays → chunks → shapes → scan. Each: pure port, `analyze --json --plugin <name>` parity on all three dumps added to the gate. Confidence scores must match byte-for-byte after `jq -S`.
+- [x] **Step 1: framework** — `Analyzer` structure (name, description, run : `Dump → AddressSpace → Array Finding`), `Catalog` (all_strings/all_vtables/… accessors), `Pipeline.run` with `--plugin` filter; `Confidence` as ordered `inductive` (Low/Medium/High — match Rust variants exactly).
+- [x] **Step 2: PointerGraph** (`Util/Pattern.lean`) — port `all_strict`, `all_loose`, `saved_frame_pointers`, `vtables`, `heap_references`; caps as `fuel : Nat` (1M nodes/10M edges), termination by fuel.
+- [x] **Steps 3–9: one analyzer per step** — strings → vtables → lists → arrays → chunks → shapes → scan. Each: pure port, `analyze --json --plugin <name>` parity on all three dumps added to the gate. Confidence scores must match byte-for-byte after `jq -S`.
 
 ---
 
@@ -255,11 +255,11 @@ First fixture: `Case/ttfx/minimal.ttfx` — zero anomalies, JSON equal.
 - Create: `Forensicator/Util/{Disasm,V8Obj,V8Layout,Unwind}.lean`, `Forensicator/Analyzer/Cause.lean`
 - Reference: `analyzer/cause.rs` (890 ln), `disasm.rs`, `v8obj.rs`, `v8layout.rs`, `unwind.rs`
 
-- [ ] **Step 1 (gate): disasm strategy** — try pure-Lean window decode first: `cause` needs only `InstrKind` classification (253 lines of Rust wrapping iced-x86). If the needed opcode subset is small (call/jmp/mov/ret/nop/int3 — audit disasm.rs usage), implement directly in Lean and skip FFI entirely. **Only if** the subset explodes: build the Rust staticlib shim (`extern "C"` over byte buffers). Record the decision in the task commit.
-- [ ] **Step 2: port** `v8obj`/`v8layout` (cage-aware walking; version-pinned offsets) — pure Lean, no FFI.
-- [ ] **Step 3: port rules** — verdict types, rule set, ranking (fail closed to `Unknown`), OOM/CHECK rules consuming `V8HeapExt`.
-- [ ] **Step 4: `Spec/CrashCause.lean`** — mechanize the CrashCause.tla verdict invariant; prove ranking totality (every input yields exactly one verdict).
-- [ ] **Step 5: parity** — `analyze --json` full-pipeline diff on all dumps (verdict lines included in `inspect` parity).
+- [x] **Step 1 (gate): disasm strategy** — try pure-Lean window decode first: `cause` needs only `InstrKind` classification (253 lines of Rust wrapping iced-x86). If the needed opcode subset is small (call/jmp/mov/ret/nop/int3 — audit disasm.rs usage), implement directly in Lean and skip FFI entirely. **Only if** the subset explodes: build the Rust staticlib shim (`extern "C"` over byte buffers). Record the decision in the task commit.
+- [x] **Step 2: port** `v8obj`/`v8layout` (cage-aware walking; version-pinned offsets) — pure Lean, no FFI.
+- [x] **Step 3: port rules** — verdict types, rule set, ranking (fail closed to `Unknown`), OOM/CHECK rules consuming `V8HeapExt`.
+- [x] **Step 4: `Spec/CrashCause.lean`** — mechanize the CrashCause.tla verdict invariant; prove ranking totality (every input yields exactly one verdict).
+- [x] **Step 5: parity** — `analyze --json` full-pipeline diff on all dumps (verdict lines included in `inspect` parity).
 
 ---
 
@@ -269,8 +269,8 @@ First fixture: `Case/ttfx/minimal.ttfx` — zero anomalies, JSON equal.
 - Create: `Forensicator/Analyzer/V8.lean`
 - Reference: `analyzer/v8.rs` (1327 ln)
 
-- [ ] **Step 1: port** JS stack recovery using Task 8's `V8Obj`/`V8Layout`/`Disasm` — behavior-identical to the Rust refactor (shares, never duplicates).
-- [ ] **Step 2: parity** — full `analyze --json` on `minidump`/`minidump_v2` (the Electron dumps with V8HE streams are the discriminating fixtures).
+- [x] **Step 1: port** JS stack recovery using Task 8's `V8Obj`/`V8Layout`/`Disasm` — behavior-identical to the Rust refactor (shares, never duplicates).
+- [x] **Step 2: parity** — full `analyze --json` on `minidump`/`minidump_v2` (the Electron dumps with V8HE streams are the discriminating fixtures).
 
 ---
 
@@ -279,16 +279,22 @@ First fixture: `Case/ttfx/minimal.ttfx` — zero anomalies, JSON equal.
 **Files:**
 - Modify: `Main.lean`; Create: `Forensicator/Util/{Symbolizer,Image}.lean`, `Forensicator/Pipeline.lean`
 
-- [ ] **Step 1: full flags** — `inspect/analyze/trace/list-plugins` flag-for-flag (`--json --quiet --plugin --symbols --pos --writes`); help text parity.
-- [ ] **Step 2: `Pipeline.lean`** — `Forensicator` state machine mirroring Forensicator.tla (`open → analyze → runFull`); state-transition legality as a proved inductive (replaces `mbt_forensicator.rs`).
-- [ ] **Step 3: `match`** — `Symbolizer`/`Image` Lean interfaces + Rust shim over C ABI (PDB stays outside Lean, design §FFI). `--exe/--pdb` parity on `Case/minidump` (has exe+PDB).
-- [ ] **Step 4: `shell`** — REPL on `IO` (inspect/analyze/match/load/symbols/seek/t+/t-/writes/intervals/quit); smoke-tested by piping a command script, diffing against Rust `shell` output on the same script.
+- [x] **Step 1: full flags** — `inspect/analyze/trace/list-plugins` flag-for-flag (`--json --quiet --plugin --symbols --pos --writes`); help text parity.
+- [x] **Step 2: `Pipeline.lean`** — `Forensicator` state machine mirroring Forensicator.tla (`open → analyze → runFull`); state-transition legality as a proved inductive (replaces `mbt_forensicator.rs`).
+- [x] **Step 3: `match`** — `Symbolizer`/`Image` Lean interfaces + Rust shim over C ABI (PDB stays outside Lean, design §FFI). `--exe/--pdb` parity on `Case/minidump` (has exe+PDB).
+- [x] **Step 4: `shell`** — REPL on `IO` (inspect/analyze/match/load/symbols/seek/t+/t-/writes/intervals/quit); smoke-tested by piping a command script, diffing against Rust `shell` output on the same script.
 
 ---
 
 ### Task 11: Final gate + handover
 
-- [ ] **Step 1:** `scripts/conformance-lean.sh` covers: 3 dumps × (inspect, analyze, match) + minimal.ttfx × (trace, trace --pos, trace --writes) + anomaly-parity corpus (truncated/mutated fixtures). Zero diffs.
-- [ ] **Step 2:** proof audit — `grep -rn "sorry\|admit\|partial\|panic!" Forensicator/ ` empty; `lake build` has no `declaration uses 'sorry'` warnings.
-- [ ] **Step 3:** timing record — decode+analyze wall times for both implementations on `fulldump`, noted in the commit (parity not required, regression visibility is).
+> **Status 2026-08-10: COMPLETE.** 44-check conformance gate green
+> (inspect/analyze/match/trace/shell, 3 dumps + minimal.ttfx). Known
+> accepted divergences: fulldump `arrays` is quadratic in BOTH
+> implementations (excluded); the v8 analyzer's debug-overflow panic is
+> reproduced; fast-path index (FastSpace) is gate-validated, not proved.
+
+- [x] **Step 1:** `scripts/conformance-lean.sh` covers: 3 dumps × (inspect, analyze, match) + minimal.ttfx × (trace, trace --pos, trace --writes) + anomaly-parity corpus (truncated/mutated fixtures). Zero diffs.
+- [x] **Step 2:** proof audit — `grep -rn "sorry\|admit\|partial\|panic!" Forensicator/ ` empty; `lake build` has no `declaration uses 'sorry'` warnings.
+- [x] **Step 3:** timing record — decode+analyze wall times for both implementations on `fulldump`, noted in the commit (parity not required, regression visibility is).
 - [ ] **Step 4:** update `~/Repos/Forensicator/AGENTS.md` — add a "Lean port" section pointing at the new repo and its gate; MBT tests stay documented as Rust-side (their role is absorbed by `Spec/` theorems).

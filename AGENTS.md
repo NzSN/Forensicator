@@ -62,7 +62,16 @@ forensicator trace <trace.ttfx>        # trace summary + queries (--pos, --write
 
 MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`, `mbt_crash_cause.rs` (spec-only stub), `mbt_timeline.rs` (spec-only stub), `mbt_snapshot.rs`. Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
 
-## Custom minidump streams
+## Lean 4 port
+
+A full Lean 4 (v4.33.0) port lives at `~/Repos/Forensicator_Lean` (GitHub: `NzSN/Forensicator_Lean`, branch `main`). Design: `docs/superpowers/specs/2026-08-10-lean4-migration-design.md`; plan: `docs/superpowers/plans/2026-08-10-lean4-migration.md` (all tasks complete). Highlights:
+
+- TLA+ specs mechanized as Lean theorems about the *shipping* functions: `pack_unpack`, `addRegion_preserves`, `regionAt_unique`, `valueAt_agrees_with_fold`, `snapshot_isSome`, `decodeTtfx_writes_ordered`/`decodeTtfx_events_ordered`, `buildAddressSpace_wellFormed`. No `sorry`/`partial`/`panic!` in the library.
+- Zero Lean deps (no mathlib/batteries). Build: `export PATH="$HOME/.elan/bin:$PATH" && lake build`.
+- Golden-oracle gate: `scripts/conformance-lean.sh` (44 checks: 3 dumps × inspect/analyze/match + minimal.ttfx + shell scripts; byte-exact text, JSON key-sorted).
+- Deliberate divergences, all documented in-file: Nat-lifted address arithmetic (kills Rust's u64-wrap edges); `arrays` on fulldump is quadratic in both implementations; the Rust debug overflow panic in `find_ept_base` (v8.rs:539) is *reproduced* on fulldump; disasm is a native x86-64 subset covering the cause-rule forms (no iced-x86 FFI); the PDB symbolizer is replaced by a minimal MSF-7 reader for `match`.
+
+MBT tests (`mbt_*.rs`) stay Rust-side; their role is absorbed by the Lean `Spec/` theorems.
 
 **V8HE** (stream type `0x45483856`, emitted by the instrumented handler): cage base + isolate VA + captured V8 heap regions, ingested as ordinary memory ranges. Version 2 adds a 32-byte extension after the header — allocation top/limit, `gc_state`, `last_gc_reason`, and a fatal-message string — decoded into `Dump.v8heap_ext` and consumed by the `cause` analyzer's OOM/CHECK rules.
 
