@@ -34,6 +34,21 @@ def EventsOrdered : List TraceEvent → Prop
   | [_] => True
   | e1 :: e2 :: rest => e1.pos ≤ e2.pos ∧ EventsOrdered (e2 :: rest)
 
+theorem EventsOrdered.append_singleton {xs : List TraceEvent} {e : TraceEvent}
+    (hxs : EventsOrdered xs) (hlast : ∀ l, xs.getLast? = some l → l.pos ≤ e.pos) :
+    EventsOrdered (xs ++ [e]) := by
+  induction xs with
+  | nil => exact True.intro
+  | cons x xs ih =>
+    cases xs with
+    | nil =>
+      exact ⟨hlast x rfl, True.intro⟩
+    | cons y ys =>
+      have h1 : x.pos ≤ y.pos := hxs.1
+      have h2 : EventsOrdered ((y :: ys) ++ [e]) :=
+        ih hxs.2 (fun l hl => hlast l (by simpa using hl))
+      exact ⟨h1, h2⟩
+
 /-- Open intervals only at the frontier (Timeline.tla): an open thread
     interval covers every position up to the record head. -/
 def OpenIntervalsAtFrontier (tr : Trace) : Prop :=

@@ -335,15 +335,13 @@ def encodeTtfx (tr : Trace) : ByteArray := Id.run do
 
 
 /- ====================================================================
-   Decode postconditions (Timeline.tla TraceOrdered, writes half):
-   an anomaly-free decode yields position-ordered writes.
-   The events half (EventsOrdered) is the same construction via
-   decodeEvent's order check — follow-up, tracked in the migration plan.
+   Decode postconditions (Timeline.tla TraceOrdered): an anomaly-free
+   decode yields position-ordered writes AND events.
    ==================================================================== -/
 
 section Proofs
 
-open Forensicator.Spec (PositionOrdered)
+open Forensicator.Spec (PositionOrdered EventsOrdered)
 
 theorem decodeEvent_anomalies (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat) :
     ∃ e, (decodeEvent data frontier tr off).anomalies = tr.anomalies ++ e := by
@@ -562,6 +560,155 @@ theorem sectionLoop_writes_ordered (data : ByteArray) (frontier : Position)
       exact ih _ _
         (decodeSection_writes_ordered data frontier tr kind _ _ _ hord hsec hano10) hano hsec
 
+theorem decodeRecord_events_frame (data : ByteArray) (frontier : Position) (tr : Trace)
+    (kind : UInt32) (off : Nat) (h : kind ≠ SEC_EVENTS) :
+    (decodeRecord data frontier tr kind off).events = tr.events := by
+  have hns : (kind == SEC_EVENTS) = false := by
+    cases hkb : kind == SEC_EVENTS with
+    | false => rfl
+    | true => exact absurd (beq_iff_eq.1 hkb) h
+  unfold decodeRecord
+  by_cases h1 : (kind == SEC_INITMEM) = true
+  · simp only [h1, if_true]; rfl
+  · by_cases h2 : (kind == SEC_WRITES) = true
+    · simp only [h1, h2, hns, if_true]; rfl
+    · by_cases h4 : (kind == SEC_THREADS) = true
+      · simp only [h1, h2, hns, h4, if_true]; rfl
+      · simp only [h1, h2, hns, h4]; rfl
+
+theorem decodeRecord_eq_decodeEvent (data : ByteArray) (frontier : Position) (tr : Trace)
+    (off : Nat) :
+    decodeRecord data frontier tr SEC_EVENTS off = decodeEvent data frontier tr off := by
+  unfold decodeRecord
+  simp [SEC_EVENTS, SEC_INITMEM, SEC_WRITES]
+
+/-- Content of the event-order check: no anomalies ⇒ previous last event's
+    position ≤ the new event's position. -/
+theorem decodeEvent_last_le (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat)
+    (hano : (decodeEvent data frontier tr off).anomalies = [])
+    (l : TraceEvent) (hl : tr.events.getLast? = some l) :
+    l.pos ≤ (u64At data off).getD 0 := by
+  unfold decodeEvent at hano
+  dsimp only at hano
+  split at hano
+  · simp only [List.append_eq_nil_iff] at hano
+    obtain ⟨-, ha1, -⟩ := hano
+    simp only [hl] at ha1
+    by_cases hp : ((u64At data off).getD 0) < l.pos
+    · simp [hp] at ha1
+    · have hp' : ¬ ((u64At data off).getD 0).toNat < l.pos.toNat := hp
+      have hle : l.pos.toNat ≤ ((u64At data off).getD 0).toNat := by omega
+      exact hle
+  · simp at hano
+
+theorem decodeEvent_ordered (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat)
+    (hord : EventsOrdered tr.events)
+    (hano : (decodeEvent data frontier tr off).anomalies = []) :
+    EventsOrdered (decodeEvent data frontier tr off).events := by
+  unfold decodeEvent
+  dsimp only
+  split
+  · apply EventsOrdered.append_singleton hord
+    intro l hl
+    exact decodeEvent_last_le data frontier tr off hano l hl
+  · exact hord
+
+theorem sectionRecordLoop_events_frame (data : ByteArray) (frontier : Position) (kind : UInt32)
+    (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat) (h : kind ≠ SEC_EVENTS) :
+    (sectionRecordLoop data frontier kind body recordSize recordCnt tr i).events
+      = tr.events := by
+  fun_induction sectionRecordLoop data frontier kind body recordSize recordCnt tr i
+  · rfl
+  · rename_i tr i hlt off hfit ih
+    rw [ih]
+    exact decodeRecord_events_frame data frontier tr kind off h
+  · rfl
+
+theorem sectionRecordLoop_events_ordered (data : ByteArray) (frontier : Position)
+    (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat)
+    (hord : EventsOrdered tr.events)
+    (hano : (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt tr i).anomalies = [])
+    (hano0 : tr.anomalies = []) :
+    EventsOrdered
+      (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt tr i).events := by
+  fun_induction sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt tr i
+  · rename_i tr i hlt htr
+    rw [hano0] at hano
+    simp at hano
+  · rename_i tr i hlt off hfit ih
+    have hano' := hano
+    obtain ⟨e1, h1⟩ := decodeRecord_anomalies data frontier tr SEC_EVENTS off
+    obtain ⟨e2, h2⟩ := sectionRecordLoop_anomalies_mono data frontier SEC_EVENTS
+      body recordSize recordCnt (decodeRecord data frontier tr SEC_EVENTS off) (i + 1)
+    rw [h2, h1] at hano'
+    simp only [List.append_eq_nil_iff] at hano'
+    obtain ⟨⟨hano10, hano11⟩, -⟩ := hano'
+    have hstep0 : (decodeRecord data frontier tr SEC_EVENTS off).anomalies = [] := by
+      rw [h1, hano10, hano11]; rfl
+    have hstep : (decodeEvent data frontier tr off).anomalies = [] := by
+      rw [← decodeRecord_eq_decodeEvent data frontier tr off, h1, hano10, hano11]; rfl
+    exact ih ((decodeRecord_eq_decodeEvent data frontier tr off).symm ▸
+      decodeEvent_ordered data frontier tr off hord hstep) hano hstep0
+  · exact hord
+
+theorem decodeSection_events_ordered (data : ByteArray) (frontier : Position) (tr : Trace)
+    (kind : UInt32) (body recordSize recordCnt : Nat)
+    (hord : EventsOrdered tr.events)
+    (hano : (decodeSection data frontier tr kind body recordSize recordCnt).anomalies = [])
+    (hano0 : tr.anomalies = []) :
+    EventsOrdered (decodeSection data frontier tr kind body recordSize recordCnt).events := by
+  unfold decodeSection at hano ⊢
+  cases hw : wantSize kind with
+  | none =>
+    simp only [hw] at hano ⊢
+    exact hord
+  | some want =>
+    simp only [hw] at hano ⊢
+    by_cases hsz : (recordSize != want) = true
+    · simp only [hsz, if_true] at hano
+      simp at hano
+    · simp only [hsz, Bool.false_eq_true, if_false] at hano ⊢
+      by_cases hk : kind == SEC_EVENTS
+      · rw [beq_iff_eq] at hk; subst hk
+        exact sectionRecordLoop_events_ordered data frontier body recordSize recordCnt tr 0
+          hord hano hano0
+      · have hk' : kind ≠ SEC_EVENTS := fun heq => hk (beq_iff_eq.2 heq)
+        rw [sectionRecordLoop_events_frame data frontier kind body recordSize recordCnt tr 0 hk']
+        exact hord
+
+theorem sectionLoop_events_ordered (data : ByteArray) (frontier : Position)
+    (remaining : Nat) (off : Nat) (tr : Trace)
+    (hord : EventsOrdered tr.events)
+    (hano : (sectionLoop data frontier remaining off tr).anomalies = [])
+    (hano0 : tr.anomalies = []) :
+    EventsOrdered (sectionLoop data frontier remaining off tr).events := by
+  induction remaining generalizing tr off with
+  | zero => exact hord
+  | succ n ih =>
+    simp only [sectionLoop] at hano ⊢
+    cases hm : u32At data off with
+    | none =>
+      simp only [hm] at hano
+      simp at hano
+    | some kind =>
+      simp only [hm] at hano ⊢
+      obtain ⟨e1, h1⟩ := decodeSection_anomalies data frontier tr kind (off + SECTION_HDR_SIZE)
+        (((u32At data (off + 4)).getD 0).toNat) (((u64At data (off + 8)).getD 0).toNat)
+      obtain ⟨e2, h2⟩ := sectionLoop_anomalies_mono data frontier n (off + SECTION_HDR_SIZE
+        + ((u32At data (off + 4)).getD 0).toNat * ((u64At data (off + 8)).getD 0).toNat)
+        (decodeSection data frontier tr kind (off + SECTION_HDR_SIZE)
+          (((u32At data (off + 4)).getD 0).toNat) (((u64At data (off + 8)).getD 0).toNat))
+      have hano' := hano
+      rw [h2, h1] at hano'
+      simp only [List.append_eq_nil_iff] at hano'
+      obtain ⟨⟨hano10, hano11⟩, -⟩ := hano'
+      have hsec : (decodeSection data frontier tr kind (off + SECTION_HDR_SIZE)
+          (((u32At data (off + 4)).getD 0).toNat) (((u64At data (off + 8)).getD 0).toNat)).anomalies
+          = [] := by
+        rw [h1, hano10, hano11]; rfl
+      exact ih _ _
+        (decodeSection_events_ordered data frontier tr kind _ _ _ hord hsec hano10) hano hsec
+
 private theorem foldl_writes (f : Trace → α → Trace) (hf : ∀ tr x, (f tr x).writes = tr.writes)
     (xs : List α) (init : Trace) : (xs.foldl f init).writes = init.writes := by
   induction xs generalizing init with
@@ -657,6 +804,61 @@ theorem decodeTtfx_writes_ordered {data : ByteArray} {tr : Trace}
         rw [he] at hano
         rw [List.append_eq_nil_iff] at hano
         exact sectionLoop_writes_ordered _ _ _ _ _ trivial hano.1 rfl
+
+private theorem foldl_events (f : Trace → α → Trace) (hf : ∀ tr x, (f tr x).events = tr.events)
+    (xs : List α) (init : Trace) : (xs.foldl f init).events = init.events := by
+  induction xs generalizing init with
+  | nil => rfl
+  | cons x xs ih => rw [List.foldl_cons, ih (f init x), hf]
+
+theorem threadCheck_events (tr : Trace) (c : CallSpan) :
+    (threadCheck tr c).events = tr.events := by
+  unfold threadCheck
+  split
+  · rfl
+  · split <;> rfl
+
+theorem crossingStep_events (tr : Trace) (c : CallSpan) (i : Nat) (o : CallSpan) (j : Nat) :
+    (crossingStep tr c i o j).events = tr.events := by
+  unfold crossingStep
+  split
+  · rfl
+  · split <;> rfl
+
+theorem crossingCheck_events (calls : List CallSpan) (tr : Trace) (c : CallSpan) (i : Nat) :
+    (crossingCheck calls tr c i).events = tr.events := by
+  unfold crossingCheck
+  apply foldl_events
+  intro tr0 ⟨o, j⟩
+  exact crossingStep_events tr0 c i o j
+
+theorem validateIntervals_events (tr : Trace) :
+    (validateIntervals tr).events = tr.events := by
+  unfold validateIntervals
+  apply foldl_events
+  intro tr0 ⟨c, i⟩
+  rw [crossingCheck_events, threadCheck_events]
+
+/-- Decode postcondition (Timeline.tla TraceOrdered, events half): an
+    anomaly-free decode yields position-ordered events. -/
+theorem decodeTtfx_events_ordered {data : ByteArray} {tr : Trace}
+    (h : decodeTtfx data = .ok tr) (hano : tr.anomalies = []) :
+    EventsOrdered tr.events := by
+  unfold decodeTtfx at h
+  split at h
+  · nomatch h
+  · split at h
+    · nomatch h
+    · try dsimp only at h
+      split at h
+      · nomatch h
+      · try dsimp only at h
+        cases h
+        rw [validateIntervals_events]
+        obtain ⟨e, he⟩ := validateIntervals_anomalies _
+        rw [he] at hano
+        rw [List.append_eq_nil_iff] at hano
+        exact sectionLoop_events_ordered _ _ _ _ _ trivial hano.1 rfl
 
 end Proofs
 
