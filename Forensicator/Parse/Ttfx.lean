@@ -337,6 +337,8 @@ def encodeTtfx (tr : Trace) : ByteArray := Id.run do
 /- ====================================================================
    Decode postconditions (Timeline.tla TraceOrdered, writes half):
    an anomaly-free decode yields position-ordered writes.
+   The events half (EventsOrdered) is the same construction via
+   decodeEvent's order check — follow-up, tracked in the migration plan.
    ==================================================================== -/
 
 section Proofs

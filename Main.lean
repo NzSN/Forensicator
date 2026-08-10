@@ -44,20 +44,22 @@ private def cmdTrace (path : String) (posArg : Option String) (writesArg : List 
   match decodeTtfx data with
   | .error a => IO.eprintln a.description; pure 1
   | .ok tr =>
-    let pos ← match posArg with
+    let pos? ← match posArg with
       | some p =>
         match parseU64 p with
-        | .ok v => pure v
-        | .error e => IO.eprintln e; throw (IO.Error.userError e)
-      | none => pure tr.frontier
-    let writes ←
+        | .ok v => pure (some v)
+        | .error e => IO.eprintln e; pure none
+      | none => pure (some tr.frontier)
+    let some pos := pos? | return 1
+    let writes? ←
       match writesArg with
       | [a, b] =>
         match parseU64 a, parseU64 b with
-        | .ok va, .ok len => pure (some (va, len))
-        | .error e, _ | _, .error e => IO.eprintln e; throw (IO.Error.userError e)
-      | [] => pure none
-      | _ => pure none  -- json: silently None; text: handled below
+        | .ok va, .ok len => pure (some (some (va, len)))
+        | .error e, _ | _, .error e => IO.eprintln e; pure none
+      | [] => pure (some none)
+      | _ => pure (some none)  -- json: silently None; text: handled below
+    let some writes := writes? | return 1
     if json then
       IO.println (Json.render (traceJson tr pos writes))
       return 0
@@ -82,7 +84,7 @@ private def cmdTrace (path : String) (posArg : Option String) (writesArg : List 
           | none => ""
         IO.println s!"  @{hexUpper w.pos}  [{hexUpper w.va}, {hexUpper (UInt64.ofNat (min w.endVaNat (2^64-1)))})  {byteDebug w.data}{marker}"
     | [] => pure ()
-    | _ => IO.eprintln "--writes takes exactly two values: <va> <len>"; throw (IO.Error.userError "writes arity")
+    | _ => IO.eprintln "--writes takes exactly two values: <va> <len>"; return 1
     if pos != tr.frontier || writesArg.isEmpty then
       match tr.snapshot pos with
       | none =>
