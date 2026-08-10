@@ -125,6 +125,18 @@ private def moduleJson (m : Module) : Json :=
           | some g => .str (codeviewUuid g) | none => .null),
         ("pdb_name", match m.pdbName with | some p => .str p | none => .null)]
 
+private def diagnosisJson (d : Dump) : Json :=
+  match d.exception with
+  | none => .null
+  | some _ =>
+    let space := buildAddressSpace d
+    let dg := Analyzer.Cause.diagnose d space
+    .obj [("verdict", .str dg.verdict.debug),
+          ("confidence", .str dg.confidence.debug),
+          ("evidence", .arr (dg.evidence.map .str)),
+          ("fault_va", match dg.faultVa with | some v => .str (hexUpper v) | none => .null),
+          ("fatal_message", match dg.fatalMessage with | some m => .str m | none => .null)]
+
 private def inspectJson (d : Dump) : Json :=
   .obj [
     ("file_size", .ofUInt64 d.fileSize),
@@ -137,7 +149,7 @@ private def inspectJson (d : Dump) : Json :=
     ("thread_count", .ofNat d.threads.length),
     ("memory_regions", .ofNat d.memoryRegions.length),
     ("exception", .bool d.exception.isSome),
-    ("diagnosis", .null),  -- cause analyzer lands in Task 8; gate strips this key
+    ("diagnosis", diagnosisJson d),
     ("anomaly_count", .ofNat d.anomalies.length),
     ("annotation_count", .ofNat d.annotations.length),
     ("annotations", .arr (d.annotations.map fun (k, v) => .obj [(k, .str v)]))]
@@ -162,7 +174,11 @@ private def inspectText (d : Dump) : IO Unit := do
   IO.println s!"├── Memory regions: {d.memoryRegions.length}"
   if let some exc := d.exception then
     IO.println s!"├── Exception: code 0x{hexPadUpper exc.code.toUInt64 8} at 0x{hexPadUpper exc.address 16} (thread {exc.threadId})"
-    -- Diagnosis line deferred to Task 8 (cause analyzer port)
+    let dg := Analyzer.Cause.diagnose d (buildAddressSpace d)
+    let detail := match dg.fatalMessage with
+      | some m => m
+      | none => dg.evidence.head? |>.getD ""
+    IO.println s!"├── Diagnosis: {dg.verdict.debug} ({dg.confidence.debug}){if detail.isEmpty then "" else " — " ++ detail}"
   if !d.anomalies.isEmpty then
     IO.println s!"├── Anomalies: {d.anomalies.length}"
     for a in d.anomalies do

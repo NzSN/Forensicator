@@ -77,14 +77,14 @@ if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
 
 # minidump fixtures (Task 5): --quiet is byte-exact; --json compares with the
 # diagnosis key stripped until the cause analyzer lands (Task 8)
-njstrip() { python3 -c 'import json,sys; d=json.load(sys.stdin); d.pop("diagnosis", None); print(json.dumps(d, sort_keys=True))'; }
+njstrip() { python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))'; }
 for d in "$CASES"/minidump "$CASES"/minidump_v2 "$CASES"/fulldump; do
   f=$(ls "$d"/*.dmp)
   check "inspect quiet $(basename $d)" inspect "$f" --quiet
   r_json="$("$RUST_BIN" inspect "$f" --json | njstrip)"
   l_json="$("$LEAN_BIN" inspect "$f" --json | njstrip)"
   if [ "$r_json" = "$l_json" ]; then
-    echo "ok   inspect json $(basename $d) (sans diagnosis)"
+    echo "ok   inspect json $(basename $d)"
   else
     echo "FAIL inspect json $(basename $d)"; fail=1
   fi
@@ -114,12 +114,12 @@ analyze_check() { # name, dump, plugin
 
 for d in minidump minidump_v2; do
   f=$(ls "$CASES/$d"/*.dmp)
-  for plug in strings vtables lists arrays chunks shapes; do
+  for plug in cause strings vtables lists arrays chunks shapes; do
     analyze_check "$(basename $d)" "$f" "$plug"
   done
 done
 f=$(ls "$CASES"/fulldump/*.dmp)
-for plug in strings vtables lists chunks shapes; do
+for plug in cause strings vtables lists chunks shapes; do
   analyze_check "fulldump" "$f" "$plug"
 done
 check "list-plugins" list-plugins

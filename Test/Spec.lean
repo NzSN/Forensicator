@@ -354,6 +354,35 @@ def runAll : IO UInt32 := do
              r.vaStart == cageBase + 0x10000000
               && r.data == ByteArray.mk (Array.replicate 8 0xBB)) == some true)
 
+  -- disasm (port of disasm.rs tests + the fulldump crash instruction)
+  let disasmSpace (code : List UInt8) : Forensicator.Spec.FastSpace :=
+    let sp : Forensicator.Spec.AddressSpace := .new 2
+    let region : Forensicator.Spec.AddressRegion :=
+      { vaStart := 0x1000, size := UInt64.ofNat code.length
+        data := ba code, protection := 5, state := .Commit
+        classification := .Image }
+    let sp := match sp.addRegion region with
+      | .ok s => s | .error _ => sp
+    Forensicator.Spec.FastSpace.ofSpace sp
+  let decode1 (code : List UInt8) : Option Util.Instruction := Util.decodeFirst (disasmSpace code) 0x1000
+  check ctx "disasm int3" ((decode1 [0xCC, 0x90]).map (·.kind) == some .int3)
+  check ctx "disasm ud2" ((decode1 [0x0F, 0x0B]).map (·.kind) == some .ud2)
+  check ctx "disasm mem read with disp"
+    ((decode1 [0x48, 0x8B, 0x41, 0x1B]).map (·.kind) == some (Util.InstrKind.memRead (some 2) 0x1B))
+  check ctx "disasm mem write"
+    ((decode1 [0x48, 0x89, 0x42, 0x10]).map (·.kind) == some (Util.InstrKind.memWrite (some 3) 0x10))
+  check ctx "disasm cmp op0 mem is read"
+    (match (decode1 [0x48, 0x39, 0x01]).map (·.kind) with
+     | some (Util.InstrKind.memRead _ _) => true | _ => false)
+  check ctx "disasm call register indirect"
+    ((decode1 [0xFF, 0xD0]).map (·.kind) == some .indirectCall)
+  check ctx "disasm rip-relative has absolute disp"
+    ((decode1 [0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00]).map (·.kind)
+      == some (Util.InstrKind.memRead none 0x1017))
+  check ctx "disasm fulldump crash instruction text"
+    ((decode1 [0x80, 0x7E, 0x08, 0x00]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memRead (some 4) 8), "cmp byte ptr [rsi+8],0"))
+
   let n ← ctx.failures.get
   IO.println (if n == 0 then "== ALL GUARDS PASSED ==" else s!"== {n} FAILURE(S) ==")
   pure n.toUInt32

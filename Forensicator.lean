@@ -14,6 +14,7 @@ import Forensicator.Parse.Ttfx
 import Forensicator.Parse.Minidump
 import Forensicator.Pipeline
 import Forensicator.Analyzer.Registry
+import Forensicator.Util.Disasm
 
 namespace Forensicator
 end Forensicator

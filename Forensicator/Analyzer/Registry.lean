@@ -8,14 +8,10 @@ import Forensicator.Analyzer.Lists
 import Forensicator.Analyzer.Arrays
 import Forensicator.Analyzer.Chunks
 import Forensicator.Analyzer.Shapes
+import Forensicator.Analyzer.Cause
 
 namespace Forensicator
 
-/-- Stub until Task 8 (CrashCauseAnalyzer port). -/
-def causeAnalyzer : Analyzer where
-  name := "cause"
-  description := "Diagnoses why the process crashed: exception semantics, disassembly, cage fault analysis"
-  run _ _ := AnalyzerOutput.new "cause"
 
 /-- Stub until Task 9 (V8Analyzer port). -/
 def v8Analyzer : Analyzer where
@@ -25,7 +21,7 @@ def v8Analyzer : Analyzer where
 
 /-- The default analyzer set, in registration order (analyzer.rs:102). -/
 def defaultPipeline : List Analyzer :=
-  [causeAnalyzer, Analyzer.Strings.analyzer, Analyzer.Vtables.analyzer, Analyzer.Lists.analyzer,
+  [Analyzer.Cause.analyzer, Analyzer.Strings.analyzer, Analyzer.Vtables.analyzer, Analyzer.Lists.analyzer,
    Analyzer.Arrays.analyzer, Analyzer.Chunks.analyzer, Analyzer.Shapes.analyzer, v8Analyzer]
 
 end Forensicator
