@@ -97,14 +97,6 @@ def readU64le : ParseM UInt64 := do
     pure v
   else throw (truncated c.pos 8)
 
-/-- Run a parser at an absolute offset, restoring the cursor afterwards. -/
-def atOffset (off : Nat) (p : ParseM α) : ParseM α := do
-  let saved := (← get).pos
-  seek off
-  let a ← p
-  modify fun c => { c with pos := saved }
-  pure a
-
 /-- Lift a whole-buffer parse. -/
 def run (bytes : ByteArray) (p : ParseM α) : Except Anomaly α :=
   (ExceptT.run p ⟨bytes, 0⟩).1

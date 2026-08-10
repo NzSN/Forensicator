@@ -34,6 +34,30 @@ def ba (xs : List UInt8) : ByteArray := ByteArray.mk xs.toArray
 
 def beqBytes (a b : ByteArray) : Bool := a.data == b.data
 
+def tprov : Provenance := { streamType := Model.TTFX_STREAM_TYPE }
+
+def tregion (va : UInt64) (b : UInt8) (n : Nat) : Model.MemoryRegionInfo :=
+  { vaStart := va, size := UInt64.ofNat n, data := ByteArray.mk (Array.replicate n b),
+    protection := 3, state := .Commit, memType := .Private,
+    provenance := tprov, regionClass := some .Private }
+
+/-- The minimal trace (port of the Rust `minimal_trace()` fixture). -/
+def minimalTraceFixture : Model.Trace := {
+  initMem := [tregion 0x1000 0xAA 16, tregion 0x2000 0xBB 16]
+  writes := [
+    { pos := 1, va := 0x1004, data := ba [0x11, 0x22], provenance := tprov },
+    { pos := 2, va := 0x1004, data := ba [0x33], provenance := tprov }]
+  events := [
+    { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "app.exe", size := 0x1000,
+      provenance := tprov },
+    { pos := 2, kind := .Exception, code := 0xC0000005, address := 0x1004, threadId := 7,
+      provenance := tprov }]
+  threads := [(7, { start := 0, stop := none })]
+  calls := [
+    { threadId := 7, interval := { start := 0, stop := some 2 } },
+    { threadId := 7, interval := { start := 0, stop := some 1 } }]
+  frontier := 2 }
+
 def runAll : IO UInt32 := do
   let ctx : Ctx := ⟨← IO.mkRef 0⟩
 
@@ -206,26 +230,7 @@ def runAll : IO UInt32 := do
       && tr.threadAt 8 2 == none)
 
   -- .ttfx decoder (port of parse/ttfx.rs tests; encoder used to build fixtures)
-  let tprov : Provenance := { streamType := Model.TTFX_STREAM_TYPE }
-  let tregion (va : UInt64) (b : UInt8) (n : Nat) : Model.MemoryRegionInfo :=
-    { vaStart := va, size := UInt64.ofNat n, data := ByteArray.mk (Array.replicate n b),
-      protection := 3, state := .Commit, memType := .Private,
-      provenance := tprov, regionClass := some .Private }
-  let minimalTrace : Model.Trace := {
-    initMem := [tregion 0x1000 0xAA 16, tregion 0x2000 0xBB 16]
-    writes := [
-      { pos := 1, va := 0x1004, data := ba [0x11, 0x22], provenance := tprov },
-      { pos := 2, va := 0x1004, data := ba [0x33], provenance := tprov }]
-    events := [
-      { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "app.exe", size := 0x1000,
-        provenance := tprov },
-      { pos := 2, kind := .Exception, code := 0xC0000005, address := 0x1004, threadId := 7,
-        provenance := tprov }]
-    threads := [(7, { start := 0, stop := none })]
-    calls := [
-      { threadId := 7, interval := { start := 0, stop := some 2 } },
-      { threadId := 7, interval := { start := 0, stop := some 1 } }]
-    frontier := 2 }
+  let minimalTrace := minimalTraceFixture
   let minimalBytes := encodeTtfx minimalTrace
   check ctx "ttfx round trip"
     (match decodeTtfx minimalBytes with
@@ -302,5 +307,14 @@ def runAll : IO UInt32 := do
   let n ← ctx.failures.get
   IO.println (if n == 0 then "== ALL GUARDS PASSED ==" else s!"== {n} FAILURE(S) ==")
   pure n.toUInt32
+
+/-- The minimal trace as encoded bytes (used by conformance to validate the
+    Lean encoder against the Rust decoder). -/
+def minimalTraceBytes : ByteArray := encodeTtfx minimalTraceFixture
+
+/-- Write the encoded minimal trace. -/
+def emitMinimal (path : String) : IO UInt32 := do
+  IO.FS.writeBinFile path minimalTraceBytes
+  pure 0
 
 end Test.Spec

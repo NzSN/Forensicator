@@ -1,3 +1,6 @@
 import Test.Spec
 
-def main : IO UInt32 := Test.Spec.runAll
+def main (args : List String) : IO UInt32 := do
+  match args with
+  | ["--emit", path] => Test.Spec.emitMinimal path
+  | _ => Test.Spec.runAll

@@ -61,5 +61,17 @@ check "trace minimal --writes json" trace "$T" --writes 0x1004 2 --json
 ANOM="$("$LEAN_BIN" trace "$T" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["anomalies"]))')"
 if [ "$ANOM" != "0" ]; then echo "FAIL: lean reported $ANOM anomalies on minimal.ttfx"; fail=1; fi
 
+# encoder cross-check: Lean-encoded fixture must decode cleanly under the Rust oracle
+EMIT="$(mktemp -d)/lean-minimal.ttfx"
+"$LEAN_REPO/.lake/build/bin/forensicator-test" --emit "$EMIT" || { echo "FAIL: emit"; exit 1; }
+r_orig="$("$RUST_BIN" trace "$T" --json)"
+r_emit="$("$RUST_BIN" trace "$EMIT" --json)"
+nj() { python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))'; }
+if [ "$(printf '%s' "$r_orig" | nj)" = "$(printf '%s' "$r_emit" | nj)" ]; then
+  echo "ok   encoder cross-check (rust decodes lean-encoded bytes identically)"
+else
+  echo "FAIL: rust decode of lean-encoded fixture differs"; fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
 echo "== CONFORMANCE PASS =="
