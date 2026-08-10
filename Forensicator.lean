@@ -4,6 +4,8 @@
 import Forensicator.Basic
 import Forensicator.Parse.Cursor
 import Forensicator.Util.Json
+import Forensicator.Model.Types
+import Forensicator.Spec.AddressSpace
 
 namespace Forensicator
 end Forensicator
