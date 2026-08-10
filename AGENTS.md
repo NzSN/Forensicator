@@ -73,6 +73,8 @@ A full Lean 4 (v4.33.0) port lives at `~/Repos/Forensicator_Lean` (GitHub: `NzSN
 
 MBT tests (`mbt_*.rs`) stay Rust-side; their role is absorbed by the Lean `Spec/` theorems.
 
+## Custom minidump streams
+
 **V8HE** (stream type `0x45483856`, emitted by the instrumented handler): cage base + isolate VA + captured V8 heap regions, ingested as ordinary memory ranges. Version 2 adds a 32-byte extension after the header — allocation top/limit, `gc_state`, `last_gc_reason`, and a fatal-message string — decoded into `Dump.v8heap_ext` and consumed by the `cause` analyzer's OOM/CHECK rules.
 
 ## Development approach
