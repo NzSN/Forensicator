@@ -288,4 +288,41 @@ theorem classify_none {s : AddressSpace} {va : VA}
 
 end AddressSpace
 
+/-- Array-backed lookup index over a space's regions (same order as
+    `AddressSpace.regions`, which `addRegion` keeps sorted). Binary search
+    replaces the linear scan on hot paths (pointer scan / vtables).
+    Equivalence with `regionAt` holds under `WellFormed` by
+    `regionAt_unique`; it is exercised by the conformance gate on all
+    fixtures rather than proved here. -/
+structure FastSpace where
+  regions : Array AddressRegion
+
+namespace FastSpace
+
+def ofSpace (s : AddressSpace) : FastSpace := ⟨s.regions.toArray⟩
+
+/-- Count of regions with vaStart ≤ va (binary search), then coverage check. -/
+def regionAt (fs : FastSpace) (va : VA) : Option AddressRegion :=
+  let n := fs.regions.size
+  let rec go (fuel lo hi : Nat) : Nat :=
+    match fuel with
+    | 0 => lo
+    | fuel + 1 =>
+      if lo < hi then
+        let mid := (lo + hi) / 2
+        if fs.regions[mid]!.vaStart ≤ va then go fuel (mid + 1) hi else go fuel lo mid
+      else lo
+  let k := go (n + 1) 0 n
+  if k == 0 then none
+  else
+    let r := fs.regions[k - 1]!
+    if r.vaStart ≤ va && va.toNat < r.endNat then some r else none
+
+def classify (fs : FastSpace) (va : VA) : RegionClass :=
+  match fs.regionAt va with
+  | some r => r.classification
+  | none => .Other
+
+end FastSpace
+
 end Forensicator.Spec

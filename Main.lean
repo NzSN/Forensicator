@@ -183,8 +183,78 @@ private def cmdInspect (path : String) (json quiet : Bool) : IO UInt32 := do
     else inspectText dump
     pure 0
 
+-- ── analyze ─────────────────────────────────────────────────────────
+
+private def stringsJson (ss : List StructString) : Json :=
+  if ss.isEmpty then .null
+  else .arr (ss.map fun s => .obj [("va", .str (hexUpper s.va)),
+    ("encoding", .str s.encoding.debug), ("content", .str s.content),
+    ("confidence", .ofFloat s.confidence)])
+
+private def analyzeJson (outputs : List AnalyzerOutput) : Json :=
+  let per (o : AnalyzerOutput) : Json := .obj [
+    ("name", .str o.pluginName),
+    ("count", .ofNat o.count),
+    ("strings", stringsJson o.strings),
+    ("vtables", if o.vtables.isEmpty then .null else .arr (o.vtables.map fun v =>
+      .obj [("va", .str (hexUpper v.va)), ("method_count", .ofNat v.methodCount),
+            ("confidence", .ofFloat v.confidence)])),
+    ("linked_lists", if o.linkedLists.isEmpty then .null else .arr (o.linkedLists.map fun l =>
+      .obj [("head_va", .str (hexUpper l.headVa)), ("length", .ofNat l.length),
+            ("stride", .ofUInt64 l.stride)])),
+    ("arrays", if o.arrays.isEmpty then .null else .arr (o.arrays.map fun a =>
+      .obj [("start_va", .str (hexUpper a.startVa)), ("element_size", .ofUInt64 a.elementSize),
+            ("count", .ofNat a.count), ("confidence", .ofFloat a.confidence)])),
+    ("chunks", if o.chunks.isEmpty then .null else .arr (o.chunks.map fun c =>
+      .obj [("va_start", .str (hexUpper c.vaStart)), ("size", .ofUInt64 c.size),
+            ("is_free", .bool c.isFree), ("confidence", .ofFloat c.confidence)])),
+    ("shape_clusters", if o.shapeClusters.isEmpty then .null else .arr (o.shapeClusters.map fun g =>
+      .obj [("id", .ofNat g.id), ("member_count", .ofNat g.memberCount)])),
+    ("custom", if o.custom.isEmpty then .null else .arr (o.custom.map fun (k, v) => .obj [(k, v)]))]
+  .obj [("plugins", .arr (outputs.map per))]
+
+private def cmdAnalyze (path : String) (plugin : Option String) (json : Bool)
+    (_symbols : Option String) : IO UInt32 := do
+  let data ← IO.FS.readBinFile path
+  match Minidump.fromBytes data with
+  | .error f => IO.eprintln f.render; pure 1
+  | .ok dump =>
+    let space := buildAddressSpace dump
+    if !json then
+      let kind := match classifyDump dump with
+        | .FullMemory => "full-memory" | .StackOnly => "stack-only"
+      IO.eprintln s!"dump: {kind}, 0 image(s) supplemented"  -- image discovery lands in Task 10
+    let filter := match plugin with
+      | none => []
+      | some p => (p.splitOn ",").map (String.trimAscii · |>.toString)
+    let catalog := runPipeline defaultPipeline dump space filter
+    if json then
+      IO.println (Json.render (analyzeJson catalog.outputs))
+    else
+      IO.println "Analysis results:"
+      for o in catalog.outputs do
+        IO.println s!"  {o.pluginName}: {o.count} results"
+        if o.pluginName == "v8" then
+          pure ()  -- v8 frame printing lands in Task 9
+        else
+          if !o.strings.isEmpty then IO.println s!"    strings: {o.strings.length}"
+          if !o.vtables.isEmpty then IO.println s!"    vtables: {o.vtables.length}"
+          if !o.linkedLists.isEmpty then IO.println s!"    linked_lists: {o.linkedLists.length}"
+          if !o.arrays.isEmpty then IO.println s!"    arrays: {o.arrays.length}"
+          if !o.chunks.isEmpty then IO.println s!"    chunks: {o.chunks.length}"
+          if !o.shapeClusters.isEmpty then
+            IO.println s!"    shape_clusters: {o.shapeClusters.length} groups"
+          if !o.custom.isEmpty then IO.println s!"    custom: {o.custom.length} entries"
+    pure 0
+
+private def cmdListPlugins : IO UInt32 := do
+  IO.println "Available analyzers:"
+  for a in defaultPipeline do
+    IO.println s!"  {a.name}: {a.description}"
+  pure 0
+
 private def usage : IO UInt32 := do
-  IO.eprintln "usage: forensicator <inspect|trace> <file> [flags]"
+  IO.eprintln "usage: forensicator <inspect|analyze|trace|list-plugins> <file> [flags]"
   pure 2
 
 def main (args : List String) : IO UInt32 := do
@@ -202,6 +272,22 @@ def main (args : List String) : IO UInt32 := do
     | .error e => IO.eprintln e; usage
     | .ok (some path, json, quiet) => cmdInspect path json quiet
     | .ok (none, _, _) => usage
+  | "analyze" :: rest =>
+    let rec parseA (path : Option String) (plugin : Option String) (json : Bool)
+        (symbols : Option String)
+        : List String → Except String (Option String × Option String × Bool × Option String)
+      | [] => .ok (path, plugin, json, symbols)
+      | "--json" :: rest => parseA path plugin true symbols rest
+      | "--plugin" :: p :: rest => parseA path (some p) json symbols rest
+      | "--symbols" :: sp :: rest => parseA path plugin json (some sp) rest
+      | x :: rest =>
+        if x.startsWith "-" then .error s!"unknown flag {x}"
+        else parseA (some x) plugin json symbols rest
+    match parseA none none false none rest with
+    | .error e => IO.eprintln e; usage
+    | .ok (some path, plugin, json, symbols) => cmdAnalyze path plugin json symbols
+    | .ok (none, _, _, _) => usage
+  | ["list-plugins"] => cmdListPlugins
   | "trace" :: rest =>
     let rec parseT (path : Option String) (pos : Option String) (writes : List String) (json : Bool)
         : List String → Except String (Option String × Option String × List String × Bool)

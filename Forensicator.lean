@@ -13,6 +13,7 @@ import Forensicator.Util.Text
 import Forensicator.Parse.Ttfx
 import Forensicator.Parse.Minidump
 import Forensicator.Pipeline
+import Forensicator.Analyzer.Registry
 
 namespace Forensicator
 end Forensicator

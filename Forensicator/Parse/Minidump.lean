@@ -121,23 +121,6 @@ def decodeSystemInfo (data : ByteArray) (prov : Provenance) : Except Anomaly Sys
             provenance := prov }
 
 -- ── utf16 module names ──────────────────────────────────────────────
-private def utf16Lossy (units : List UInt16) : String :=
-  String.ofList (go units)
-where
-  replacement : Char := Char.ofNat 0xFFFD
-  go : List UInt16 → List Char
-    | [] => []
-    | u :: rest =>
-      if u.toNat < 0xD800 || u.toNat ≥ 0xE000 then Char.ofNat u.toNat :: go rest
-      else if u.toNat < 0xDC00 then
-        match rest with
-        | l :: rest' =>
-          if 0xDC00 ≤ l.toNat && l.toNat < 0xE000 then
-            Char.ofNat (0x10000 + (u.toNat - 0xD800) * 1024 + (l.toNat - 0xDC00)) :: go rest'
-          else replacement :: go (l :: rest')
-        | [] => [replacement]
-      else replacement :: go rest
-
 /-- MINIDUMP_STRING at `rva`: u32 byte-length, then nul-terminated UTF-16. -/
 private def readUtf16AtRva (full : ByteArray) (rva : UInt32) : Option String :=
   let start := rva.toNat

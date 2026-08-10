@@ -91,4 +91,38 @@ for d in "$CASES"/minidump "$CASES"/minidump_v2 "$CASES"/fulldump; do
 done
 
 if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
+
+# analyzers (Task 7): per-plugin JSON parity. shapes compares the member-count
+# multiset (Rust assigns group ids in HashMap order — nondeterministic on ties).
+# arrays on fulldump is excluded: quadratic in BOTH implementations (>30 min).
+njfull() { python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for o in d.get("plugins", []):
+    if isinstance(o.get("shape_clusters"), list):
+        o["shape_clusters"] = sorted(g["member_count"] for g in o["shape_clusters"])
+print(json.dumps(d, sort_keys=True))'; }
+
+analyze_check() { # name, dump, plugin
+  local name="$1" f="$2" plug="$3"
+  local rj lj
+  rj="$("$RUST_BIN" analyze "$f" --plugin "$plug" --json | njfull)"
+  lj="$("$LEAN_BIN" analyze "$f" --plugin "$plug" --json | njfull)"
+  if [ "$rj" = "$lj" ]; then echo "ok   analyze $name $plug"
+  else echo "FAIL analyze $name $plug"; fail=1; fi
+}
+
+for d in minidump minidump_v2; do
+  f=$(ls "$CASES/$d"/*.dmp)
+  for plug in strings vtables lists arrays chunks shapes; do
+    analyze_check "$(basename $d)" "$f" "$plug"
+  done
+done
+f=$(ls "$CASES"/fulldump/*.dmp)
+for plug in strings vtables lists chunks shapes; do
+  analyze_check "fulldump" "$f" "$plug"
+done
+check "list-plugins" list-plugins
+
+if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
 echo "== CONFORMANCE PASS =="

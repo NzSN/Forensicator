@@ -8,6 +8,7 @@ inductive Json where
   | null
   | bool (b : Bool)
   | int (n : Int)
+  | num (s : String)   -- pre-rendered number literal (floats)
   | str (s : String)
   | arr (items : List Json)
   | obj (fields : List (String × Json))
@@ -43,6 +44,7 @@ mutual
     | .null => "null"
     | .bool b => if b then "true" else "false"
     | .int n => toString n
+    | .num s => s
     | .str s => "\"" ++ escape s ++ "\""
     | .arr items => "[" ++ String.intercalate "," (renderAll items) ++ "]"
     | .obj kvs => "{" ++ String.intercalate "," (renderKVs kvs) ++ "}"
@@ -65,6 +67,33 @@ def ofUSize (v : USize) : Json := .int v.toNat
 def ofNat (n : Nat) : Json := .int n
 def ofBool (b : Bool) : Json := .bool b
 def ofString (s : String) : Json := .str s
+
+/-- Exact decimal expansion of a finite Float (m × 2^e computed exactly).
+    Round-trip-exact by construction; the conformance gate normalizes through
+    a JSON parser, so this compares equal to serde/ryu's shortest form. -/
+def floatExact (f : Float) : String :=
+  let b := f.toBits
+  let expField := ((b >>> 52) &&& 0x7FF).toNat
+  if expField == 0x7FF then "0.0"  -- inf/nan never occur in analyzer scores
+  else if expField == 0 && (b &&& 0xFFFFFFFFFFFFF) == 0 then
+    if b >>> 63 == 1 then "-0.0" else "0.0"
+  else
+    let sign := if b >>> 63 == 1 then "-" else ""
+    let frac := (b &&& 0xFFFFFFFFFFFFF).toNat
+    let (m, e) :=
+      if expField == 0 then (frac, -1074)
+      else (2^52 + frac, Int.ofNat expField - 1075)
+    if e ≥ 0 then
+      sign ++ toString (m * 2 ^ e.toNat) ++ ".0"
+    else
+      let k := (-e).toNat
+      let ds := toString (m * 5 ^ k)
+      if ds.length > k then
+        sign ++ ds.take (ds.length - k) ++ "." ++ ds.drop (ds.length - k)
+      else
+        sign ++ "0." ++ String.ofList (List.replicate (k - ds.length) '0') ++ ds
+
+def ofFloat (f : Float) : Json := .num (floatExact f)
 
 end Json
 
