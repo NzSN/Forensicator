@@ -17,6 +17,9 @@ def MemState.ofUInt32 : UInt32 → Option MemState
   | 2 => some .Free
   | _ => none
 
+def MemState.toUInt32 : MemState → UInt32
+  | .Commit => 0 | .Reserve => 1 | .Free => 2
+
 /-- Region classification (pointer-pattern interpretation depends on it). -/
 inductive RegionClass where
   | Image | Stack | Mapped | Private | Other
@@ -38,6 +41,9 @@ def MemType.ofUInt32 : UInt32 → Option MemType
   | 1 => some .Mapped
   | 2 => some .Image
   | _ => none
+
+def MemType.toUInt32 : MemType → UInt32
+  | .Private => 0 | .Mapped => 1 | .Image => 2
 
 /-- Memory protection bitflags (model.rs `Protection`). -/
 abbrev Protection := UInt32

@@ -205,6 +205,100 @@ def runAll : IO UInt32 := do
     (tr.threadAt 7 2 == some { start := 0, stop := none }
       && tr.threadAt 8 2 == none)
 
+  -- .ttfx decoder (port of parse/ttfx.rs tests; encoder used to build fixtures)
+  let tprov : Provenance := { streamType := Model.TTFX_STREAM_TYPE }
+  let tregion (va : UInt64) (b : UInt8) (n : Nat) : Model.MemoryRegionInfo :=
+    { vaStart := va, size := UInt64.ofNat n, data := ByteArray.mk (Array.replicate n b),
+      protection := 3, state := .Commit, memType := .Private,
+      provenance := tprov, regionClass := some .Private }
+  let minimalTrace : Model.Trace := {
+    initMem := [tregion 0x1000 0xAA 16, tregion 0x2000 0xBB 16]
+    writes := [
+      { pos := 1, va := 0x1004, data := ba [0x11, 0x22], provenance := tprov },
+      { pos := 2, va := 0x1004, data := ba [0x33], provenance := tprov }]
+    events := [
+      { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "app.exe", size := 0x1000,
+        provenance := tprov },
+      { pos := 2, kind := .Exception, code := 0xC0000005, address := 0x1004, threadId := 7,
+        provenance := tprov }]
+    threads := [(7, { start := 0, stop := none })]
+    calls := [
+      { threadId := 7, interval := { start := 0, stop := some 2 } },
+      { threadId := 7, interval := { start := 0, stop := some 1 } }]
+    frontier := 2 }
+  let minimalBytes := encodeTtfx minimalTrace
+  check ctx "ttfx round trip"
+    (match decodeTtfx minimalBytes with
+     | .error _ => false
+     | .ok back =>
+       back.anomalies.isEmpty && back.frontier == 2
+        && back.initMem.length == 2
+        && back.initMem.head?.map (·.data == ByteArray.mk (Array.replicate 16 0xAA)) == some true
+        && back.writes.length == 2
+        && back.writes.head?.map (·.data == ba [0x11, 0x22]) == some true
+        && back.events.length == 2
+        && back.events.head?.map (·.name == "app.exe") == some true
+        && back.threads == minimalTrace.threads
+        && back.calls.length == 2
+        && back.valueAt 0x1004 2 == some 0x33)
+  check ctx "ttfx bad magic rejected"
+    (isErr (decodeTtfx (minimalBytes.set! 0 'X'.toNat.toUInt8)))
+  check ctx "ttfx truncated header rejected"
+    (isErr (decodeTtfx (ByteArray.mk (Array.replicate 16 0))))
+  check ctx "ttfx truncated section tolerated"
+    (match decodeTtfx (minimalBytes.extract 0 (minimalBytes.size - 20)) with
+     | .ok back => !back.anomalies.isEmpty
+     | .error _ => false)
+  check ctx "ttfx out-of-order write flagged"
+    (let tr' : Model.Trace := { minimalTrace with
+        writes := [minimalTrace.writes.head!, { minimalTrace.writes.tail!.head! with pos := 0 }] }
+     match decodeTtfx (encodeTtfx tr') with
+     | .ok back => back.anomalies.any (fun a => (a.description.splitOn "out of order").length > 1)
+     | _ => false)
+  check ctx "ttfx write beyond frontier flagged"
+    (let tr' : Model.Trace := { minimalTrace with
+        writes := [minimalTrace.writes.head!, { minimalTrace.writes.tail!.head! with pos := 99 }] }
+     match decodeTtfx (encodeTtfx tr') with
+     | .ok back => back.anomalies.any (fun a => (a.description.splitOn "beyond frontier").length > 1)
+     | _ => false)
+  check ctx "ttfx crossing calls flagged"
+    (let tr' : Model.Trace := { minimalTrace with frontier := 3, calls := [
+        { threadId := 7, interval := { start := 0, stop := some 2 } },
+        { threadId := 7, interval := { start := 1, stop := some 3 } }] }
+     match decodeTtfx (encodeTtfx tr') with
+     | .ok back => back.anomalies.any (fun a => (a.description.splitOn "crossing call spans").length > 1)
+     | _ => false)
+  check ctx "ttfx call on unknown thread flagged"
+    (let tr' : Model.Trace := { minimalTrace with calls := [
+        { threadId := 99, interval := { start := 0, stop := some 2 } },
+        { threadId := 7, interval := { start := 0, stop := some 1 } }] }
+     match decodeTtfx (encodeTtfx tr') with
+     | .ok back => back.anomalies.any (fun a => (a.description.splitOn "unknown thread").length > 1)
+     | _ => false)
+  check ctx "ttfx inverted thread interval flagged"
+    (let tr' : Model.Trace := { minimalTrace with frontier := 5, threads := [(7, { start := 5, stop := some 2 })] }
+     match decodeTtfx (encodeTtfx tr') with
+     | .ok back => back.anomalies.any (fun a => (a.description.splitOn "interval inverted").length > 1)
+     | _ => false)
+
+  -- All-prefixes + mutation fuzz: the decoder must always *return*
+  -- (ok or error); a Lean panic/stack overflow crashes this binary.
+  for i in [:minimalBytes.size + 1] do
+    match decodeTtfx (minimalBytes.extract 0 i) with
+    | .ok t =>
+      if t.writes.length + t.events.length + t.anomalies.length + t.initMem.length > 100000 then
+        check ctx "fuzz sanity" false
+    | .error _ => pure ()
+  for i in [:200] do
+    let idx := (i * 37) % minimalBytes.size
+    let mutated := minimalBytes.set! idx ((minimalBytes.get! idx) ^^^ 0xFF)
+    match decodeTtfx mutated with
+    | .ok t =>
+      if t.writes.length + t.events.length + t.anomalies.length + t.initMem.length > 100000 then
+        check ctx "fuzz sanity" false
+    | .error _ => pure ()
+  check ctx "ttfx all-prefixes + mutations survived" true
+
   let n ← ctx.failures.get
   IO.println (if n == 0 then "== ALL GUARDS PASSED ==" else s!"== {n} FAILURE(S) ==")
   pure n.toUInt32

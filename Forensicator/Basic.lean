@@ -73,6 +73,11 @@ def hexUpper (v : UInt64) : String :=
   let ds := Nat.toDigits 16 v.toNat
   "0x" ++ String.ofList (ds.map fun c => if c.isAlpha then c.toUpper else c)
 
+/-- Uppercase hex digits, zero-padded to `width` (Rust `{v:0width$X}`). -/
+def hexPadUpper (v : UInt64) (width : Nat) : String :=
+  let ds := (Nat.toDigits 16 v.toNat).map fun c => if c.isAlpha then c.toUpper else c
+  String.ofList (List.replicate (width - ds.length) '0' ++ ds)
+
 /-- Hard errors (unrecoverable: bad magic, truncated header, …). -/
 inductive ForensicError where
   | anomaly (a : Anomaly)

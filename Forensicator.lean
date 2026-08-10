@@ -9,6 +9,8 @@ import Forensicator.Spec.AddressSpace
 import Forensicator.Model.Dump
 import Forensicator.Model.Trace
 import Forensicator.Spec.Timeline
+import Forensicator.Util.Text
+import Forensicator.Parse.Ttfx
 
 namespace Forensicator
 end Forensicator
