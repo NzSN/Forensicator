@@ -177,6 +177,7 @@ theorem wellFormed_insert {r : AddressRegion} {xs : List AddressRegion}
 structure AddressSpace where
   regions : List AddressRegion
   maxRegions : Nat
+  deriving Inhabited
 
 namespace AddressSpace
 
@@ -188,9 +189,9 @@ def isEmpty (s : AddressSpace) : Bool := s.regions.isEmpty
 /-- Add a region; error on zero size, capacity, overlap (space.rs:95).
     Error strings match Rust exactly. -/
 def addRegion (s : AddressSpace) (r : AddressRegion) : Except Anomaly AddressSpace :=
-  if r.size == 0 then .error ⟨0, "zero-sized region"⟩
-  else if s.regions.length ≥ s.maxRegions then .error ⟨0, "AddressSpace at capacity"⟩
-  else if s.regions.any fun x => decide (AddressRegion.Overlaps r x) then .error ⟨0, "overlap"⟩
+  if r.size == 0 then .error (.internal "zero-sized region")
+  else if s.regions.length ≥ s.maxRegions then .error (.internal "AddressSpace at capacity")
+  else if s.regions.any fun x => decide (AddressRegion.Overlaps r x) then .error (.internal "overlap")
   else .ok { s with regions := insertByStart r s.regions }
 
 /-- Find the region covering `va`, if any (space.rs:54). -/

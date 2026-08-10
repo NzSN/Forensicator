@@ -18,7 +18,8 @@ abbrev ParseM := ExceptT Anomaly (StateM Cursor)
 def Cursor.atEnd (c : Cursor) : Bool := c.pos ≥ c.bytes.size
 
 private def truncated (off n : Nat) : Anomaly :=
-  ⟨(UInt64.ofNat off), s!"truncated read: {n} byte(s) at offset {off}"⟩
+  { fileOffset := UInt64.ofNat off
+    description := s!"truncated read: {n} byte(s) at offset {off}" }
 
 /-- Read `n` raw bytes, advancing the cursor. -/
 def readBytes (n : Nat) : ParseM ByteArray := do
@@ -42,7 +43,8 @@ def peekBytes (n : Nat) : ParseM ByteArray := do
 def seek (off : Nat) : ParseM Unit := do
   let c ← get
   if off ≤ c.bytes.size then set { c with pos := off }
-  else throw ⟨(UInt64.ofNat off), s!"seek past end: {off} (size {c.bytes.size})"⟩
+  else throw { fileOffset := UInt64.ofNat off
+               description := s!"seek past end: {off} (size {c.bytes.size})" }
 
 /-- Current absolute offset. -/
 def tell : ParseM Nat := return (← get).pos

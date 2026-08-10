@@ -6,6 +6,9 @@ import Forensicator.Parse.Cursor
 import Forensicator.Util.Json
 import Forensicator.Model.Types
 import Forensicator.Spec.AddressSpace
+import Forensicator.Model.Dump
+import Forensicator.Model.Trace
+import Forensicator.Spec.Timeline
 
 namespace Forensicator
 end Forensicator

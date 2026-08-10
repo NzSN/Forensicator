@@ -50,16 +50,28 @@ theorem pack_unpack (p : TtdPosition) : unpack (pack p) = p := by
 /-- Provenance: every decoded fact records its origin
     (stream_type + file_offset + rva), as in the Rust `Provenance`. -/
 structure Provenance where
-  streamType : UInt32
-  fileOffset : UInt64
-  rva : UInt64
-  deriving Repr, DecidableEq
+  streamType : UInt32 := 0
+  fileOffset : UInt64 := 0
+  rva : UInt64 := 0
+  deriving Repr, DecidableEq, Inhabited
 
-/-- A recoverable decode defect: malformed input is collected, never fatal. -/
+/-- A recoverable decode defect: malformed input is collected, never fatal.
+    Carries the Rust `Anomaly`'s provenance fields (stream_type/file_offset/rva). -/
 structure Anomaly where
-  fileOffset : UInt64
+  streamType : UInt32 := 0
+  fileOffset : UInt64 := 0
+  rva : UInt64 := 0
   description : String
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, DecidableEq
+
+/-- An anomaly with no provenance (internal consistency findings). -/
+def Anomaly.internal (description : String) : Anomaly :=
+  { streamType := 0, fileOffset := 0, rva := 0, description }
+
+/-- Uppercase hex rendering, matching Rust's `format!("0x{v:X}")`. -/
+def hexUpper (v : UInt64) : String :=
+  let ds := Nat.toDigits 16 v.toNat
+  "0x" ++ String.ofList (ds.map fun c => if c.isAlpha then c.toUpper else c)
 
 /-- Hard errors (unrecoverable: bad magic, truncated header, …). -/
 inductive ForensicError where

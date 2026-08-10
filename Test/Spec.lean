@@ -130,6 +130,81 @@ def runAll : IO UInt32 := do
     (match sp1.addRegion (mkRegion 0x1800 0x1000 .Stack) with
      | .error a => a.description == "overlap" | _ => false)
 
+  -- Trace model (port of model/trace.rs tests)
+  let mregion (va : UInt64) (b : UInt8) (n : Nat) : Model.MemoryRegionInfo :=
+    { vaStart := va, size := UInt64.ofNat n, data := ByteArray.mk (Array.replicate n b),
+      protection := 3, state := .Commit, memType := .Private,
+      provenance := { streamType := Model.TTFX_STREAM_TYPE }, regionClass := some .Private }
+  let wr (pos : UInt64) (va : UInt64) (ds : List UInt8) : Model.WriteRecord :=
+    { pos := pos, va := va, data := ba ds }
+  let tr : Model.Trace := {
+    initMem := [mregion 0x1000 0xAA 16, mregion 0x2000 0xBB 16]
+    writes := [wr 1 0x1004 [0x11, 0x22], wr 2 0x1004 [0x33], wr 3 0x2FF0 [0xCC]]
+    threads := [(7, { start := 0, stop := none })]
+    frontier := 3 }
+  check ctx "trace value_at initial"
+    (tr.valueAt 0x1000 0 == some 0xAA && tr.valueAt 0x1004 0 == some 0xAA)
+  check ctx "trace value_at ordered writes"
+    (tr.valueAt 0x1004 1 == some 0x11 && tr.valueAt 0x1005 1 == some 0x22
+      && tr.valueAt 0x1004 2 == some 0x33 && tr.valueAt 0x1005 2 == some 0x22)
+  check ctx "trace value_at unmapped + dropped write"
+    (tr.valueAt 0x9000 3 == none && tr.valueAt 0x2FF0 3 == none)
+  -- SnapshotConsistent: valueAt == naive forward fold (brute force)
+  check ctx "trace value_at vs brute force"
+    (let vas : List UInt64 := [0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x1007]
+     let ts : List UInt64 := [0, 1, 2, 3]
+     vas.all fun va => ts.all fun t =>
+       tr.valueAt va t ==
+         (tr.writes.filter (·.pos ≤ t)).foldl
+           (fun acc w => if w.va.toNat ≤ va.toNat && va.toNat < w.va.toNat + w.data.size
+             then w.byteAt va else acc)
+           (some 0xAA))
+  check ctx "trace writes_between window"
+    ((tr.writesBetween 0x1004 1 0 3).length == 2
+      && (tr.writesBetween 0x1004 1 0 1).length == 1
+      && (tr.writesBetween 0x1005 1 0 1).length == 1)
+  check ctx "trace snapshot cursor bounded"
+    ((tr.snapshot 4).isNone && (tr.snapshot 3).isSome)
+  let trE : Model.Trace := { tr with events := [
+    { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "app.exe", size := 0x1000,
+      provenance := { streamType := Model.TTFX_STREAM_TYPE } },
+    { pos := 2, kind := .Exception, code := 0xC0000005, address := 0xDEAD, threadId := 7,
+      provenance := { streamType := Model.TTFX_STREAM_TYPE } }] }
+  check ctx "trace snapshot materializes memory/modules/exception"
+    (match trE.snapshot 2, trE.snapshot 0 with
+     | some snap, some snap0 =>
+       snap.dump.modules.length == 1
+         && snap.dump.modules.head?.map (·.name == "app.exe") == some true
+         && snap.dump.exception.map (fun e => e.code == 0xC0000005 && e.threadId == 7) == some true
+         && snap.space.read 0x1004 1 == some (ba [0x33])
+         && snap0.dump.exception.isNone && snap0.dump.modules.isEmpty
+     | _, _ => false)
+  let trU : Model.Trace := { tr with events := [
+    { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "app.exe", size := 0x1000,
+      provenance := { streamType := Model.TTFX_STREAM_TYPE } },
+    { pos := 2, kind := .ModuleUnload, address := 0x70000000,
+      provenance := { streamType := Model.TTFX_STREAM_TYPE } }] }
+  check ctx "trace module unload removes"
+    ((trU.snapshot 1).map (·.dump.modules.length) == some 1
+      && (trU.snapshot 2).map (·.dump.modules.length) == some 0)
+  check ctx "trace clean snapshot no anomalies"
+    ((tr.snapshot 3).map (·.dump.anomalies.isEmpty) == some true)
+  let trO : Model.Trace := { tr with events := [
+    { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "m1", size := 0x1000,
+      provenance := { streamType := Model.TTFX_STREAM_TYPE } },
+    { pos := 2, kind := .ModuleLoad, address := 0x70000800, name := "m2", size := 0x1000,
+      provenance := { streamType := Model.TTFX_STREAM_TYPE } }] }
+  check ctx "trace overlapping module anomaly"
+    (match trO.snapshot 2, trO.snapshot 1 with
+     | some snap, some snap1 =>
+       snap.dump.modules.length == 2
+         && (snap.dump.anomalies.filter (·.description == "overlapping module")).length == 1
+         && snap1.dump.anomalies.isEmpty
+     | _, _ => false)
+  check ctx "trace thread_at"
+    (tr.threadAt 7 2 == some { start := 0, stop := none }
+      && tr.threadAt 8 2 == none)
+
   let n ← ctx.failures.get
   IO.println (if n == 0 then "== ALL GUARDS PASSED ==" else s!"== {n} FAILURE(S) ==")
   pure n.toUInt32
