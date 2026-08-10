@@ -1,7 +1,5 @@
 /- Forensicator.Analyzer.Registry — the default pipeline
-   (analyzer.rs default_pipeline). cause/v8 register with their final
-   names+descriptions; their logic lands in Tasks 8/9 (stubs emit empty
-   outputs, so list-plugins is already faithful). -/
+   (analyzer.rs default_pipeline). -/
 import Forensicator.Analyzer.Strings
 import Forensicator.Analyzer.Vtables
 import Forensicator.Analyzer.Lists
@@ -9,19 +7,13 @@ import Forensicator.Analyzer.Arrays
 import Forensicator.Analyzer.Chunks
 import Forensicator.Analyzer.Shapes
 import Forensicator.Analyzer.Cause
+import Forensicator.Analyzer.V8
 
 namespace Forensicator
-
-
-/-- Stub until Task 9 (V8Analyzer port). -/
-def v8Analyzer : Analyzer where
-  name := "v8"
-  description := "Recovers JS stack traces by walking native stacks and classifying V8 frames"
-  run _ _ := AnalyzerOutput.new "v8"
 
 /-- The default analyzer set, in registration order (analyzer.rs:102). -/
 def defaultPipeline : List Analyzer :=
   [Analyzer.Cause.analyzer, Analyzer.Strings.analyzer, Analyzer.Vtables.analyzer, Analyzer.Lists.analyzer,
-   Analyzer.Arrays.analyzer, Analyzer.Chunks.analyzer, Analyzer.Shapes.analyzer, v8Analyzer]
+   Analyzer.Arrays.analyzer, Analyzer.Chunks.analyzer, Analyzer.Shapes.analyzer, Analyzer.V8.analyzer]
 
 end Forensicator

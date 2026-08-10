@@ -9,6 +9,7 @@
    the Rust version's potential u64 wrap in `va_start + size` is
    unrepresentable. -/
 import Forensicator.Model.Types
+import Forensicator.Util.Image
 
 namespace Forensicator.Spec
 
@@ -177,11 +178,18 @@ theorem wellFormed_insert {r : AddressRegion} {xs : List AddressRegion}
 structure AddressSpace where
   regions : List AddressRegion
   maxRegions : Nat
+  /-- On-disk module images, consulted by `read` when no dump region
+      covers the VA (stack-only minidumps). -/
+  backing : Option Util.ImageSet := none
   deriving Inhabited
 
 namespace AddressSpace
 
-def new (maxRegions : Nat) : AddressSpace := ⟨[], maxRegions⟩
+def new (maxRegions : Nat) : AddressSpace := ⟨[], maxRegions, none⟩
+
+/-- Attach on-disk PE images used as a read fallback. -/
+def setBacking (s : AddressSpace) (images : Util.ImageSet) : AddressSpace :=
+  { s with backing := some images }
 
 def len (s : AddressSpace) : Nat := s.regions.length
 def isEmpty (s : AddressSpace) : Bool := s.regions.isEmpty
@@ -211,7 +219,7 @@ def classify (s : AddressSpace) (va : VA) : RegionClass :=
     (space.rs:79; image-backing fallthrough deferred). -/
 def read (s : AddressSpace) (va : VA) (len : Nat) : Option ByteArray :=
   match s.regionAt va with
-  | none => none
+  | none => s.backing.bind fun b => b.read va len
   | some r =>
     let off := va.toNat - r.vaStart.toNat
     if off + len ≤ r.data.size then some (r.data.extract off (off + len)) else none
@@ -266,10 +274,10 @@ theorem addRegion_preserves {s s' : AddressSpace} {r : AddressRegion}
         exact wellFormed_insert wf hrsz hnoo
 
 theorem read_within_region {s : AddressSpace} {va : VA} {len : Nat} {bs : ByteArray}
-    (h : s.read va len = some bs) :
+    (hback : s.backing = none) (h : s.read va len = some bs) :
     ∃ r ∈ s.regions, r.covers va ∧ va.toNat + len ≤ r.vaStart.toNat + r.data.size := by
   cases hra : s.regionAt va with
-  | none => simp [read, hra] at h
+  | none => simp [read, hra, hback] at h
   | some r =>
     simp only [read, hra] at h
     by_cases hle : va.toNat - r.vaStart.toNat + len ≤ r.data.size

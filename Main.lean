@@ -229,17 +229,39 @@ private def analyzeJson (outputs : List AnalyzerOutput) : Json :=
     ("custom", if o.custom.isEmpty then .null else .arr (o.custom.map fun (k, v) => .obj [(k, v)]))]
   .obj [("plugins", .arr (outputs.map per))]
 
+private def basenameOf (p : String) : String :=
+  let parts := p.splitOn "/" |>.flatMap (·.splitOn "\\")
+  (parts.filter (!·.isEmpty)).getLast?.getD p
+
+private def supplementImages (space : Spec.AddressSpace) (dump : Dump) (path : String) :
+    IO (Spec.AddressSpace × Nat) := do
+  let dir := (System.FilePath.parent path).map (·.toString) |>.getD "."
+  let names := dump.modules.map (·.name)
+  let bases := dump.modules.map (·.baseVa)
+  let mut images : Util.ImageSet := ⟨[]⟩
+  for (name, base) in names.zip bases do
+    let fname := basenameOf name
+    if fname.isEmpty then continue
+    let candidate := dir ++ "/" ++ fname
+    if ← System.FilePath.pathExists candidate then
+      let bytes ← IO.FS.readBinFile candidate
+      match Util.ImageFile.fromBytes bytes base with
+      | .ok img => images := ⟨images.images ++ [img]⟩
+      | .error _ => pure ()
+  let space := if images.images.isEmpty then space else space.setBacking images
+  pure (space, images.images.length)
+
 private def cmdAnalyze (path : String) (plugin : Option String) (json : Bool)
     (_symbols : Option String) : IO UInt32 := do
   let data ← IO.FS.readBinFile path
   match Minidump.fromBytes data with
   | .error f => IO.eprintln f.render; pure 1
   | .ok dump =>
-    let space := buildAddressSpace dump
+    let (space, imageCount) ← supplementImages (buildAddressSpace dump) dump path
     if !json then
       let kind := match classifyDump dump with
         | .FullMemory => "full-memory" | .StackOnly => "stack-only"
-      IO.eprintln s!"dump: {kind}, 0 image(s) supplemented"  -- image discovery lands in Task 10
+      IO.eprintln s!"dump: {kind}, {imageCount} image(s) supplemented"
     let filter := match plugin with
       | none => []
       | some p => (p.splitOn ",").map (String.trimAscii · |>.toString)

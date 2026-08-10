@@ -15,6 +15,8 @@ import Forensicator.Parse.Minidump
 import Forensicator.Pipeline
 import Forensicator.Analyzer.Registry
 import Forensicator.Util.Disasm
+import Forensicator.Util.V8Layout
+import Forensicator.Util.Unwind
 
 namespace Forensicator
 end Forensicator

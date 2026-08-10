@@ -114,14 +114,28 @@ analyze_check() { # name, dump, plugin
 
 for d in minidump minidump_v2; do
   f=$(ls "$CASES/$d"/*.dmp)
-  for plug in cause strings vtables lists arrays chunks shapes; do
+  for plug in cause strings vtables lists arrays chunks shapes v8; do
     analyze_check "$(basename $d)" "$f" "$plug"
   done
 done
 f=$(ls "$CASES"/fulldump/*.dmp)
-for plug in cause strings vtables lists chunks shapes; do
+for plug in cause strings vtables lists chunks shapes v8; do
   analyze_check "fulldump" "$f" "$plug"
 done
+
+# full default-pipeline analyze (all plugins, json)
+analyze_full() {
+  local name="$1" f="$2"
+  local rj lj
+  rj="$("$RUST_BIN" analyze "$f" --json | njfull)"
+  lj="$("$LEAN_BIN" analyze "$f" --json | njfull)"
+  if [ "$rj" = "$lj" ]; then echo "ok   analyze $name FULL-PIPELINE"
+  else echo "FAIL analyze $name FULL-PIPELINE"; fail=1; fi
+}
+for d in minidump minidump_v2; do
+  analyze_full "$(basename $d)" "$(ls "$CASES/$d"/*.dmp)"
+done
+# (full-pipeline fulldump excluded: `arrays` is quadratic on both sides)
 check "list-plugins" list-plugins
 
 if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
