@@ -13,6 +13,21 @@ def PositionOrdered : List WriteRecord → Prop
   | [_] => True
   | w1 :: w2 :: rest => w1.pos ≤ w2.pos ∧ PositionOrdered (w2 :: rest)
 
+theorem PositionOrdered.append_singleton {xs : List WriteRecord} {w : WriteRecord}
+    (hxs : PositionOrdered xs) (hlast : ∀ l, xs.getLast? = some l → l.pos ≤ w.pos) :
+    PositionOrdered (xs ++ [w]) := by
+  induction xs with
+  | nil => exact True.intro
+  | cons x xs ih =>
+    cases xs with
+    | nil =>
+      exact ⟨hlast x rfl, True.intro⟩
+    | cons y ys =>
+      have h1 : x.pos ≤ y.pos := hxs.1
+      have h2 : PositionOrdered ((y :: ys) ++ [w]) :=
+        ih hxs.2 (fun l hl => hlast l (by simpa using hl))
+      exact ⟨h1, h2⟩
+
 /-- Events are position-ordered (TraceOrdered, event half). -/
 def EventsOrdered : List TraceEvent → Prop
   | [] => True
