@@ -3,6 +3,7 @@
    reachable by VA in stack-only minidumps. -/
 import Forensicator.Util.Bytes
 import Forensicator.Basic
+import Forensicator.Util.Text
 
 namespace Forensicator.Util
 
@@ -63,6 +64,13 @@ def fromBytes (data : ByteArray) (baseVa : VA) : Except String ImageFile := do
   pure { baseVa := baseVa, sizeOfImage := sizeOfImage.toUInt64
          data := data, headerSize := headerSize, sections := sections }
 
+private def optOff (img : ImageFile) : Nat :=
+  ((r32 img.data 0x3C).getD 0).toNat + 4 + 20
+
+/-- PE optional-header CheckSum. -/
+def peChecksum (img : ImageFile) : Option UInt32 :=
+  r32 img.data (optOff img + 64)
+
 private def rvaToOff (img : ImageFile) (rva : UInt32) : Option Nat :=
   if rva.toNat < img.headerSize.toNat then some rva.toNat
   else
@@ -70,6 +78,42 @@ private def rvaToOff (img : ImageFile) (rva : UInt32) : Option Nat :=
       let span := max s.vaSize s.rawSize
       decide (s.vaStart ≤ rva ∧ rva.toNat < s.vaStart.toNat + span.toNat)).map
       fun (s : Section) => (s.rawPtr + (rva - s.vaStart)).toNat
+
+/-- RSDS record from the PE debug directory. -/
+structure Rsds where
+  guid : ByteArray   -- 16 bytes
+  age : UInt32
+  pdbPath : String
+
+/-- RSDS record from the debug directory, if present. -/
+def rsds (img : ImageFile) : Option Rsds := do
+  let opt := optOff img
+  let dirRva ← r32 img.data (opt + 112 + 6 * 8)
+  let dirSize ← r32 img.data (opt + 112 + 6 * 8 + 4)
+  if dirRva == 0 then none
+  else
+    let dirOff ← rvaToOff img dirRva
+    let rec scan (i : Nat) : Option Rsds :=
+      if i < dirSize.toNat / 28 then
+        let e := dirOff + i * 28
+        match r32 img.data (e + 12) with
+        | some 2 =>
+          (match r32 img.data (e + 24) with
+          | none => none
+          | some raw =>
+            let cv := img.data.extract raw.toNat (raw.toNat + 24)
+            if cv.size < 24 || cv.extract 0 4 != ByteArray.mk #[0x52, 0x53, 0x44, 0x53] then none
+            else
+              let guid := cv.extract 4 20
+              let age := readU32leAt cv 20
+              let rest := img.data.extract (raw.toNat + 24) img.data.size
+              let nul := (rest.toList.takeWhile (· != 0)).length
+              some { guid := guid, age := age
+                     pdbPath := fromUTF8Lossy (rest.extract 0 nul) })
+        | _ => scan (i + 1)
+      else none
+    termination_by dirSize.toNat / 28 + 1 - i
+    scan 0
 
 /-- Read `len` bytes at `va` through the section table (full slice or none). -/
 def read (img : ImageFile) (va : VA) (len : Nat) : Option ByteArray :=

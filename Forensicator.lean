@@ -17,6 +17,9 @@ import Forensicator.Analyzer.Registry
 import Forensicator.Util.Disasm
 import Forensicator.Util.V8Layout
 import Forensicator.Util.Unwind
+import Forensicator.Util.Image
+import Forensicator.Util.Pdb
+import Forensicator.Session
 
 namespace Forensicator
 end Forensicator

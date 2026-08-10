@@ -188,15 +188,18 @@ private def inspectText (d : Dump) : IO Unit := do
     for (k, v) in d.annotations do
       IO.println s!"    ├── {k} = {v}"
 
+private def inspectPrint (dump : Dump) (json quiet : Bool) : IO Unit := do
+  if json then IO.println (Json.render (inspectJson dump))
+  else if quiet then
+    IO.println s!"modules: {dump.modules.length}  threads: {dump.threads.length}  memory_regions: {dump.memoryRegions.length}  anomalies: {dump.anomalies.length}"
+  else inspectText dump
+
 private def cmdInspect (path : String) (json quiet : Bool) : IO UInt32 := do
   let data ← IO.FS.readBinFile path
   match Minidump.fromBytes data with
   | .error f => IO.eprintln f.render; pure 1
   | .ok dump =>
-    if json then IO.println (Json.render (inspectJson dump))
-    else if quiet then
-      IO.println s!"modules: {dump.modules.length}  threads: {dump.threads.length}  memory_regions: {dump.memoryRegions.length}  anomalies: {dump.anomalies.length}"
-    else inspectText dump
+    inspectPrint dump json quiet
     pure 0
 
 -- ── analyze ─────────────────────────────────────────────────────────
@@ -251,17 +254,8 @@ private def supplementImages (space : Spec.AddressSpace) (dump : Dump) (path : S
   let space := if images.images.isEmpty then space else space.setBacking images
   pure (space, images.images.length)
 
-private def cmdAnalyze (path : String) (plugin : Option String) (json : Bool)
-    (_symbols : Option String) : IO UInt32 := do
-  let data ← IO.FS.readBinFile path
-  match Minidump.fromBytes data with
-  | .error f => IO.eprintln f.render; pure 1
-  | .ok dump =>
-    let (space, imageCount) ← supplementImages (buildAddressSpace dump) dump path
-    if !json then
-      let kind := match classifyDump dump with
-        | .FullMemory => "full-memory" | .StackOnly => "stack-only"
-      IO.eprintln s!"dump: {kind}, {imageCount} image(s) supplemented"
+private def analyzePrint (dump : Dump) (space : Spec.AddressSpace)
+    (plugin : Option String) (json : Bool) : IO Unit := do
     let filter := match plugin with
       | none => []
       | some p => (p.splitOn ",").map (String.trimAscii · |>.toString)
@@ -283,7 +277,22 @@ private def cmdAnalyze (path : String) (plugin : Option String) (json : Bool)
           if !o.shapeClusters.isEmpty then
             IO.println s!"    shape_clusters: {o.shapeClusters.length} groups"
           if !o.custom.isEmpty then IO.println s!"    custom: {o.custom.length} entries"
+    pure ()
+
+private def cmdAnalyze (path : String) (plugin : Option String) (json : Bool)
+    (_symbols : Option String) : IO UInt32 := do
+  let data ← IO.FS.readBinFile path
+  match Minidump.fromBytes data with
+  | .error f => IO.eprintln f.render; pure 1
+  | .ok dump =>
+    let (space, imageCount) ← supplementImages (buildAddressSpace dump) dump path
+    if !json then
+      let kind := match classifyDump dump with
+        | .FullMemory => "full-memory" | .StackOnly => "stack-only"
+      IO.eprintln s!"dump: {kind}, {imageCount} image(s) supplemented"
+    analyzePrint dump space plugin json
     pure 0
+
 
 private def cmdListPlugins : IO UInt32 := do
   IO.println "Available analyzers:"
@@ -291,8 +300,309 @@ private def cmdListPlugins : IO UInt32 := do
     IO.println s!"  {a.name}: {a.description}"
   pure 0
 
+-- ── match ───────────────────────────────────────────────────────────
+
+private inductive CheckResult where
+  | match_ | mismatch | unknown
+  deriving BEq, DecidableEq
+
+private def CheckResult.asStr : CheckResult → String
+  | .match_ => "match" | .mismatch => "mismatch" | .unknown => "unknown"
+
+private def CheckResult.upper (c : CheckResult) : String := c.asStr.toUpper
+
+private structure Check where
+  field : String
+  result : CheckResult
+  fileValue : String
+  dumpValue : String
+  note : Option String
+
+private structure MatchItem where
+  kind : String
+  path : String
+  modul : Option String
+  checks : List Check
+
+private def MatchItem.result (i : MatchItem) : CheckResult :=
+  if i.modul.isNone || i.checks.any (·.result == .mismatch) then .mismatch
+  else if i.checks.any (·.result == .match_) then .match_
+  else .unknown
+
+private def compareStr (field : String) (dumpSide fileSide : Option String)
+    (absentNote : String) : Check :=
+  match dumpSide, fileSide with
+  | some d, some f =>
+    { field := field
+      result := if d == f then .match_ else .mismatch
+      fileValue := f, dumpValue := d, note := none }
+  | none, f =>
+    { field := field, result := .unknown
+      fileValue := f.getD "-", dumpValue := "-", note := some absentNote }
+  | d, none =>
+    { field := field, result := .unknown
+      fileValue := "-", dumpValue := d.getD "-", note := some "not present in file" }
+
+private def eqIgnoreCase (a b : String) : Bool :=
+  a.toLower == b.toLower
+
+private def matchRunDump (dump : Dump) (exes pdbs : List String) (json : Bool) : IO UInt32 := do
+    let mut items : List MatchItem := []
+    for exe in exes do
+      let bytes ← IO.FS.readBinFile exe
+      match Util.ImageFile.fromBytes bytes 0 with
+      | .error e => IO.eprintln s!"{exe}: {e}"; return 1
+      | .ok img =>
+        let rsds := img.rsds
+        let peChecksum := img.peChecksum
+        let want := basenameOf exe
+        match dump.modules.find? fun m => eqIgnoreCase (basenameOf m.name) want with
+        | none =>
+          items := items ++ [{ kind := "exe", path := exe, modul := none, checks := [] }]
+        | some module =>
+          let guidCheck := compareStr "guid"
+            (module.codeviewGuid.map codeviewUuid)
+            (rsds.map fun r => codeviewUuid r.guid)
+            "module has no RSDS record"
+          let ageCheck := compareStr "age"
+            (module.codeviewAge.map toString)
+            (rsds.map fun r => toString r.age)
+            "module has no RSDS record"
+          let checksumCheck :=
+            if module.checksum != 0 then
+              compareStr "checksum" (some (toString module.checksum))
+                (peChecksum.map toString) "module has no RSDS record"
+            else
+              { field := "checksum", result := .unknown
+                fileValue := (peChecksum.map fun c => "0x" ++ hexPadUpper c.toUInt64 8).getD "-"
+                dumpValue := "-"
+                note := some "dump module checksum is 0" }
+          items := items ++ [{ kind := "exe", path := exe, modul := some module.name
+                               checks := [guidCheck, ageCheck, checksumCheck] }]
+    for pdb in pdbs do
+      let bytes ← IO.FS.readBinFile pdb
+      match Util.pdbIdentity bytes with
+      | .error e => IO.eprintln s!"{pdb}: {e}"; return 1
+      | .ok (age, guid) =>
+        let want := basenameOf pdb
+        match dump.modules.find? fun m =>
+            (m.pdbName.map (fun n => eqIgnoreCase (basenameOf n) want)).getD false with
+        | none =>
+          items := items ++ [{ kind := "pdb", path := pdb, modul := none, checks := [] }]
+        | some module =>
+          let guidCheck := compareStr "guid"
+            (module.codeviewGuid.map codeviewUuid)
+            (some (codeviewUuid guid))
+            "module has no RSDS record"
+          let ageCheck := compareStr "age"
+            (module.codeviewAge.map toString)
+            (some (toString age))
+            "module has no RSDS record"
+          items := items ++ [{ kind := "pdb", path := pdb, modul := some module.name
+                               checks := [guidCheck, ageCheck] }]
+    let failed := items.any fun i => i.result == .mismatch
+    let overall :=
+      if failed then CheckResult.mismatch
+      else if items.all (·.result == .unknown) then .unknown
+      else .match_
+    if json then
+      let checkJson (c : Check) : Json :=
+        .obj [("field", .str c.field), ("result", .str c.result.asStr),
+              ("file", .str c.fileValue), ("dump", .str c.dumpValue),
+              ("note", match c.note with | some n => .str n | none => .null)]
+      let itemJson (i : MatchItem) : Json :=
+        .obj [("kind", .str i.kind),
+              ("path", .str i.path),
+              ("module", match i.modul with | some m => .str m | none => .null),
+              ("result", .str i.result.asStr),
+              ("checks", .arr (i.checks.map checkJson))]
+      let itemsJson := items.map itemJson
+      let top : Json := .obj [("items", .arr itemsJson), ("overall", .str overall.asStr)]
+      IO.println (Json.render top)
+    else
+      for i in items do
+        match i.modul with
+        | some m =>
+          IO.println s!"{i.kind.toUpper} {i.path} ↔ module {m}"
+          for c in i.checks do
+            let note := (c.note.map ("  (" ++ · ++ ")")).getD ""
+            IO.println s!"  {(c.field ++ "         ").take 9} {(c.result.upper ++ "         ").take 9} file={c.fileValue}  dump={c.dumpValue}{note}"
+        | none =>
+          IO.println s!"{i.kind.toUpper} {i.path} ↔ no matching module in dump"
+      IO.println s!"overall: {overall.upper}"
+    pure (if failed then 2 else 0)
+
+
+-- ── shell ───────────────────────────────────────────────────────────
+
+
+private def cmdMatch (path : String) (exes pdbs : List String) (json : Bool) : IO UInt32 := do
+  if exes.isEmpty && pdbs.isEmpty then
+    IO.eprintln "nothing to match: pass --exe and/or --pdb"
+    return 1
+  let data ← IO.FS.readBinFile path
+  match Minidump.fromBytes data with
+  | .error f => IO.eprintln f.render; pure 1
+  | .ok dump => matchRunDump dump exes pdbs json
+
+
+private def shellDispatch (s : Session) (args : List String) : IO (Session × Bool) := do
+  match args with
+  | "quit" :: _ => pure (s, false)
+  | "inspect" :: rest =>
+    match s.current with
+    | .error e => IO.eprintln s!"error: {e}"
+    | .ok (dump, _) =>
+      if (match s.target with | .trace _ _ => true | _ => false) then
+        match s.target with
+        | .trace t cursor => IO.println s!"position {hexUpper cursor} / frontier {hexUpper t.frontier}"
+        | _ => pure ()
+      inspectPrint dump ("--json" ∈ rest) ("--quiet" ∈ rest)
+    pure (s, true)
+  | "analyze" :: rest =>
+    match s.current with
+    | .error e => IO.eprintln s!"error: {e}"
+    | .ok (dump, space) =>
+      let plugin := match rest.find? (· == "--plugin") with
+        | some _ => (rest.dropWhile (· != "--plugin")).drop 1 |>.head?
+        | none => none
+      let json := "--json" ∈ rest
+      if (match s.target with | .trace _ _ => true | _ => false) && !json then
+        match s.target with
+        | .trace t cursor =>
+          IO.eprintln s!"position {hexUpper cursor} / frontier {hexUpper t.frontier}, dump: stack-only"
+        | _ => pure ()
+      analyzePrint dump space plugin json
+    pure (s, true)
+  | "match" :: rest =>
+    match s.current with
+    | .error e => IO.eprintln s!"error: {e}"
+    | .ok (dump, _) =>
+      let rec collect (xs : List String) (exes pdbs : List String) : List String × List String :=
+        match xs with
+        | [] => (exes, pdbs)
+        | "--exe" :: e :: r => collect r (exes ++ [e]) pdbs
+        | "--pdb" :: p :: r => collect r exes (pdbs ++ [p])
+        | _ :: r => collect r exes pdbs
+      let (exes, pdbs) := collect rest [] []
+      let _ ← matchRunDump dump exes pdbs ("--json" ∈ rest)
+    pure (s, true)
+  | ["list-plugins"] =>
+    let _ ← cmdListPlugins
+    pure (s, true)
+  | "load" :: path :: _ =>
+    let s' ← Session.open path s.symbols
+    IO.println s!"loaded {s'.banner}"
+    pure (s', true)
+  | "symbols" :: rest =>
+    match rest with
+    | [] =>
+      IO.println s!"symbols: {s.symbols.getD "<none>"}"
+      pure (s, true)
+    | ["off"] =>
+      IO.println "symbols cleared"
+      pure ({ s with symbols := none }, true)
+    | dir :: _ =>
+      IO.println s!"symbols: {dir}"
+      pure ({ s with symbols := some dir }, true)
+  | "seek" :: posStr :: _ =>
+    match parseU64 posStr with
+    | .error e => IO.eprintln s!"error: {e}"; pure (s, true)
+    | .ok pos =>
+      match s.target with
+      | .dump _ _ => IO.eprintln "error: not a trace session (load a .ttfx file)"; pure (s, true)
+      | .trace t _ =>
+        if pos > t.frontier then
+          IO.eprintln s!"error: position {hexUpper pos} beyond frontier {hexUpper t.frontier}"
+          pure (s, true)
+        else
+          pure ({ s with target := .trace t pos }, true)
+  | "t+" :: _ | "forward" :: _ =>
+    match s.target with
+    | .dump _ _ => IO.eprintln "error: not a trace session (load a .ttfx file)"; pure (s, true)
+    | .trace t cursor =>
+      let cursor' := if cursor < t.frontier then cursor + 1 else cursor
+      IO.println s!"position {hexUpper cursor'}"
+      pure ({ s with target := .trace t cursor' }, true)
+  | "t-" :: _ | "back" :: _ =>
+    match s.target with
+    | .dump _ _ => IO.eprintln "error: not a trace session (load a .ttfx file)"; pure (s, true)
+    | .trace t cursor =>
+      let cursor' := if cursor > 0 then cursor - 1 else cursor
+      IO.println s!"position {hexUpper cursor'}"
+      pure ({ s with target := .trace t cursor' }, true)
+  | ["position"] =>
+    match s.target with
+    | .dump _ _ => IO.eprintln "error: not a trace session (load a .ttfx file)"
+    | .trace t cursor =>
+      IO.println s!"position {hexUpper cursor} / frontier {hexUpper t.frontier}"
+    pure (s, true)
+  | "writes" :: vaStr :: lenStr :: _ =>
+    match parseU64 vaStr, parseU64 lenStr with
+    | .ok va, .ok len =>
+      match s.target with
+      | .dump _ _ => IO.eprintln "error: not a trace session (load a .ttfx file)"
+      | .trace t cursor =>
+        let last := t.lastWriter va cursor
+        let writes := t.writesBetween va len 0 cursor
+        if writes.isEmpty then
+          IO.println s!"no writes to [{hexUpper va}, {hexUpper (va + len)}) up to cursor"
+        for w in writes do
+          let marker := match last with
+            | some lw => if lw.pos == w.pos && lw.va == w.va && lw.data == w.data
+                then "  <-- last writer" else ""
+            | none => ""
+          IO.println s!"  @{hexUpper w.pos}  [{hexUpper w.va}, {hexUpper (UInt64.ofNat (min w.endVaNat (2^64-1)))})  {byteDebug w.data}{marker}"
+    | _, _ => IO.eprintln "error: bad writes arguments"
+    pure (s, true)
+  | ["intervals"] =>
+    match s.target with
+    | .dump _ _ => IO.eprintln "error: not a trace session (load a .ttfx file)"
+    | .trace t cursor =>
+      for (id, iv) in t.threads do
+        let alive := match iv.stop with
+          | none => "alive"
+          | some e => s!"ended {hexUpper e}"
+        let here := if iv.contains cursor then "*" else " "
+        IO.println s!"  {here}thread {id}: start {hexUpper iv.start}, {alive}"
+      for c in t.calls do
+        let state := match c.interval.stop with
+          | none => "open"
+          | some e => s!"end {hexUpper e}"
+        IO.println s!"   call on {c.threadId}: [{hexUpper c.interval.start}, {state})"
+    pure (s, true)
+  | "help" :: _ =>
+    IO.println "commands: inspect analyze match list-plugins load symbols seek t+ t- position writes intervals quit"
+    pure (s, true)
+  | [] => pure (s, true)
+  | cmd :: _ =>
+    IO.eprintln s!"error: unknown command '{cmd}'"
+    pure (s, true)
+
+/-- Run the interactive session (session.rs run). -/
+private partial def shellLoop (s : Session) (stdin stdout : IO.FS.Stream) : IO Unit := do
+  IO.print s.prompt
+  stdout.flush
+  let line ← stdin.getLine
+  if line.isEmpty then
+    IO.println ""
+  else
+    let argv := Session.tokenize line
+    if argv.isEmpty then shellLoop s stdin stdout
+    else
+      let (s', cont) ← shellDispatch s argv
+      if cont then shellLoop s' stdin stdout
+
+private def cmdShell (path : String) (symbols : Option String) : IO UInt32 := do
+  let s ← Session.open path symbols
+  IO.println s!"loaded {s.banner}"
+  IO.println "type 'help' for commands, 'quit' to exit"
+  shellLoop s (← IO.getStdin) (← IO.getStdout)
+  pure 0
+
 private def usage : IO UInt32 := do
-  IO.eprintln "usage: forensicator <inspect|analyze|trace|list-plugins> <file> [flags]"
+
+  IO.eprintln "usage: forensicator <inspect|analyze|match|trace|list-plugins> <file> [flags]"
   pure 2
 
 def main (args : List String) : IO UInt32 := do
@@ -326,6 +636,28 @@ def main (args : List String) : IO UInt32 := do
     | .ok (some path, plugin, json, symbols) => cmdAnalyze path plugin json symbols
     | .ok (none, _, _, _) => usage
   | ["list-plugins"] => cmdListPlugins
+  | "shell" :: rest =>
+    let path := rest.find? fun x => !x.startsWith "-"
+    let symbols := match (rest.zipIdx).find? fun (x, _) => x == "--symbols" with
+      | some (_, i) => rest[i+1]?
+      | none => none
+    match path with
+    | some p => cmdShell p symbols
+    | none => usage
+  | "match" :: rest =>
+    let rec parseM (path : Option String) (exes pdbs : List String) (json : Bool)
+        : List String → Except String (Option String × List String × List String × Bool)
+      | [] => .ok (path, exes, pdbs, json)
+      | "--json" :: rest => parseM path exes pdbs true rest
+      | "--exe" :: e :: rest => parseM path (exes ++ [e]) pdbs json rest
+      | "--pdb" :: p :: rest => parseM path exes (pdbs ++ [p]) json rest
+      | x :: rest =>
+        if x.startsWith "-" then .error s!"unknown flag {x}"
+        else parseM (some x) exes pdbs json rest
+    match parseM none [] [] false rest with
+    | .error e => IO.eprintln e; usage
+    | .ok (some path, exes, pdbs, json) => cmdMatch path exes pdbs json
+    | .ok (none, _, _, _) => usage
   | "trace" :: rest =>
     let rec parseT (path : Option String) (pos : Option String) (writes : List String) (json : Bool)
         : List String → Except String (Option String × Option String × List String × Bool)

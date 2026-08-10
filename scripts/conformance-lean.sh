@@ -24,11 +24,16 @@ if [ ! -x "$LEAN_BIN" ]; then
   (cd "$LEAN_REPO" && lake build) || exit 1
 fi
 
-check() { # name, args...
+check() { # name, args...  (optional CHECK_STDIN feeds both sides the same input)
   local name="$1"; shift
   local r_out l_out
-  r_out="$("$RUST_BIN" "$@" 2>&1)"; local r_code=$?
-  l_out="$("$LEAN_BIN" "$@" 2>&1)"; local l_code=$?
+  if [ -n "${CHECK_STDIN:-}" ]; then
+    r_out="$(printf '%s' "$CHECK_STDIN" | "$RUST_BIN" "$@" 2>&1)"; local r_code=$?
+    l_out="$(printf '%s' "$CHECK_STDIN" | "$LEAN_BIN" "$@" 2>&1)"; local l_code=$?
+  else
+    r_out="$("$RUST_BIN" "$@" 2>&1)"; local r_code=$?
+    l_out="$("$LEAN_BIN" "$@" 2>&1)"; local l_code=$?
+  fi
   if [ "$r_code" -ne "$l_code" ]; then
     echo "FAIL $name: exit codes rust=$r_code lean=$l_code"; fail=1; return
   fi
@@ -137,6 +142,20 @@ for d in minidump minidump_v2; do
 done
 # (full-pipeline fulldump excluded: `arrays` is quadratic on both sides)
 check "list-plugins" list-plugins
+
+# match (Task 10): dump ↔ exe/PDB identity
+ME="$CASES/minidump/electron.exe"
+MP="$CASES/minidump/electron.exe.pdb"
+MF=$(ls "$CASES"/minidump/*.dmp)
+check "match text" match "$MF" --exe "$ME" --pdb "$MP"
+check "match json" match "$MF" --exe "$ME" --pdb "$MP" --json
+check "match exit-code-mismatch" match "$MF" --exe "$ME" --pdb "$MP" >/dev/null || true
+
+# shell (Task 10): scripted REPL parity (trace + dump)
+printf 'position\nseek 0x1\nposition\nwrites 0x1004 2\nt-\nt+\nintervals\nquit\n' > /tmp/shellscript_ttfx.txt
+CHECK_STDIN="$(cat /tmp/shellscript_ttfx.txt)" check "shell trace script" shell "$CASES/ttfx/minimal.ttfx"
+printf 'inspect --quiet\nmatch\nquit\n' > /tmp/shellscript_dump.txt
+CHECK_STDIN="$(cat /tmp/shellscript_dump.txt)" check "shell dump script" shell "$(ls "$CASES"/minidump_v2/*.dmp)"
 
 if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
 echo "== CONFORMANCE PASS =="
