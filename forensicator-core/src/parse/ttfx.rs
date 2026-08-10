@@ -13,7 +13,7 @@
 //! Records:
 //!   INITMEM (32 B): va u64, size u64, prot u32, state u32, mem_type u32, data_off u32
 //!   WRITES  (24 B): pos u64, va u64, len u32, data_off u32
-//!   EVENTS  (48 B): pos u64, kind u32, code u32, address u64, thread_id u32, pad u32,
+//!   EVENTS  (48 B): pos u64, kind u32, code u32, address u64, thread_id u32,
 //!                   size u64, name_len u32, name_off u32, pad u32
 //!   THREADS (24 B): thread_id u32, pad u32, start u64, end u64   (u64::MAX = open)
 //!   CALLS   (24 B): thread_id u32, pad u32, start u64, end u64   (u64::MAX = open)
