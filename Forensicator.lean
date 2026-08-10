@@ -11,6 +11,7 @@ import Forensicator.Model.Trace
 import Forensicator.Spec.Timeline
 import Forensicator.Util.Text
 import Forensicator.Parse.Ttfx
+import Forensicator.Parse.Minidump
 
 namespace Forensicator
 end Forensicator

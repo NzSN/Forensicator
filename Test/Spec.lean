@@ -304,6 +304,56 @@ def runAll : IO UInt32 := do
     | .error _ => pure ()
   check ctx "ttfx all-prefixes + mutations survived" true
 
+  -- minidump decoder (port of parse/dump.rs tests)
+  let le16 (v : Nat) : List UInt8 := [(UInt64.ofNat v).toUInt8, ((UInt64.ofNat v) >>> 8).toUInt8]
+  let le32 (v : Nat) : List UInt8 :=
+    (List.range 4).map fun i => ((UInt64.ofNat v) >>> (8 * UInt64.ofNat i)).toUInt8
+  let le64 (v : UInt64) : List UInt8 :=
+    (List.range 8).map fun i => (v >>> (8 * UInt64.ofNat i)).toUInt8
+  let buildBuf (size : Nat) (writes : List (Nat × List UInt8)) : ByteArray :=
+    ByteArray.mk (writes.foldl (init := Array.replicate size (0 : UInt8)) fun a (off, bs) =>
+      bs.zipIdx.foldl (init := a) fun a2 (b, i) => a2.set! (off + i) b)
+  let minimalDump := buildBuf 256 [
+    (0, le32 0x504D444D), (4, le16 0xA793), (8, le32 1), (12, le32 64),
+    (64, le32 7), (68, le32 56), (72, le32 128),
+    (128, le16 0), (136, le16 9)]
+  check ctx "minidump valid minimal parses"
+    (match Minidump.fromBytes minimalDump with
+     | .ok d => d.systemInfo.isSome && d.modules.isEmpty && d.anomalies.isEmpty
+     | .error _ => false)
+  check ctx "minidump bad magic rejected"
+    (match Minidump.fromBytes (minimalDump.set! 0 0xFF) with
+     | .error _ => true | .ok _ => false)
+  check ctx "minidump directory OOB rejected"
+    (match Minidump.fromBytes (buildBuf 256 [
+      (0, le32 0x504D444D), (4, le16 0xA793), (8, le32 1), (12, le32 0xFFFFFFFF)]) with
+     | .error _ => true | .ok _ => false)
+  check ctx "minidump too small rejected"
+    (match Minidump.fromBytes (ba (List.replicate 10 0)) with
+     | .error _ => true | .ok _ => false)
+  -- V8HE stream ingestion (dump.rs v8heap_stream_lands_in_memory_regions)
+  let cageBase : UInt64 := 0x0000010000000000
+  let v8heBody :=
+    le32 0x45483856 ++ le32 1 ++ le64 cageBase ++ le64 0x0000020000000000
+      ++ le32 2 ++ le32 0
+      ++ le64 cageBase ++ le64 16 ++ le64 (32 + 2 * 24)
+      ++ le64 (cageBase + 0x10000000) ++ le64 8 ++ le64 (32 + 2 * 24 + 16)
+      ++ List.replicate 16 0xAA ++ List.replicate 8 0xBB
+  let v8heDump := buildBuf (44 + v8heBody.length) [
+    (0, le32 0x504D444D), (4, le16 0xA793), (8, le32 1), (12, le32 32),
+    (32, le32 0x45483856), (36, le32 v8heBody.length), (40, le32 44),
+    (44, v8heBody)]
+  check ctx "v8he stream lands in memory regions"
+    (match Minidump.fromBytes v8heDump with
+     | .error _ => false
+     | .ok d =>
+       d.memoryRegions.length == 2
+        && d.memoryRegions.head?.map (·.vaStart == cageBase) == some true
+        && d.memoryRegions.head?.map (·.data.size == 16) == some true
+        && (d.memoryRegions.drop 1 |>.head?).map (fun r =>
+             r.vaStart == cageBase + 0x10000000
+              && r.data == ByteArray.mk (Array.replicate 8 0xBB)) == some true)
+
   let n ← ctx.failures.get
   IO.println (if n == 0 then "== ALL GUARDS PASSED ==" else s!"== {n} FAILURE(S) ==")
   pure n.toUInt32

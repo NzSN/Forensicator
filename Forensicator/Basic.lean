@@ -68,6 +68,11 @@ structure Anomaly where
 def Anomaly.internal (description : String) : Anomaly :=
   { streamType := 0, fileOffset := 0, rva := 0, description }
 
+/-- An anomaly carrying an existing provenance. -/
+def Anomaly.ofProv (prov : Provenance) (description : String) : Anomaly :=
+  { streamType := prov.streamType, fileOffset := prov.fileOffset
+    rva := prov.rva, description := description }
+
 /-- Uppercase hex rendering, matching Rust's `format!("0x{v:X}")`. -/
 def hexUpper (v : UInt64) : String :=
   let ds := Nat.toDigits 16 v.toNat
@@ -76,6 +81,11 @@ def hexUpper (v : UInt64) : String :=
 /-- Uppercase hex digits, zero-padded to `width` (Rust `{v:0width$X}`). -/
 def hexPadUpper (v : UInt64) (width : Nat) : String :=
   let ds := (Nat.toDigits 16 v.toNat).map fun c => if c.isAlpha then c.toUpper else c
+  String.ofList (List.replicate (width - ds.length) '0' ++ ds)
+
+/-- Lowercase hex digits, zero-padded to `width`. -/
+def hexPadLower (v : UInt64) (width : Nat) : String :=
+  let ds := Nat.toDigits 16 v.toNat
   String.ofList (List.replicate (width - ds.length) '0' ++ ds)
 
 /-- Hard errors (unrecoverable: bad magic, truncated header, …). -/

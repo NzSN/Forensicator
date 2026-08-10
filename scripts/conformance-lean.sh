@@ -74,4 +74,21 @@ else
 fi
 
 if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
+
+# minidump fixtures (Task 5): --quiet is byte-exact; --json compares with the
+# diagnosis key stripped until the cause analyzer lands (Task 8)
+njstrip() { python3 -c 'import json,sys; d=json.load(sys.stdin); d.pop("diagnosis", None); print(json.dumps(d, sort_keys=True))'; }
+for d in "$CASES"/minidump "$CASES"/minidump_v2 "$CASES"/fulldump; do
+  f=$(ls "$d"/*.dmp)
+  check "inspect quiet $(basename $d)" inspect "$f" --quiet
+  r_json="$("$RUST_BIN" inspect "$f" --json | njstrip)"
+  l_json="$("$LEAN_BIN" inspect "$f" --json | njstrip)"
+  if [ "$r_json" = "$l_json" ]; then
+    echo "ok   inspect json $(basename $d) (sans diagnosis)"
+  else
+    echo "FAIL inspect json $(basename $d)"; fail=1
+  fi
+done
+
+if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
 echo "== CONFORMANCE PASS =="

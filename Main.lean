@@ -95,23 +95,124 @@ private def cmdTrace (path : String) (posArg : Option String) (writesArg : List 
         pure 0
     else pure 0
 
+-- ── inspect ─────────────────────────────────────────────────────────
+
+private def osName : OsPlatform → String
+  | .Windows => "Windows" | .Linux => "Linux" | .MacOs => "macOS"
+
+private def cpuName : CpuArch → String
+  | .X86 => "x86" | .X64 => "x64" | .Arm64 => "ARM64"
+
+/-- CodeView RSDS GUID → standard UUID text (model.rs codeview_guid_to_uuid). -/
+private def codeviewUuid (guid : ByteArray) : String :=
+  let b (i : Nat) := guid.get! i
+  let d1 : UInt64 := (b 0).toUInt64 ||| ((b 1).toUInt64 <<< 8)
+    ||| ((b 2).toUInt64 <<< 16) ||| ((b 3).toUInt64 <<< 24)
+  let d2 : UInt64 := (b 4).toUInt64 ||| ((b 5).toUInt64 <<< 8)
+  let d3 : UInt64 := (b 6).toUInt64 ||| ((b 7).toUInt64 <<< 8)
+  let hi : UInt64 := ((b 8).toUInt64 <<< 8) ||| (b 9).toUInt64
+  let lo : UInt64 := ((b 10).toUInt64 <<< 40) ||| ((b 11).toUInt64 <<< 32)
+    ||| ((b 12).toUInt64 <<< 24) ||| ((b 13).toUInt64 <<< 16)
+    ||| ((b 14).toUInt64 <<< 8) ||| (b 15).toUInt64
+  s!"{hexPadLower d1 8}-{hexPadLower d2 4}-{hexPadLower d3 4}-{hexPadLower hi 4}-{hexPadLower lo 12}"
+
+private def moduleJson (m : Module) : Json :=
+  .obj [("name", .str m.name),
+        ("base_va", .str ("0x" ++ hexPadUpper m.baseVa 16)),
+        ("size", .ofUInt64 m.size),
+        ("checksum", .str ("0x" ++ hexPadUpper m.checksum.toUInt64 8)),
+        ("codeview_guid", match m.codeviewGuid with
+          | some g => .str (codeviewUuid g) | none => .null),
+        ("pdb_name", match m.pdbName with | some p => .str p | none => .null)]
+
+private def inspectJson (d : Dump) : Json :=
+  .obj [
+    ("file_size", .ofUInt64 d.fileSize),
+    ("system_info", match d.systemInfo with
+      | some si => .obj [("os", .str (osName si.os)), ("cpu", .str (cpuName si.cpu)),
+          ("version", .str s!"{si.version.1}.{si.version.2.1}.{si.version.2.2.1}.{si.version.2.2.2}")]
+      | none => .null),
+    ("module_count", .ofNat d.modules.length),
+    ("modules", .arr (d.modules.map moduleJson)),
+    ("thread_count", .ofNat d.threads.length),
+    ("memory_regions", .ofNat d.memoryRegions.length),
+    ("exception", .bool d.exception.isSome),
+    ("diagnosis", .null),  -- cause analyzer lands in Task 8; gate strips this key
+    ("anomaly_count", .ofNat d.anomalies.length),
+    ("annotation_count", .ofNat d.annotations.length),
+    ("annotations", .arr (d.annotations.map fun (k, v) => .obj [(k, .str v)]))]
+
+/-- Rust `{:.1}` of `bytes / 1024.0` (round-half-up on tenths). -/
+private def kb1 (bytes : UInt64) : String :=
+  let tenths := (bytes.toNat * 10 + 512) / 1024
+  s!"{tenths / 10}.{tenths % 10}"
+
+private def inspectText (d : Dump) : IO Unit := do
+  IO.println s!"Dump ({kb1 d.fileSize} KB)"
+  match d.systemInfo with
+  | some si =>
+    IO.println s!"├── SystemInfo: {cpuName si.cpu} on {osName si.os} v{si.version.1}.{si.version.2.1}.{si.version.2.2.1}.{si.version.2.2.2}"
+  | none => IO.println "├── SystemInfo: <missing>"
+  IO.println s!"├── Modules: {d.modules.length} loaded"
+  for m in d.modules do
+    IO.println s!"│   ├── {m.name} @ 0x{hexPadUpper m.baseVa 16} ({kb1 m.size} KB)"
+  IO.println s!"├── Threads: {d.threads.length}"
+  for t in d.threads do
+    IO.println s!"│   ├── TID {t.id}  stack @ 0x{hexPadUpper t.stackVa 16} ({kb1 t.stackSize} KB)  TEB @ 0x{hexPadUpper t.tebVa 16}  RIP 0x{hexPadUpper t.registers.rip 16}"
+  IO.println s!"├── Memory regions: {d.memoryRegions.length}"
+  if let some exc := d.exception then
+    IO.println s!"├── Exception: code 0x{hexPadUpper exc.code.toUInt64 8} at 0x{hexPadUpper exc.address 16} (thread {exc.threadId})"
+    -- Diagnosis line deferred to Task 8 (cause analyzer port)
+  if !d.anomalies.isEmpty then
+    IO.println s!"├── Anomalies: {d.anomalies.length}"
+    for a in d.anomalies do
+      IO.println s!"│   ├── [stream 0x{hexPadUpper a.streamType.toUInt64 8} @ +{hexUpper a.fileOffset}] {a.description}"
+  if !d.annotations.isEmpty then
+    IO.println s!"└── Crash annotations: {d.annotations.length}"
+    for (k, v) in d.annotations do
+      IO.println s!"    ├── {k} = {v}"
+
+private def cmdInspect (path : String) (json quiet : Bool) : IO UInt32 := do
+  let data ← IO.FS.readBinFile path
+  match Minidump.fromBytes data with
+  | .error f => IO.eprintln f.render; pure 1
+  | .ok dump =>
+    if json then IO.println (Json.render (inspectJson dump))
+    else if quiet then
+      IO.println s!"modules: {dump.modules.length}  threads: {dump.threads.length}  memory_regions: {dump.memoryRegions.length}  anomalies: {dump.anomalies.length}"
+    else inspectText dump
+    pure 0
+
 private def usage : IO UInt32 := do
-  IO.eprintln "usage: forensicator trace <file.ttfx> [--json] [--pos P] [--writes va len]"
+  IO.eprintln "usage: forensicator <inspect|trace> <file> [flags]"
   pure 2
 
 def main (args : List String) : IO UInt32 := do
   match args with
-  | "trace" :: rest =>
-    let rec parse (path : Option String) (pos : Option String) (writes : List String) (json : Bool)
-        : List String → Except String (Option String × Option String × List String × Bool)
-      | [] => .ok (path, pos, writes, json)
-      | "--json" :: rest => parse path pos writes true rest
-      | "--pos" :: p :: rest => parse path (some p) writes json rest
-      | "--writes" :: a :: b :: rest => parse path pos [a, b] json rest
+  | "inspect" :: rest =>
+    let rec parseI (path : Option String) (json quiet : Bool)
+        : List String → Except String (Option String × Bool × Bool)
+      | [] => .ok (path, json, quiet)
+      | "--json" :: rest => parseI path true quiet rest
+      | "--quiet" :: rest => parseI path json true rest
       | x :: rest =>
         if x.startsWith "-" then .error s!"unknown flag {x}"
-        else parse (some x) pos writes json rest
-    match parse none none [] false rest with
+        else parseI (some x) json quiet rest
+    match parseI none false false rest with
+    | .error e => IO.eprintln e; usage
+    | .ok (some path, json, quiet) => cmdInspect path json quiet
+    | .ok (none, _, _) => usage
+  | "trace" :: rest =>
+    let rec parseT (path : Option String) (pos : Option String) (writes : List String) (json : Bool)
+        : List String → Except String (Option String × Option String × List String × Bool)
+      | [] => .ok (path, pos, writes, json)
+      | "--json" :: rest => parseT path pos writes true rest
+      | "--pos" :: p :: rest => parseT path (some p) writes json rest
+      | "--writes" :: a :: b :: rest => parseT path pos [a, b] json rest
+      | x :: rest =>
+        if x.startsWith "-" then .error s!"unknown flag {x}"
+        else parseT (some x) pos writes json rest
+    match parseT none none [] false rest with
     | .error e => IO.eprintln e; usage
     | .ok (some path, pos, writes, json) => cmdTrace path pos writes json
     | .ok (none, _, _, _) => usage
