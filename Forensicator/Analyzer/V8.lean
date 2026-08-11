@@ -145,41 +145,44 @@ private def findEptBase (space : AddressSpace) (isolateVa : VA) (handle : UInt32
 
 private def decodeScriptName (space : AddressSpace) (cage : VA) (script : VA)
     (isolateVa : Option VA) (moduleRanges : List (VA × UInt64))
-    (eptBase : Option VA) (layout : V8Layout) : Except Unit (Option (String × Option VA)) := do
+    (eptBase : Option VA) (layout : V8Layout) : Except Unit (Option String × Option VA) := do
   let nameObjO := (readU32o space (script + layout.scriptName)).bind (decompress cage)
   match nameObjO with
-  | none => .ok none
+  | none => .ok (none, eptBase)
   | some nameObj =>
     match instanceType space cage nameObj with
-    | none => .ok none
+    | none => .ok (none, eptBase)
     | some itype =>
-      if itype ≥ layout.stringItypeMax then .ok none
+      if itype ≥ layout.stringItypeMax then .ok (none, eptBase)
       else if itype &&& layout.stringExternalBit == 0 then
-        .ok ((readV8String space nameObj itype layout).map (·, eptBase))
+        .ok (readV8String space nameObj itype layout, eptBase)
       else
         match readU32o space (nameObj + layout.stringChars) with
-        | none => .ok none
+        | none => .ok (none, eptBase)
         | some handle =>
-          if handle == 0 || handle.toUInt64 &&& (((1 : UInt64) <<< (UInt64.ofNat layout.eptIndexShift)) - 1) != 0 then .ok none
+          if handle == 0 || handle.toUInt64 &&& (((1 : UInt64) <<< (UInt64.ofNat layout.eptIndexShift)) - 1) != 0 then
+            .ok (none, eptBase)
           else
             match readU32o space (nameObj + layout.stringLength) with
-            | none => .ok none
+            | none => .ok (none, eptBase)
             | some len =>
-              if len == 0 || len > layout.maxJsNameLen then .ok none
+              if len == 0 || len > layout.maxJsNameLen then .ok (none, eptBase)
               else
                 let oneByte := itype &&& layout.stringOneByteBit != 0
                 match eptBase with
                 | some b =>
-                  .ok ((externalStringViaEpt space b handle len oneByte layout).map (·, some b))
+                  .ok (externalStringViaEpt space b handle len oneByte layout, some b)
                 | none =>
                   match isolateVa with
-                  | none => .ok none
+                  | none => .ok (none, eptBase)
                   | some iso =>
                     match findEptBase space iso handle len oneByte moduleRanges layout with
                     | .error () => .error ()
-                    | .ok none => .ok none
+                    | .ok none => .ok (none, eptBase)
                     | .ok (some b) =>
-                      .ok ((externalStringViaEpt space b handle len oneByte layout).map (·, some b))
+                      -- Rust sets the ept_base cell when found, even if the
+                      -- string read then fails.
+                      .ok (externalStringViaEpt space b handle len oneByte layout, some b)
 
 private def decodeScriptLine (space : AddressSpace) (cage : VA) (script : VA)
     (position : Int) (layout : V8Layout) : Option UInt32 := do
@@ -285,13 +288,12 @@ private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA
           | none => .ok (some (info, ept))
           | some script =>
             match (← decodeScriptName space cage script isolateVa moduleRanges ept layout) with
-            | some (sn, ept') =>
+            | (sn, ept') =>
               ept := ept'
               let line := match position with
                 | some pos => decodeScriptLine space cage script pos layout
                 | none => none
-              .ok (some ({ info with scriptName := some sn, scriptLine := line }, ept))
-            | none => .ok (some (info, ept))
+              .ok (some ({ info with scriptName := sn, scriptLine := line }, ept))
   let rec trySlot (slots : List Int) : Except Unit (Option (JsFrameInfo × Option VA)) :=
     match slots with
     | [] => .ok none
