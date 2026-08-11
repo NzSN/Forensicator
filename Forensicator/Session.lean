@@ -3,7 +3,10 @@
    list-plugins/load/symbols/seek/forward/back/position/writes/intervals/quit.
 
    Known parity boundary: clap's auto-generated `help`/error text is not
-   reproduced (our parser prints a simpler usage error). -/
+   reproduced (our parser prints a simpler usage error).
+   Error-path text (F9) is intentionally ungated: `error: …` messages for
+   missing files / bad flags are emitted by our CLI in its own wording and
+   never diffed against the Rust binary's `error: {e}` output. -/
 import Forensicator.Model.Trace
 import Forensicator.Parse.Minidump
 import Forensicator.Parse.Ttfx

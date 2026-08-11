@@ -321,6 +321,45 @@ def runAll : IO UInt32 := do
       && bigBack.writes.map (·.pos) == bigWrites.map (·.pos)
       && (bigT1 - bigT0) < 30000)
 
+  -- F5: minidump prefix + mutation fuzz over Case/*.dmp fixtures. The
+  -- decoder must always *return* (ok or error); a Lean panic/stack overflow
+  -- crashes this binary. Skipped when FORENSICATOR_CASE_DIR is unset or
+  -- contains no .dmp files (lake build runs without fixtures).
+  match (← IO.getEnv "FORENSICATOR_CASE_DIR") with
+  | none => IO.println "skip  minidump fuzz (FORENSICATOR_CASE_DIR unset)"
+  | some caseDir =>
+    let budget : Nat := 4 * 1024 * 1024 * 1024
+    let dumps ← try
+      System.FilePath.walkDir (System.FilePath.mk caseDir) |>.map (·.toList)
+    catch _ =>
+      IO.println s!"skip  minidump fuzz (cannot walk {caseDir})"
+      pure []
+    let dmpFiles := dumps.filter fun p => p.toString.endsWith ".dmp"
+    if dmpFiles.isEmpty then
+      IO.println s!"skip  minidump fuzz (no *.dmp under {caseDir})"
+    else
+      let mut fuzzed : Nat := 0
+      for p in dmpFiles do
+        let data ← IO.FS.readBinFile p
+        let fname := (System.FilePath.fileName p).getD p.toString
+        -- ~500 prefixes for small dumps; huge dumps (fulldump ≈ 1.2 GB)
+        -- get budget-scaled so total decode work stays ~constant per
+        -- fixture (each prefix re-decodes its region payloads).
+        let n := min 500 (max 1 (budget / data.size))
+        let stride := max 1 (data.size / n)
+        for k in [:n] do
+          let cut := min data.size (k * stride)
+          match Minidump.fromBytes (data.extract 0 cut) with
+          | .ok _ => pure () | .error _ => pure ()
+        let nMut := min 200 (max 1 (budget / data.size))
+        for i in [:nMut] do
+          let idx := (i * 37 + fname.toList.length) % data.size
+          let mutated := data.set! idx ((data.get! idx) ^^^ 0xFF)
+          match Minidump.fromBytes mutated with
+          | .ok _ => pure () | .error _ => pure ()
+        fuzzed := fuzzed + 1
+      check ctx s!"minidump fuzz survived {fuzzed} fixture(s)" (fuzzed > 0)
+
   -- minidump decoder (port of parse/dump.rs tests)
   let le16 (v : Nat) : List UInt8 := [(UInt64.ofNat v).toUInt8, ((UInt64.ofNat v) >>> 8).toUInt8]
   let le32 (v : Nat) : List UInt8 :=
@@ -448,6 +487,94 @@ def runAll : IO UInt32 := do
          Json.get f0 "js_function_name" == some (Json.str "myFunc")
            && Json.get f0 "script_name" == some (Json.str "test.js")
        | _ => false)
+
+  -- F6: unwind + CONTEXT decode guards (unwind.rs / arch.rs ports).
+  -- Fake PE with one RUNTIME_FUNCTION in .pdata at RVA 0x3000 and the
+  -- UNWIND_INFO blob at RVA 0x4000, plus a stack region at 0x8000.
+  let uwBase : UInt64 := 0x1_0000_0000
+  let mkImg (pdata unwind : List UInt8) : ByteArray :=
+    buildBuf 0x5000 [
+      (0, [0x4D, 0x5A]),
+      (0x3C, le32 0x80),
+      (0x80, [0x50, 0x45, 0, 0]),
+      (0x98, le16 0x20B),
+      (0x120, le32 0x3000),
+      (0x124, le32 pdata.length),
+      (0x3000, pdata),
+      (0x4000, unwind)]
+  let uwSpace (img stack : ByteArray) : AddressSpace :=
+    let s0 : AddressSpace := .new 4
+    let r0 : AddressRegion :=
+      { vaStart := uwBase, size := UInt64.ofNat img.size, data := img, protection := 5
+        state := .Commit, classification := .Image }
+    let s1 := match s0.addRegion r0 with
+      | .ok s => s | .error _ => s0
+    let r1 : AddressRegion :=
+      { vaStart := 0x8000, size := UInt64.ofNat stack.size, data := stack, protection := 3
+        state := .Commit, classification := .Stack }
+    match s1.addRegion r1 with
+      | .ok s => s | .error _ => s1
+  let mkRegs (rip rsp rbp : UInt64) : Model.RegisterSet :=
+    (Model.RegisterSet.new.set Model.X64.RIP rip).set Model.X64.RSP rsp
+      |>.set Model.X64.RBP rbp
+  let uwRt : Util.RuntimeFunction := { begin := 0x1000, stop := 0x1100, unwindInfo := 0x4000 }
+  let uwMod : Model.Module :=
+    { name := "m.exe", baseVa := uwBase, size := 0x5000, checksum := 0, provenance := {} }
+  let pdata := le32 0x1000 ++ le32 0x1100 ++ le32 0x4000
+  check ctx "unwind pdata lookup finds function"
+    (match (Util.UnwindTables.lookup (Util.UnwindTables.new [uwMod])
+        (uwSpace (mkImg pdata [1, 4, 1, 0]) (buildBuf 0x100 [])) (uwBase + 0x1050)).1 with
+     | some (b, f) => b == uwBase && f.begin == 0x1000
+     | none => false)
+  check ctx "unwind pdata lookup misses outside module"
+    ((Util.UnwindTables.lookup (Util.UnwindTables.new [uwMod])
+        (uwSpace (mkImg pdata [1, 4, 1, 0]) (buildBuf 0x100 [])) (uwBase + 0x9999)).1.isNone)
+  check ctx "unwind push_nonvol + alloc_small"
+    (match Util.unwindStep (mkRegs (uwBase + 0x1080) 0x7FE8 0)
+        (uwSpace (mkImg pdata [1, 4, 2, 0, 0x02, 0x22, 0x00, 0x30])
+          (buildBuf 0x100 [(0, le64 0xBEEF), (8, le64 0x7ABC)]))
+        uwBase uwRt with
+     | some r' => r'.get Model.X64.RBX == 0xBEEF && r'.get Model.X64.RSP == 0x8010
+         && r'.get Model.X64.RIP == 0x7ABC
+     | none => false)
+  check ctx "unwind set_fpreg + save_nonvol"
+    (match Util.unwindStep (mkRegs (uwBase + 0x1080) 0x8060 0x8100)
+        (uwSpace (mkImg pdata [1, 8, 5, 0x05, 0x08, 0x64, 0x02, 0x00, 0x06, 0x52,
+                                0x03, 0x03, 0x00, 0x50, 0x00, 0x00])
+          (buildBuf 0x200 [(0x70, le64 0x5151), (0x100, le64 0x9000), (0x108, le64 0x9999)]))
+        uwBase uwRt with
+     | some r' => r'.get Model.X64.RSI == 0x5151 && r'.get Model.X64.RBP == 0x9000
+         && r'.get Model.X64.RSP == 0x8110 && r'.get Model.X64.RIP == 0x9999
+     | none => false)
+  check ctx "unwind push_machframe"
+    (match Util.unwindStep (mkRegs (uwBase + 0x1080) 0x8000 0)
+        (uwSpace (mkImg pdata [1, 4, 1, 0, 0x00, 0x0A, 0x00, 0x00])
+          (buildBuf 0x100 [(0x28, le64 0x1234)]))
+        uwBase uwRt with
+     | some r' => r'.get Model.X64.RSP == 0x8030 && r'.get Model.X64.RIP == 0x1234
+     | none => false)
+  check ctx "context full decodes rax+rip"
+    (match Model.RegisterSet.decodeContext
+        (buildBuf 256 [(0x78, le64 0xDEADBEEFCAFEBABE), (0xF8, le64 0x7FFA1000)]) with
+     | .ok rs => rs.get Model.X64.RAX == 0xDEADBEEFCAFEBABE && rs.get Model.X64.RIP == 0x7FFA1000
+     | .error _ => false)
+  check ctx "context truncated returns error"
+    (match Model.RegisterSet.decodeContext (buildBuf 16 []) with
+     | .error "truncated CONTEXT" => true | _ => false)
+  check ctx "context segment regs"
+    (match Model.RegisterSet.decodeContext
+        (buildBuf 256 [(0x3A, le16 0x2B), (0x3C, le16 0x33)]) with
+     | .ok rs => rs.get Model.X64.DS == 0x2B && rs.get Model.X64.ES == 0x33
+     | .error _ => false)
+  check ctx "context rflags"
+    (match Model.RegisterSet.decodeContext (buildBuf 256 [(0x44, le32 0x246)]) with
+     | .ok rs => rs.get Model.X64.RFLAGS == 0x246
+     | .error _ => false)
+  check ctx "context debug regs"
+    (match Model.RegisterSet.decodeContext
+        (buildBuf 256 [(0x48, le64 0x7FFA0000), (0x70, le64 0x400)]) with
+     | .ok rs => rs.get Model.X64.DR0 == 0x7FFA0000 && rs.get Model.X64.DR7 == 0x400
+     | .error _ => false)
 
   let n ← ctx.failures.get
   IO.println (if n == 0 then "== ALL GUARDS PASSED ==" else s!"== {n} FAILURE(S) ==")

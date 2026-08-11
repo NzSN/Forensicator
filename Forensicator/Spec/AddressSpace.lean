@@ -300,8 +300,7 @@ end AddressSpace
     `AddressSpace.regions`, which `addRegion` keeps sorted). Binary search
     replaces the linear scan on hot paths (pointer scan / vtables).
     Equivalence with `regionAt` holds under `WellFormed` by
-    `regionAt_unique`; it is exercised by the conformance gate on all
-    fixtures rather than proved here. -/
+    `regionAt_eq` (F7). -/
 structure FastSpace where
   regions : Array AddressRegion
 
@@ -309,18 +308,21 @@ namespace FastSpace
 
 def ofSpace (s : AddressSpace) : FastSpace := ⟨s.regions.toArray⟩
 
-/-- Count of regions with vaStart ≤ va (binary search), then coverage check. -/
-def regionAt (fs : FastSpace) (va : VA) : Option AddressRegion :=
-  let n := fs.regions.size
-  let rec go (fuel lo hi : Nat) : Nat :=
+/-- Count of regions with vaStart ≤ va (binary search, fuel = n+1). -/
+private def search (fs : FastSpace) (va : VA) : Nat → Nat → Nat → Nat
+  | fuel, lo, hi =>
     match fuel with
     | 0 => lo
     | fuel + 1 =>
       if lo < hi then
         let mid := (lo + hi) / 2
-        if fs.regions[mid]!.vaStart ≤ va then go fuel (mid + 1) hi else go fuel lo mid
+        if (fs.regions[mid]!).vaStart ≤ va then search fs va fuel (mid + 1) hi
+        else search fs va fuel lo mid
       else lo
-  let k := go (n + 1) 0 n
+
+/-- Count of regions with vaStart ≤ va (binary search), then coverage check. -/
+def regionAt (fs : FastSpace) (va : VA) : Option AddressRegion :=
+  let k := search fs va (fs.regions.size + 1) 0 fs.regions.size
   if k == 0 then none
   else
     let r := fs.regions[k - 1]!
@@ -330,6 +332,364 @@ def classify (fs : FastSpace) (va : VA) : RegionClass :=
   match fs.regionAt va with
   | some r => r.classification
   | none => .Other
+
+/-! F7: FastSpace.regionAt ≡ AddressSpace.regionAt under WellFormed. -/
+
+open AddressSpace AddressRegion
+
+theorem list_get!_mem {rs : List AddressRegion} {i : Nat} (h : i < rs.length) : rs[i]! ∈ rs := by
+  induction rs generalizing i with
+  | nil => simpa using h
+  | cons x xs ih =>
+    by_cases hi : i = 0
+    · subst i
+      simp
+    · cases i with
+      | zero => omega
+      | succ i =>
+        have hxs : i < xs.length := by
+          rw [List.length_cons] at h
+          omega
+        rw [List.getElem!_cons_succ]
+        exact List.mem_cons.2 (.inr (ih hxs))
+
+theorem list_get!_eq_array_get! {rs : List AddressRegion} {i : Nat} (h : i < rs.length) :
+    rs[i]! = rs.toArray[i]! := by
+  rw [List.getElem!_toArray]
+
+theorem mem_toArray_get! {rs : List AddressRegion} {i : Nat} (h : i < rs.length) :
+    rs.toArray[i]! ∈ rs := by
+  rw [← list_get!_eq_array_get! h]
+  exact list_get!_mem h
+
+theorem mem_iff_exists_get! {rs : List AddressRegion} {x : AddressRegion} :
+    x ∈ rs ↔ ∃ i, i < rs.length ∧ rs.toArray[i]! = x := by
+  constructor
+  · intro hx
+    induction rs with
+    | nil => cases hx
+    | cons y ys ih =>
+      rcases List.mem_cons.1 hx with hy | hys
+      · exact ⟨0, by simp, by simp [hy]⟩
+      · rcases ih hys with ⟨i, hi, hi2⟩
+        exact ⟨i + 1, by simp [hi], by
+          rw [List.getElem!_toArray, List.getElem!_cons_succ]
+          rw [list_get!_eq_array_get! hi]
+          exact hi2⟩
+  · rintro ⟨i, hi, hx⟩
+    rw [← hx]
+    exact mem_toArray_get! hi
+
+/-! WellFormed → array sorted + endNat chain. -/
+
+theorem wellFormed_sorted {rs : List AddressRegion} (wf : WellFormed rs) :
+    ∀ i j, i ≤ j → j < rs.length → (rs.toArray[i]!).vaStart ≤ (rs.toArray[j]!).vaStart := by
+  intro i j hle hj
+  rw [List.getElem!_toArray, List.getElem!_toArray]
+  induction rs generalizing i j with
+  | nil => simpa using hj
+  | cons x xs ih =>
+    rcases wf with ⟨hxsz, hxclear, wfxs⟩
+    by_cases hi : i = 0
+    · subst i
+      cases j with
+      | zero => simp
+      | succ j =>
+        have hxs : j < xs.length := by
+          rw [List.length_cons] at hj
+          omega
+        have hxj : xs[j]! ∈ xs := list_get!_mem hxs
+        have hxend : x.endNat ≤ (xs[j]!).vaStart.toNat := hxclear _ hxj
+        have hxstart : x.vaStart.toNat < x.endNat := x.endNat_gt_start hxsz
+        rw [List.getElem!_cons_zero, List.getElem!_cons_succ]
+        rw [UInt64.le_iff_toNat_le]
+        omega
+    · have hpos : 0 < i := Nat.pos_of_ne_zero hi
+      cases i with
+      | zero => omega
+      | succ i =>
+        cases j with
+        | zero => omega
+        | succ j =>
+          have hix : i ≤ j := by omega
+          have hxs : j < xs.length := by
+            rw [List.length_cons] at hj
+            omega
+          have hrec := ih wfxs i j hix hxs
+          rw [List.getElem!_cons_succ, List.getElem!_cons_succ]
+          exact hrec
+
+theorem wellFormed_endNat_le_vaStart {rs : List AddressRegion} (wf : WellFormed rs) :
+    ∀ i j, i < j → j < rs.length → (rs.toArray[i]!).endNat ≤ (rs.toArray[j]!).vaStart.toNat := by
+  intro i j hlt hj
+  rw [List.getElem!_toArray, List.getElem!_toArray]
+  induction rs generalizing i j with
+  | nil => simpa using hj
+  | cons x xs ih =>
+    rcases wf with ⟨hxsz, hxclear, wfxs⟩
+    by_cases hi : i = 0
+    · subst i
+      cases j with
+      | zero => omega
+      | succ j =>
+        have hxs : j < xs.length := by
+          rw [List.length_cons] at hj
+          omega
+        have hxj : xs[j]! ∈ xs := list_get!_mem hxs
+        rw [List.getElem!_cons_zero, List.getElem!_cons_succ]
+        exact hxclear _ hxj
+    · have hpos : 0 < i := Nat.pos_of_ne_zero hi
+      cases i with
+      | zero => omega
+      | succ i =>
+        cases j with
+        | zero => omega
+        | succ j =>
+          have hix : i < j := by omega
+          have hxs : j < xs.length := by
+            rw [List.length_cons] at hj
+            omega
+          have hrec := ih wfxs i j hix hxs
+          rw [List.getElem!_cons_succ, List.getElem!_cons_succ]
+          exact hrec
+
+/-! Binary-search loop correctness (induction on fuel). -/
+
+/-- The region array is sorted by vaStart. -/
+def SortedArray (regions : Array AddressRegion) : Prop :=
+  ∀ i j, i ≤ j → j < regions.size → (regions[i]!).vaStart ≤ (regions[j]!).vaStart
+
+/-- Exactly `k` regions have vaStart ≤ va: a prefix. -/
+def CountLE (fs : FastSpace) (va : VA) (k : Nat) : Prop :=
+  k ≤ fs.regions.size
+    ∧ (∀ j, j < k → (fs.regions[j]!).vaStart ≤ va)
+    ∧ (∀ j, k ≤ j → j < fs.regions.size → va < (fs.regions[j]!).vaStart)
+
+theorem search_count {fs : FastSpace} {va : VA} (hord : SortedArray fs.regions) :
+    ∀ (fuel lo hi : Nat),
+      lo ≤ hi → hi ≤ fs.regions.size → fuel ≥ hi - lo + 1 →
+      (∀ j, j < lo → (fs.regions[j]!).vaStart ≤ va) →
+      (∀ j, hi ≤ j → j < fs.regions.size → va < (fs.regions[j]!).vaStart) →
+      CountLE fs va (search fs va fuel lo hi) := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi hle hhi hfuel hlo hhi'
+    exfalso
+    omega
+  | succ fuel ih =>
+    intro lo hi hle hhi hfuel hlo hhi'
+    by_cases hlt : lo < hi
+    · let mid := (lo + hi) / 2
+      have hmid_ge : lo ≤ mid := by
+        have hdiv : (lo + lo) / 2 ≤ (lo + hi) / 2 :=
+          Nat.div_le_div_right (by omega)
+        rwa [show (lo + lo) / 2 = lo by
+          rw [← Nat.two_mul lo]
+          exact Nat.mul_div_right lo (by decide : (0 : Nat) < 2)] at hdiv
+      have hmid_lt : mid < hi := by
+        have hdiv : (lo + hi) / 2 < (hi + hi) / 2 :=
+          Nat.div_lt_div_of_lt_of_dvd (by rw [← Nat.two_mul hi]; exact Nat.dvd_mul_right 2 hi) (by omega)
+        rwa [show (hi + hi) / 2 = hi by
+          rw [← Nat.two_mul hi]
+          exact Nat.mul_div_right hi (by decide : (0 : Nat) < 2)] at hdiv
+      by_cases hm : (fs.regions[mid]!).vaStart ≤ va
+      · have hlo' : ∀ j, j < mid + 1 → (fs.regions[j]!).vaStart ≤ va := by
+          intro j hj
+          have hjmid : j ≤ mid := by omega
+          have hjlt : j < fs.regions.size := by omega
+          by_cases hjl : j < lo
+          · exact hlo j hjl
+          · have hloj : lo ≤ j := Nat.le_of_not_gt hjl
+            have h1 : (fs.regions[j]!).vaStart.toNat ≤ (fs.regions[mid]!).vaStart.toNat := by
+              simpa [UInt64.le_iff_toNat_le] using hord j mid hjmid (by omega)
+            have h2 : (fs.regions[mid]!).vaStart.toNat ≤ va.toNat := by
+              simpa [UInt64.le_iff_toNat_le] using hm
+            rw [UInt64.le_iff_toNat_le]
+            exact Nat.le_trans h1 h2
+        have hfuel' : fuel ≥ hi - (mid + 1) + 1 := by omega
+        have hle' : mid + 1 ≤ hi := by omega
+        have hk := ih (mid + 1) hi hle' hhi hfuel' hlo' hhi'
+        have hdef : search fs va (fuel + 1) lo hi = search fs va fuel (mid + 1) hi := by
+          simp [search, hlt, hm, mid]
+        rw [hdef]
+        exact hk
+      · have hhi'' : ∀ j, mid ≤ j → j < fs.regions.size → va < (fs.regions[j]!).vaStart := by
+          intro j hmidj hjlt
+          have hmv : va.toNat < (fs.regions[mid]!).vaStart.toNat := by
+            simpa [UInt64.le_iff_toNat_le] using hm
+          have hordj : (fs.regions[mid]!).vaStart.toNat ≤ (fs.regions[j]!).vaStart.toNat := by
+            simpa [UInt64.le_iff_toNat_le] using hord mid j hmidj hjlt
+          rw [UInt64.lt_iff_toNat_lt]
+          exact Nat.lt_of_lt_of_le hmv hordj
+        have hfuel' : fuel ≥ mid - lo + 1 := by omega
+        have hle' : lo ≤ mid := hmid_ge
+        have hhi'2 : mid ≤ fs.regions.size := by omega
+        have hk := ih lo mid hle' hhi'2 hfuel' hlo hhi''
+        have hdef : search fs va (fuel + 1) lo hi = search fs va fuel lo mid := by
+          simp [search, hlt, hm, mid]
+        rw [hdef]
+        exact hk
+    · have hle' : lo = hi := by omega
+      have hk : CountLE fs va lo := by
+        rw [hle'] at hlo ⊢
+        exact ⟨hhi, hlo, hhi'⟩
+      have hdef : search fs va (fuel + 1) lo hi = lo := by
+        simp [search, hlt]
+      rw [hdef]
+      exact hk
+
+theorem search_full_count {fs : FastSpace} {va : VA} (hord : SortedArray fs.regions) :
+    CountLE fs va (search fs va (fs.regions.size + 1) 0 fs.regions.size) := by
+  apply search_count hord (fs.regions.size + 1) 0 fs.regions.size
+  · omega
+  · omega
+  · omega
+  · intro j hj; omega
+  · intro j hj1 hj2; omega
+
+/-! findCovering lemmas. -/
+
+theorem findCovering_none_of_no_cover {rs : List AddressRegion} {va : VA}
+    (h : ∀ r' ∈ rs, ¬ r'.covers va) : findCovering rs va = none := by
+  induction rs with
+  | nil => rfl
+  | cons x xs ih =>
+    by_cases hx : x.covers va
+    · exact absurd hx (h x (List.mem_cons_self))
+    · simp [findCovering, hx]
+      exact ih (fun r' hr' => h r' (List.mem_cons.2 (.inr hr')))
+
+theorem findCovering_some_of_unique {rs : List AddressRegion} {va : VA} {r : AddressRegion}
+    (hrs : r ∈ rs) (hrc : r.covers va)
+    (huniq : ∀ r' ∈ rs, r'.covers va → r' = r) : findCovering rs va = some r := by
+  induction rs with
+  | nil => cases hrs
+  | cons x xs ih =>
+    by_cases hx : x.covers va
+    · have hxr : x = r := huniq x (List.mem_cons_self) hx
+      rw [hxr] at hx ⊢
+      simp [findCovering, hx]
+    · have hrs' : r ∈ xs := by
+        rcases List.mem_cons.1 hrs with hrx | hrxs
+        · subst x
+          exact False.elim (hx hrc)
+        · exact hrxs
+      have huniq' : ∀ r' ∈ xs, r'.covers va → r' = r :=
+        fun r' hr' => huniq r' (List.mem_cons.2 (.inr hr'))
+      simp [findCovering, hx]
+      exact ih hrs' huniq'
+
+/-! Main equivalence: FastSpace.regionAt = AddressSpace.regionAt under WellFormed. -/
+
+theorem regionAt_eq {s : AddressSpace} {va : VA} (wf : WellFormed s.regions) :
+    FastSpace.regionAt (FastSpace.ofSpace s) va = s.regionAt va := by
+  let fs : FastSpace := FastSpace.ofSpace s
+  have hfs : fs.regions = s.regions.toArray := rfl
+  have hlen : fs.regions.size = s.regions.length := by
+    rw [hfs]
+    simp
+  have hord : SortedArray fs.regions := by
+    intro i j hle hj
+    rw [hfs]
+    exact wellFormed_sorted wf i j hle hj
+  have hk : CountLE fs va (search fs va (fs.regions.size + 1) 0 fs.regions.size) :=
+    search_full_count hord
+  unfold FastSpace.regionAt AddressSpace.regionAt
+  simp only [FastSpace.ofSpace]
+  let k := search fs va (fs.regions.size + 1) 0 fs.regions.size
+  change (if (k == 0) = true then none else
+      let r := fs.regions[k - 1]!
+      if (decide (r.vaStart ≤ va) && decide (va.toNat < r.endNat)) = true then some r else none)
+    = findCovering s.regions va
+  have hk' : CountLE fs va k := hk
+  rcases hk' with ⟨hk1, hleft, hright⟩
+  by_cases hk0 : k == 0
+  · have hk0' : k = 0 := of_decide_eq_true hk0
+    have hnone : findCovering s.regions va = none := by
+      apply findCovering_none_of_no_cover
+      intro r' hr'
+      intro hcov
+      rcases mem_iff_exists_get!.1 hr' with ⟨j, hj, hrj⟩
+      have hlej : k ≤ j := by omega
+      have hgj : j < fs.regions.size := by
+        rw [hlen]
+        exact hj
+      have hg : va < (fs.regions[j]!).vaStart := hright j hlej hgj
+      have hvs : (fs.regions[j]!).vaStart.toNat ≤ va.toNat := by
+        simpa [hfs, hrj] using hcov.1
+      rw [UInt64.lt_iff_toNat_lt] at hg
+      omega
+    simp [hk0']
+    exact hnone.symm
+  · have hkpos : 0 < k := Nat.pos_of_ne_zero (by
+      intro hz
+      exact hk0 (by simp [hz]))
+    have hkin : k - 1 < fs.regions.size := by omega
+    have hkin' : k - 1 < s.regions.length := by
+      rw [← hlen]
+      exact hkin
+    have hkle : (fs.regions[k - 1]!).vaStart ≤ va := hleft (k - 1) (by omega)
+    have hkr : (fs.regions[k - 1]!) ∈ s.regions := by
+      rw [hfs]
+      exact mem_toArray_get! hkin'
+    by_cases hcov : va.toNat < (fs.regions[k - 1]!).endNat
+    · have hrcov : (fs.regions[k - 1]!).covers va := by
+        rw [AddressRegion.covers]
+        exact ⟨by simpa [UInt64.le_iff_toNat_le] using hkle, hcov⟩
+      have huniq : ∀ r' ∈ s.regions, r'.covers va → r' = fs.regions[k - 1]! := by
+        intro r' hr' hcov'
+        rcases mem_iff_exists_get!.1 hr' with ⟨j, hj, hrj⟩
+        by_cases hjlt : j < k - 1
+        · have hjc : (s.regions.toArray[j]!).endNat ≤ (s.regions.toArray[k - 1]!).vaStart.toNat :=
+            wellFormed_endNat_le_vaStart wf j (k - 1) hjlt hkin'
+          have hjkv : (s.regions.toArray[k - 1]!).vaStart.toNat ≤ va.toNat := by
+            simpa [hfs, UInt64.le_iff_toNat_le] using hkle
+          have hend : r'.endNat ≤ va.toNat := by
+            rw [← hrj]
+            exact Nat.le_trans hjc hjkv
+          have hvend : va.toNat < r'.endNat := hcov'.2
+          omega
+        · have hjge : k - 1 ≤ j := Nat.le_of_not_gt hjlt
+          by_cases hjeq : j = k - 1
+          · rw [← hrj, hjeq, ← hfs]
+          · have hgk : k ≤ j := by omega
+            have hjv' : va < (fs.regions[j]!).vaStart := hright j hgk (by rw [hlen]; exact hj)
+            have hvs : (fs.regions[j]!).vaStart.toNat ≤ va.toNat := by
+              simpa [hfs, hrj] using hcov'.1
+            rw [UInt64.lt_iff_toNat_lt] at hjv'
+            omega
+      have hfind : findCovering s.regions va = some (fs.regions[k - 1]!) :=
+        findCovering_some_of_unique hkr hrcov huniq
+      rw [hfind]
+      dsimp
+      simp [hk0, hcov, hkle]
+    · have hnone : findCovering s.regions va = none := by
+        apply findCovering_none_of_no_cover
+        intro r' hr' hcov'
+        rcases mem_iff_exists_get!.1 hr' with ⟨j, hj, hrj⟩
+        by_cases hjlt : j < k - 1
+        · have hjc : (s.regions.toArray[j]!).endNat ≤ (s.regions.toArray[k - 1]!).vaStart.toNat :=
+            wellFormed_endNat_le_vaStart wf j (k - 1) hjlt hkin'
+          have hjkv : (s.regions.toArray[k - 1]!).vaStart.toNat ≤ va.toNat := by
+            simpa [hfs, UInt64.le_iff_toNat_le] using hkle
+          have hend : r'.endNat ≤ va.toNat := by
+            rw [← hrj]
+            exact Nat.le_trans hjc hjkv
+          have hvend : va.toNat < r'.endNat := hcov'.2
+          omega
+        · have hjge : k - 1 ≤ j := Nat.le_of_not_gt hjlt
+          by_cases hjeq : j = k - 1
+          · rw [← hrj, hjeq, ← hfs] at hcov'
+            exact hcov hcov'.2
+          · have hgk : k ≤ j := by omega
+            have hjv' : va < (fs.regions[j]!).vaStart := hright j hgk (by rw [hlen]; exact hj)
+            have hvs : (fs.regions[j]!).vaStart.toNat ≤ va.toNat := by
+              simpa [hfs, hrj] using hcov'.1
+            rw [UInt64.lt_iff_toNat_lt] at hjv'
+            omega
+      simp [hk0, hcov]
+      exact hnone.symm
 
 end FastSpace
 

@@ -73,13 +73,16 @@ def ofString (s : String) : Json := .str s
 
 /-- Exact decimal expansion of a finite Float (m × 2^e computed exactly).
     Round-trip-exact by construction; the conformance gate normalizes through
-    a JSON parser, so this compares equal to serde/ryu's shortest form. -/
-def floatExact (f : Float) : String :=
+    a JSON parser, so this compares equal to serde/ryu's shortest form.
+    Returns `none` for inf/nan: analyzer scores are finite by construction
+    (0 ≤ x ≤ 1), so this is unreachable; the caller renders `null` as a
+    deliberate fail-closed sentinel (F10), never a value. -/
+def floatExact (f : Float) : Option String :=
   let b := f.toBits
   let expField := ((b >>> 52) &&& 0x7FF).toNat
-  if expField == 0x7FF then "0.0"  -- inf/nan never occur in analyzer scores
+  if expField == 0x7FF then none  -- inf/nan: fail-closed sentinel, see ofFloat
   else if expField == 0 && (b &&& 0xFFFFFFFFFFFFF) == 0 then
-    if b >>> 63 == 1 then "-0.0" else "0.0"
+    if b >>> 63 == 1 then some "-0.0" else some "0.0"
   else
     let sign := if b >>> 63 == 1 then "-" else ""
     let frac := (b &&& 0xFFFFFFFFFFFFF).toNat
@@ -87,16 +90,20 @@ def floatExact (f : Float) : String :=
       if expField == 0 then (frac, -1074)
       else (2^52 + frac, Int.ofNat expField - 1075)
     if e ≥ 0 then
-      sign ++ toString (m * 2 ^ e.toNat) ++ ".0"
+      some (sign ++ toString (m * 2 ^ e.toNat) ++ ".0")
     else
       let k := (-e).toNat
       let ds := toString (m * 5 ^ k)
       if ds.length > k then
-        sign ++ ds.take (ds.length - k) ++ "." ++ ds.drop (ds.length - k)
+        some (sign ++ ds.take (ds.length - k) ++ "." ++ ds.drop (ds.length - k))
       else
-        sign ++ "0." ++ String.ofList (List.replicate (k - ds.length) '0') ++ ds
+        some (sign ++ "0." ++ String.ofList (List.replicate (k - ds.length) '0') ++ ds)
 
-def ofFloat (f : Float) : Json := .num (floatExact f)
+/-- Renders a float score; inf/nan become JSON `null` (fail-closed). -/
+def ofFloat (f : Float) : Json :=
+  match floatExact f with
+  | some s => .num s
+  | none => .null
 
 end Json
 

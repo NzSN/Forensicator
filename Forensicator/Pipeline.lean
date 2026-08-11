@@ -20,7 +20,10 @@ def buildAddressSpace (dump : Model.Dump) : Spec.AddressSpace :=
     | .ok sp' => sp'
     | .error _ => sp
 
-/-- Heuristic dump-kind classification (pipeline.rs:113). -/
+/-- Heuristic dump-kind classification (pipeline.rs:113).
+    Deliberate divergence (F8): the size sum is Nat-lifted — Rust's `u64`
+    `sum()` wraps on overflow, ours cannot. Equivalent for every dump < 2⁶⁴
+    bytes (i.e. physically reachable), since such a sum fits in 2⁶⁴. -/
 def classifyDump (dump : Model.Dump) : DumpKind :=
   let total := dump.memoryRegions.foldl (fun acc r => acc + r.size.toNat) 0
   if total ≥ 64 * 1024 * 1024 then .FullMemory else .StackOnly
