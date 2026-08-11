@@ -1,0 +1,17 @@
+name = "Forensicator"
+version = "0.1.0"
+defaultTargets = ["forensicator", "forensicator-test"]
+
+[[lean_lib]]
+name = "Forensicator"
+
+[[lean_lib]]
+name = "Test"
+
+[[lean_exe]]
+name = "forensicator"
+root = "Main"
+
+[[lean_exe]]
+name = "forensicator-test"
+root = "Test.Main"
