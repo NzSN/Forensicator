@@ -1,4 +1,4 @@
-# Forensicator (Lean 4)
+# Forensicator
 
 Forensic analysis of Windows x64 minidumps and TTD-style execution traces — hand-written parsers, pointer-graph inference, structure recovery, V8 JavaScript stack reconstruction, and crash-cause diagnosis — as a **verified Lean 4 program**. The TLA+ specs that model-checked the Rust original are Lean theorems here, proved about the shipping functions.
 
