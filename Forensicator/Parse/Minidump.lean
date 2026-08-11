@@ -32,7 +32,7 @@ def Fatal.render : Fatal → String
   | .directoryOutOfBounds rva size fileLen =>
     s!"stream directory at RVA {rva} size {size} out of bounds (file len {fileLen})"
   | .streamOutOfBounds st rva size fileLen =>
-    s!"stream {st} at RVA {rva} size {size} out of bounds (file len {fileLen})"
+    s!"stream 0x{hexPadUpper st.toUInt64 8} at RVA {rva} size {size} out of bounds (file len {fileLen})"
 
 -- ── guarded LE readers (callers pre-check bounds) ──────────────────
 private def u16le (d : ByteArray) (o : Nat) : UInt16 :=
@@ -121,7 +121,8 @@ def decodeSystemInfo (data : ByteArray) (prov : Provenance) : Except Anomaly Sys
             provenance := prov }
 
 -- ── utf16 module names ──────────────────────────────────────────────
-/-- MINIDUMP_STRING at `rva`: u32 byte-length, then nul-terminated UTF-16. -/
+/-- MINIDUMP_STRING at `rva`: u32 byte-length, then nul-terminated UTF-16.
+    Cons-reversed accumulation + one reverse (F4: linear-time). -/
 private def readUtf16AtRva (full : ByteArray) (rva : UInt32) : Option String :=
   let start := rva.toNat
   if start + 4 ≥ full.size then none
@@ -129,10 +130,10 @@ private def readUtf16AtRva (full : ByteArray) (rva : UInt32) : Option String :=
     let rec collect (j : Nat) (acc : List UInt16) : List UInt16 :=
       if j + 1 < full.size then
         let w := u16le full j
-        if w == 0 then acc else collect (j + 2) (acc ++ [w])
+        if w == 0 then acc else collect (j + 2) (w :: acc)
       else acc
     termination_by full.size - j
-    let units := collect (start + 4) []
+    let units := (collect (start + 4) []).reverse
     if units.isEmpty then none else some (utf16Lossy units)
 
 -- ── module_list ─────────────────────────────────────────────────────
@@ -229,10 +230,10 @@ def decodeMemory64 (data : ByteArray) (prov : Provenance) :
               provenance := { streamType := prov.streamType
                               fileOffset := prov.fileOffset + UInt64.ofNat off
                               rva := UInt64.ofNat i } }
-          go (i + 1) (dataOff + size) (acc ++ [r])
+          go (i + 1) (dataOff + size) (r :: acc)
         else acc
       termination_by count - i
-      .ok (go 0 baseRva [])
+      .ok (go 0 baseRva []).reverse
 
 -- ── memory_info_list ────────────────────────────────────────────────
 structure RawMemoryInfoEntry where
@@ -260,15 +261,15 @@ def decodeMemoryInfoList (data : ByteArray) (prov : Provenance) :
           if _h : i < count then
             let off := sizeOfHeader + i * sizeOfEntry
             if off + sizeOfEntry > data.size then acc
-            else go (i + 1) (acc ++ [{
+            else go (i + 1) ({
               vaStart := u64le data off
               size := u64le data (off + 8)
               memType := u32le data (off + 16)
               protection := u32le data (off + 20)
-              state := u32le data (off + 28) }])
+              state := u32le data (off + 28) } :: acc)
           else acc
         termination_by count - i
-        .ok (go 0 [])
+        .ok (go 0 []).reverse
 
 -- ── thread_list ─────────────────────────────────────────────────────
 def decodeThreadList (data dumpData : ByteArray) (prov : Provenance) :
@@ -397,8 +398,8 @@ def decodeCrashpadAnnotations (dumpData : ByteArray) (annRva : Nat) (prov : Prov
                 else
                   let valStart := pos2 + 4
                   let value := (fromUTF8Lossy (dumpData.extract valStart (valStart + valLen))) |> trimEndNul
-                  go (valStart + ((valLen + 4) / 4) * 4) n (acc ++ [(key, value)])
-      let anns := go startPos count []
+                  go (valStart + ((valLen + 4) / 4) * 4) n ((key, value) :: acc)
+      let anns := (go startPos count []).reverse
       if anns.isEmpty then .error (.ofProv prov "no annotations found in crashpad stream")
       else .ok anns
 
@@ -425,7 +426,7 @@ def decodeCrashpadAnnotationObjects (dumpData : ByteArray) (objectsRva : Nat) (p
               let vlen := (u32le dumpData vpos).toNat
               if vlen > 0 && vlen ≤ 1024 && vpos + 4 + vlen ≤ stop then
                 let value := (fromUTF8Lossy (dumpData.extract (vpos + 4) (vpos + 4 + vlen))) |> trimEndNul
-                go (pos + 4) (key :: value :: seen) (acc ++ [(key, value)])
+                go (pos + 4) (key :: value :: seen) ((key, value) :: acc)
               else go (pos + 4) (key :: seen) acc
             else go (pos + 4) (key :: seen) acc
           else go (pos + 4) seen acc
@@ -433,7 +434,7 @@ def decodeCrashpadAnnotationObjects (dumpData : ByteArray) (objectsRva : Nat) (p
       else go (pos + 4) seen acc
     else acc
   termination_by stop - pos + 4
-  let anns := go objectsRva [] []
+  let anns := (go objectsRva [] []).reverse
   if anns.isEmpty then .error (.ofProv prov "no annotation objects found")
   else .ok anns
 
@@ -478,15 +479,15 @@ def decodeV8heap (data : ByteArray) (prov : Provenance) :
             let fileOffset := (u64le data (off + 16)).toNat
             let fend := fileOffset + size
             if size == 0 || fend > data.size then go (i + 1) acc
-            else go (i + 1) (acc ++ [{
+            else go (i + 1) ({
               vaStart := va
               data := data.extract fileOffset fend
               provenance := { streamType := ST_V8HE
                               fileOffset := prov.fileOffset + UInt64.ofNat off
-                              rva := UInt64.ofNat i } }])
+                              rva := UInt64.ofNat i } } :: acc)
         else acc
       termination_by regionCount - i
-      .ok (go 0 [], ext)
+      .ok ((go 0 []).reverse, ext)
 
 -- ── assembly (dump.rs from_bytes_inner) ─────────────────────────────
 

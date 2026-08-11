@@ -304,6 +304,23 @@ def runAll : IO UInt32 := do
     | .error _ => pure ()
   check ctx "ttfx all-prefixes + mutations survived" true
 
+  -- F4 acceptance: a synthetic 200k-write .ttfx (built by encodeTtfx here)
+  -- decodes in seconds (linear-time accumulation), order intact, no anomalies.
+  let bigWrites : List Model.WriteRecord :=
+    (List.range 200000).map fun i =>
+      { pos := UInt64.ofNat (i + 1), va := 0x1004, data := ba [0x11, 0x22], provenance := tprov }
+  let bigTrace : Model.Trace := { minimalTrace with writes := bigWrites, frontier := 200000 }
+  let bigT0 ← IO.monoMsNow
+  let bigBack := match decodeTtfx (encodeTtfx bigTrace) with
+    | .ok back => back
+    | .error _ => minimalTrace
+  let bigT1 ← IO.monoMsNow
+  check ctx "ttfx 200k-write decode is linear and ordered (F4)"
+    (bigBack.anomalies.isEmpty
+      && bigBack.writes.length == 200000
+      && bigBack.writes.map (·.pos) == bigWrites.map (·.pos)
+      && (bigT1 - bigT0) < 30000)
+
   -- minidump decoder (port of parse/dump.rs tests)
   let le16 (v : Nat) : List UInt8 := [(UInt64.ofNat v).toUInt8, ((UInt64.ofNat v) >>> 8).toUInt8]
   let le32 (v : Nat) : List UInt8 :=
@@ -331,6 +348,9 @@ def runAll : IO UInt32 := do
   check ctx "minidump too small rejected"
     (match Minidump.fromBytes (ba (List.replicate 10 0)) with
      | .error _ => true | .ok _ => false)
+  check ctx "minidump stream OOB message matches Rust format"
+    (Minidump.Fatal.render (.streamOutOfBounds 0x07 0x2000 1024 512)
+      == "stream 0x00000007 at RVA 8192 size 1024 out of bounds (file len 512)")
   -- V8HE stream ingestion (dump.rs v8heap_stream_lands_in_memory_regions)
   let cageBase : UInt64 := 0x0000010000000000
   let v8heBody :=

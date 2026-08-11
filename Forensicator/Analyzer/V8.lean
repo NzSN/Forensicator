@@ -96,23 +96,23 @@ private def externalStringViaEpt (space : AddressSpace) (eptBase : VA) (handle :
 /-- Scan the isolate region for the EPT base (v8.rs find_ept_base). -/
 private def findEptBase (space : AddressSpace) (isolateVa : VA) (handle : UInt32)
     (len : UInt32) (oneByte : Bool) (moduleRanges : List (VA × UInt64))
-    (layout : V8Layout) : Except Unit (Option VA) :=
+    (layout : V8Layout) : Option VA :=
   match space.regionAt isolateVa with
-  | none => .ok none
+  | none => none
   | some region =>
     let idx := handle.toUInt64 >>> (UInt64.ofNat layout.eptIndexShift)
     let inModules (v : VA) : Bool :=
       moduleRanges.any fun (base, size) =>
         decide (v ≥ base ∧ v.toNat < base.toNat + size.toNat)
-    let rec pass (rejectInternal : Bool) : Except Unit (Option VA) :=
-      let rec scan (off : Nat) : Except Unit (Option VA) :=
+    let rec pass (rejectInternal : Bool) : Option VA :=
+      let rec scan (off : Nat) : Option VA :=
         if off + 8 ≤ region.data.size then
           let b := readU64leAt region.data off
           if b < 0x10000 || b &&& 7 != 0 then scan (off + 8)
           else
-            -- v8.rs:539 overflow → checked_add skips the candidate (fixed
-            -- upstream after the 13c81d0 investigation; the panic
-            -- reproduction is retired)
+            -- v8.rs:539 overflow: Rust's checked_add (upstream fix bd46529,
+            -- after the 13c81d0 investigation) skips the candidate instead
+            -- of panicking; Nat-lifted here, so the guard is explicit.
             if b.toNat + layout.eptEntrySize.toNat * idx.toNat ≥ 2 ^ 64 then scan (off + 8)
             else
               match readU64o space (b + layout.eptEntrySize * idx) with
@@ -133,56 +133,54 @@ private def findEptBase (space : AddressSpace) (isolateVa : VA) (handle : UInt32
                       | none => scan (off + 8)
                       | some chars =>
                         match readExternalChars space chars len oneByte with
-                        | some _ => .ok (some b)
+                        | some _ => some b
                         | none => scan (off + 8)
-        else .ok none
+        else none
     termination_by region.data.size + 8 - off
     scan 0
   match pass true with
-  | .error () => .error ()
-  | .ok (some b) => .ok (some b)
-  | .ok none => pass false
+  | some b => some b
+  | none => pass false
 
 private def decodeScriptName (space : AddressSpace) (cage : VA) (script : VA)
     (isolateVa : Option VA) (moduleRanges : List (VA × UInt64))
-    (eptBase : Option VA) (layout : V8Layout) : Except Unit (Option String × Option VA) := do
+    (eptBase : Option VA) (layout : V8Layout) : Option String × Option VA :=
   let nameObjO := (readU32o space (script + layout.scriptName)).bind (decompress cage)
   match nameObjO with
-  | none => .ok (none, eptBase)
+  | none => (none, eptBase)
   | some nameObj =>
     match instanceType space cage nameObj with
-    | none => .ok (none, eptBase)
+    | none => (none, eptBase)
     | some itype =>
-      if itype ≥ layout.stringItypeMax then .ok (none, eptBase)
+      if itype ≥ layout.stringItypeMax then (none, eptBase)
       else if itype &&& layout.stringExternalBit == 0 then
-        .ok (readV8String space nameObj itype layout, eptBase)
+        (readV8String space nameObj itype layout, eptBase)
       else
         match readU32o space (nameObj + layout.stringChars) with
-        | none => .ok (none, eptBase)
+        | none => (none, eptBase)
         | some handle =>
           if handle == 0 || handle.toUInt64 &&& (((1 : UInt64) <<< (UInt64.ofNat layout.eptIndexShift)) - 1) != 0 then
-            .ok (none, eptBase)
+            (none, eptBase)
           else
             match readU32o space (nameObj + layout.stringLength) with
-            | none => .ok (none, eptBase)
+            | none => (none, eptBase)
             | some len =>
-              if len == 0 || len > layout.maxJsNameLen then .ok (none, eptBase)
+              if len == 0 || len > layout.maxJsNameLen then (none, eptBase)
               else
                 let oneByte := itype &&& layout.stringOneByteBit != 0
                 match eptBase with
                 | some b =>
-                  .ok (externalStringViaEpt space b handle len oneByte layout, some b)
+                  (externalStringViaEpt space b handle len oneByte layout, some b)
                 | none =>
                   match isolateVa with
-                  | none => .ok (none, eptBase)
+                  | none => (none, eptBase)
                   | some iso =>
                     match findEptBase space iso handle len oneByte moduleRanges layout with
-                    | .error () => .error ()
-                    | .ok none => .ok (none, eptBase)
-                    | .ok (some b) =>
+                    | none => (none, eptBase)
+                    | some b =>
                       -- Rust sets the ept_base cell when found, even if the
                       -- string read then fails.
-                      .ok (externalStringViaEpt space b handle len oneByte layout, some b)
+                      (externalStringViaEpt space b handle len oneByte layout, some b)
 
 private def decodeScriptLine (space : AddressSpace) (cage : VA) (script : VA)
     (position : Int) (layout : V8Layout) : Option UInt32 := do
@@ -252,13 +250,13 @@ private structure JsFrameInfo where
     threaded in/out (the Rust version shares a Cell across frames). -/
 private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA)
     (isolateVa : Option VA) (moduleRanges : List (VA × UInt64)) (eptBase : Option VA)
-    (layout : V8Layout) : Except Unit (Option (JsFrameInfo × Option VA)) := do
-  let decodeAt (heap cage : VA) : Except Unit (Option (JsFrameInfo × Option VA)) := do
+    (layout : V8Layout) : Option (JsFrameInfo × Option VA) :=
+  let decodeAt (heap cage : VA) : Option (JsFrameInfo × Option VA) := do
     match readU32o space (heap + layout.jsfunctionSharedFunctionInfo) with
-    | none => .ok none
+    | none => none
     | some sfiC =>
       match decompress cage sfiC with
-      | none => .ok none
+      | none => none
       | some sfi =>
         let mut info : JsFrameInfo := ⟨none, none, none⟩
         let mut position : Option Int := none
@@ -282,21 +280,20 @@ private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA
         if info.name.isNone then
           info := { info with name := some "<anonymous>" }
         match readU32o space (sfi + layout.sfiScript) with
-        | none => .ok (some (info, ept))
+        | none => some (info, ept)
         | some c1 =>
           match decompress cage c1 with
-          | none => .ok (some (info, ept))
+          | none => some (info, ept)
           | some script =>
-            match (← decodeScriptName space cage script isolateVa moduleRanges ept layout) with
-            | (sn, ept') =>
-              ept := ept'
-              let line := match position with
-                | some pos => decodeScriptLine space cage script pos layout
-                | none => none
-              .ok (some ({ info with scriptName := sn, scriptLine := line }, ept))
-  let rec trySlot (slots : List Int) : Except Unit (Option (JsFrameInfo × Option VA)) :=
+            let (sn, ept') := decodeScriptName space cage script isolateVa moduleRanges ept layout
+            ept := ept'
+            let line := match position with
+              | some pos => decodeScriptLine space cage script pos layout
+              | none => none
+            some ({ info with scriptName := sn, scriptLine := line }, ept)
+  let rec trySlot (slots : List Int) : Option (JsFrameInfo × Option VA) :=
     match slots with
-    | [] => .ok none
+    | [] => none
     | slot :: rest =>
       let tagged := readU64 space (wadd fp slot)
       if tagged &&& 1 != 1 then trySlot rest
@@ -364,25 +361,23 @@ private structure WalkState where
   tables : UnwindTables
 
 private def walkGo (ctx : WalkCtx) (st : WalkState) (acc : List V8StackFrame)
-    (fuel : Nat) : Except Unit (List V8StackFrame × UnwindTables) :=
+    (fuel : Nat) : List V8StackFrame × UnwindTables :=
   match fuel with
-  | 0 => .ok (acc, st.tables)
+  | 0 => (acc, st.tables)
   | fuel + 1 =>
     let space := ctx.space
     let rip := st.regs.rip
     let rsp := st.regs.rsp
     let rbp := st.regs.rbp
-    if rip == 0 || st.depth ≥ 256 || st.seen.contains (rip, rsp) then .ok (acc, st.tables)
+    if rip == 0 || st.depth ≥ 256 || st.seen.contains (rip, rsp) then (acc, st.tables)
     else
       let inModule := ctx.moduleRanges.any fun (b, s) =>
         decide (rip ≥ b ∧ rip.toNat < b.toNat + s.toNat)
-      if !inModule && (space.regionAt rip).isNone && st.viaLeaf then .ok (acc, st.tables)
+      if !inModule && (space.regionAt rip).isNone && st.viaLeaf then (acc, st.tables)
       else
         let marker := readU64 space (wadd rbp ctx.layout.kMarkerOffset)
         let frameType := classifyFrame rip ctx.moduleRanges space marker ctx.layout
-        match decodeJsFrame space rbp ctx.cage ctx.isolateVa ctx.moduleRanges st.eptBase ctx.layout with
-        | .error () => .error ()
-        | .ok js =>
+        let js := decodeJsFrame space rbp ctx.cage ctx.isolateVa ctx.moduleRanges st.eptBase ctx.layout
         let (jsInfo, ept') := match js with
           | some (i, e) => (some i, e)
           | none => (none, st.eptBase)
@@ -408,7 +403,7 @@ private def walkGo (ctx : WalkCtx) (st : WalkState) (acc : List V8StackFrame)
         | none => fpOrLeaf ctx st2 frame acc fuel rip rsp rbp
 where
   fpOrLeaf (ctx : WalkCtx) (st : WalkState) (frame : V8StackFrame) (acc : List V8StackFrame)
-      (fuel : Nat) (_rip rsp rbp : VA) : Except Unit (List V8StackFrame × UnwindTables) :=
+      (fuel : Nat) (_rip rsp rbp : VA) : List V8StackFrame × UnwindTables :=
     let space := ctx.space
     let savedRbp := readU64 space rbp
     let fpRet := readU64 space (rbp + 8)
@@ -424,10 +419,10 @@ where
       if leafRet != 0 then
         let regs' := (st.regs.set X64.RIP leafRet).set X64.RSP (rsp + 8)
         walkGo ctx { st with regs := regs', viaLeaf := true } (acc ++ [frame]) fuel
-      else .ok (acc ++ [frame], st.tables)
+      else (acc ++ [frame], st.tables)
 
 private def walkThread (ctx : WalkCtx) (init : UnwindTables) :
-    Except Unit (List V8StackFrame × UnwindTables) :=
+    List V8StackFrame × UnwindTables :=
   let regs0 :=
     match ctx.dump.exception with
     | some exc =>
@@ -437,25 +432,25 @@ private def walkThread (ctx : WalkCtx) (init : UnwindTables) :
   walkGo ctx { regs := regs0, depth := 0, seen := Std.HashSet.emptyWithCapacity
                viaLeaf := false, eptBase := none, tables := init } [] 256
 
-/-- Walk all threads' stacks (v8.rs walk_thread_stacks). The error case is
-    the reproduced Rust debug overflow panic (v8.rs:539). -/
-def walkThreadStacks (dump : Dump) (space : AddressSpace) : Except Unit (List V8StackFrame) :=
+/-- Walk all threads' stacks (v8.rs walk_thread_stacks). Overflow candidates
+    in the EPT scan are skipped, never raised (upstream fix bd46529, v8.rs:539
+    checked_add), so no exception channel survives. -/
+def walkThreadStacks (dump : Dump) (space : AddressSpace) : List V8StackFrame :=
   let layout := V8Layout.detect dump
   let isolateVa := Cause.annotationHex dump "v8_isolate_address"
   let cage := Cause.annotationHex dump "v8_ro_space_firstpage_address"
   let moduleRanges := dump.modules.map fun m => (m.baseVa, m.size)
   let rec go (threads : List Thread) (tables : UnwindTables) (acc : List V8StackFrame) :
-      Except Unit (List V8StackFrame) :=
+      List V8StackFrame :=
     match threads with
-    | [] => .ok acc
+    | [] => acc
     | t :: rest =>
       let ctx : WalkCtx :=
         { dump := dump, space := space, isolateVa := isolateVa, layout := layout
           moduleRanges := moduleRanges, cage := cage, thread := t
           stackVa := t.stackVa, stackEnd := t.stackVa + t.stackSize }
-      match walkThread ctx tables with
-      | .error () => .error ()
-      | .ok (frames, tables') => go rest tables' (acc ++ frames)
+      let (frames, tables') := walkThread ctx tables
+      go rest tables' (acc ++ frames)
   go dump.threads (UnwindTables.new dump.modules) []
 
 /-- Disassemble up to 10 instructions at the exception address. -/
@@ -477,13 +472,7 @@ def disassembleException (dump : Dump) (space : AddressSpace) : Option Json := d
 def analyzer : Forensicator.Analyzer where
   name := "v8"
   description := "Recovers JS stack traces by walking native stacks and classifying V8 frames"
-  run dump space :=
-    match walkThreadStacks dump space with
-    | .error () =>
-      -- reproduced Rust debug overflow panic (pipeline catch_unwind output)
-      { Forensicator.AnalyzerOutput.new "v8" with
-        custom := [("error", .str "analyzer 'v8' panicked")] }
-    | .ok frames => analyzerOk dump space frames
+  run dump space := analyzerOk dump space (walkThreadStacks dump space)
 where
   analyzerOk (dump : Dump) (space : AddressSpace) (frames : List V8StackFrame) :
       Forensicator.AnalyzerOutput :=

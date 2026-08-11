@@ -28,6 +28,45 @@ theorem PositionOrdered.append_singleton {xs : List WriteRecord} {w : WriteRecor
         ih hxs.2 (fun l hl => hlast l (by simpa using hl))
       exact ⟨h1, h2⟩
 
+/-- An ordered list extended by an ordered suffix whose first element is
+    at least the prefix's last is ordered (F4 cons-then-reverse needs the
+    prefix/suffix split at section boundaries). -/
+theorem PositionOrdered.append {xs ys : List WriteRecord}
+    (hx : PositionOrdered xs) (hy : PositionOrdered ys)
+    (hj : ∀ l, xs.getLast? = some l → ∀ y, ys.head? = some y → l.pos ≤ y.pos) :
+    PositionOrdered (xs ++ ys) := by
+  induction xs with
+  | nil => simpa using hy
+  | cons x xs ih =>
+    cases xs with
+    | nil =>
+      cases ys with
+      | nil => exact True.intro
+      | cons y ys => exact ⟨hj x rfl y rfl, hy⟩
+    | cons y rest =>
+      cases ys with
+      | nil => simpa using hx
+      | cons z zs =>
+        change PositionOrdered (x :: y :: (rest ++ z :: zs))
+        exact ⟨hx.1, ih hx.2 (fun l hl => hj l (by simpa using hl))⟩
+
+/-- Dropping the head of an ordered nonempty list keeps it ordered. -/
+theorem PositionOrdered.tail {x : WriteRecord} {xs : List WriteRecord}
+    (h : PositionOrdered (x :: xs)) : PositionOrdered xs := by
+  cases xs with
+  | nil => exact True.intro
+  | cons y ys => exact h.2
+
+/-- Dropping a prefix of an ordered list keeps it ordered. -/
+theorem PositionOrdered.drop {xs : List WriteRecord} (n : Nat) (h : PositionOrdered xs) :
+    PositionOrdered (xs.drop n) := by
+  induction n generalizing xs with
+  | zero => simpa using h
+  | succ n ih =>
+    cases xs with
+    | nil => exact True.intro
+    | cons x xs => exact ih (PositionOrdered.tail h)
+
 /-- Events are position-ordered (TraceOrdered, event half). -/
 def EventsOrdered : List TraceEvent → Prop
   | [] => True
@@ -48,6 +87,43 @@ theorem EventsOrdered.append_singleton {xs : List TraceEvent} {e : TraceEvent}
       have h2 : EventsOrdered ((y :: ys) ++ [e]) :=
         ih hxs.2 (fun l hl => hlast l (by simpa using hl))
       exact ⟨h1, h2⟩
+
+/-- Events counterpart of `PositionOrdered.append` (F4 section boundary). -/
+theorem EventsOrdered.append {xs ys : List TraceEvent}
+    (hx : EventsOrdered xs) (hy : EventsOrdered ys)
+    (hj : ∀ l, xs.getLast? = some l → ∀ y, ys.head? = some y → l.pos ≤ y.pos) :
+    EventsOrdered (xs ++ ys) := by
+  induction xs with
+  | nil => simpa using hy
+  | cons x xs ih =>
+    cases xs with
+    | nil =>
+      cases ys with
+      | nil => exact True.intro
+      | cons y ys => exact ⟨hj x rfl y rfl, hy⟩
+    | cons y rest =>
+      cases ys with
+      | nil => simpa using hx
+      | cons z zs =>
+        change EventsOrdered (x :: y :: (rest ++ z :: zs))
+        exact ⟨hx.1, ih hx.2 (fun l hl => hj l (by simpa using hl))⟩
+
+/-- Dropping the head of an ordered nonempty event list keeps it ordered. -/
+theorem EventsOrdered.tail {x : TraceEvent} {xs : List TraceEvent}
+    (h : EventsOrdered (x :: xs)) : EventsOrdered xs := by
+  cases xs with
+  | nil => exact True.intro
+  | cons y ys => exact h.2
+
+/-- Dropping a prefix of an ordered event list keeps it ordered. -/
+theorem EventsOrdered.drop {xs : List TraceEvent} (n : Nat) (h : EventsOrdered xs) :
+    EventsOrdered (xs.drop n) := by
+  induction n generalizing xs with
+  | zero => simpa using h
+  | succ n ih =>
+    cases xs with
+    | nil => exact True.intro
+    | cons x xs => exact ih (EventsOrdered.tail h)
 
 /-- Open intervals only at the frontier (Timeline.tla): an open thread
     interval covers every position up to the record head. -/

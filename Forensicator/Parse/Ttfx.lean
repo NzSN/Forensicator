@@ -80,7 +80,7 @@ private def decodeInitmem (data : ByteArray) (tr : Trace) (off : Nat) : Trace :=
       state := state, memType := memType, provenance := prov off
       regionClass := some .Private }
   { tr with
-    initMem := tr.initMem ++ [region]
+    initMem := region :: tr.initMem
     anomalies := tr.anomalies ++ payloadAnoms }
 
 private def decodeWrite (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat) : Trace :=
@@ -91,7 +91,7 @@ private def decodeWrite (data : ByteArray) (frontier : Position) (tr : Trace) (o
   let payload := sliceExact data dataOff len
   let a1 :=
     if payload.size < len then [anom off "ttfx: write truncated payload"] else []
-  let a2 := match tr.writes.getLast? with
+  let a2 := match tr.writes.head? with
     | some last =>
       if pos < last.pos then
         [anom off s!"ttfx: write out of order (pos {hexUpper pos} < {hexUpper last.pos})"]
@@ -100,7 +100,7 @@ private def decodeWrite (data : ByteArray) (frontier : Position) (tr : Trace) (o
   let a3 :=
     if frontier < pos then [anom off s!"ttfx: write beyond frontier (pos {hexUpper pos})"] else []
   { tr with
-    writes := tr.writes ++ [{ pos := pos, va := va, data := payload, provenance := prov off }]
+    writes := { pos := pos, va := va, data := payload, provenance := prov off } :: tr.writes
     anomalies := tr.anomalies ++ (a1 ++ a2 ++ a3) }
 
 private def decodeEvent (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat) : Trace :=
@@ -116,7 +116,7 @@ private def decodeEvent (data : ByteArray) (frontier : Position) (tr : Trace) (o
     let nameLen := ((u32At data (off + 36)).getD 0).toNat
     let nameOff := ((u32At data (off + 40)).getD 0).toNat
     let name := fromUTF8Lossy (sliceExact data nameOff nameLen)
-    let a1 := match tr.events.getLast? with
+    let a1 := match tr.events.head? with
       | some last =>
         if pos < last.pos then
           [anom off s!"ttfx: event out of order (pos {hexUpper pos} < {hexUpper last.pos})"]
@@ -128,7 +128,7 @@ private def decodeEvent (data : ByteArray) (frontier : Position) (tr : Trace) (o
       { pos := pos, kind := kind, code := code, address := address
         threadId := threadId, name := name, size := size, provenance := prov off }
     { tr with
-      events := tr.events ++ [ev]
+      events := ev :: tr.events
       anomalies := tr.anomalies ++ (a1 ++ a2) }
   else
     { tr with anomalies := tr.anomalies ++ [anom off s!"ttfx: unknown event kind {kindRaw}"] }
@@ -147,11 +147,11 @@ private def decodeThread (data : ByteArray) (tr : Trace) (off : Nat) : Trace :=
         [anom off s!"ttfx: thread {id} interval inverted ({hexUpper iv.start} > {hexUpper e})"]
       else []
     | none => []
-  { tr with threads := tr.threads ++ [(id, iv)], anomalies := tr.anomalies ++ a1 }
+  { tr with threads := (id, iv) :: tr.threads, anomalies := tr.anomalies ++ a1 }
 
 private def decodeCall (data : ByteArray) (tr : Trace) (off : Nat) : Trace :=
   let (threadId, iv) := decodeInterval data off
-  { tr with calls := tr.calls ++ [{ threadId := threadId, interval := iv }] }
+  { tr with calls := { threadId := threadId, interval := iv } :: tr.calls }
 
 private def wantSize (kind : UInt32) : Option Nat :=
   if kind == SEC_INITMEM then some 32
@@ -168,19 +168,35 @@ private def decodeRecord (data : ByteArray) (frontier : Position) (tr : Trace)
   else if kind == SEC_THREADS then decodeThread data tr off
   else decodeCall data tr off
 
+/-- Per-section finalization: the record decoders cons (reversed) for
+    O(1) per record; one `List.reverse` per section restores file order
+    (F4: linear-time accumulation, observably identical to `++ [x]`). -/
+private def finish (kind : UInt32) (tr : Trace) : Trace :=
+  if kind == SEC_INITMEM then { tr with initMem := tr.initMem.reverse }
+  else if kind == SEC_WRITES then { tr with writes := tr.writes.reverse }
+  else if kind == SEC_EVENTS then { tr with events := tr.events.reverse }
+  else if kind == SEC_THREADS then { tr with threads := tr.threads.reverse }
+  else { tr with calls := tr.calls.reverse }
+
 private def sectionRecordLoop (data : ByteArray) (frontier : Position) (kind : UInt32)
     (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat) : Trace :=
   if h : i < recordCnt then
     let off := body + i * recordSize
     if off + recordSize > data.size then
-      { tr with anomalies := tr.anomalies ++
+      finish kind { tr with anomalies := tr.anomalies ++
           [anom off s!"ttfx: truncated section {kind} at record {i}"] }
     else
       sectionRecordLoop data frontier kind body recordSize recordCnt
         (decodeRecord data frontier tr kind off) (i + 1)
-  else tr
+  else finish kind tr
 termination_by recordCnt - i
 
+/-- Per-section decode (F4): the record loop accumulates its section's
+    records cons-reversed (O(1) per record); here the field is swapped out
+    (cleared, seeded with a copy of the previous last record so the
+    out-of-order check still sees it), the loop runs, and one `reverse`
+    restores file order behind the base prefix — linear overall, and
+    byte-identical to Rust's `Vec::push` order on every input. -/
 private def decodeSection (data : ByteArray) (frontier : Position) (tr : Trace)
     (kind : UInt32) (body recordSize recordCnt : Nat) : Trace :=
   match wantSize kind with
@@ -189,7 +205,33 @@ private def decodeSection (data : ByteArray) (frontier : Position) (tr : Trace)
     if recordSize != want then
       { tr with anomalies := tr.anomalies ++
           [anom body s!"ttfx: section {kind} record_size {recordSize} != {want}"] }
-    else sectionRecordLoop data frontier kind body recordSize recordCnt tr 0
+    else if kind == SEC_WRITES then
+      let base := tr.writes
+      let seed := match base.getLast? with | some s => [s] | none => []
+      let r := sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+        { tr with writes := seed } 0
+      { r with writes := base ++ r.writes.drop seed.length }
+    else if kind == SEC_EVENTS then
+      let base := tr.events
+      let seed := match base.getLast? with | some s => [s] | none => []
+      let r := sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+        { tr with events := seed } 0
+      { r with events := base ++ r.events.drop seed.length }
+    else if kind == SEC_INITMEM then
+      let base := tr.initMem
+      let r := sectionRecordLoop data frontier SEC_INITMEM body recordSize recordCnt
+        { tr with initMem := [] } 0
+      { r with initMem := base ++ r.initMem }
+    else if kind == SEC_THREADS then
+      let base := tr.threads
+      let r := sectionRecordLoop data frontier SEC_THREADS body recordSize recordCnt
+        { tr with threads := [] } 0
+      { r with threads := base ++ r.threads }
+    else
+      let base := tr.calls
+      let r := sectionRecordLoop data frontier SEC_CALLS body recordSize recordCnt
+        { tr with calls := [] } 0
+      { r with calls := base ++ r.calls }
 
 private def outsideLifetime (c : CallSpan) (tiv : Interval) : Bool :=
   decide (c.interval.start < tiv.start)
@@ -279,13 +321,21 @@ def encodeTtfx (tr : Trace) : ByteArray := Id.run do
   let poolStart := HEADER_SIZE + (SECTION_HDR_SIZE + 32 * im.length)
     + (SECTION_HDR_SIZE + 24 * ws.length) + (SECTION_HDR_SIZE + 48 * es.length)
     + (SECTION_HDR_SIZE + 24 * ts.length) + (SECTION_HDR_SIZE + 24 * cs.length)
-  -- payloads, in section order; offsets absolute
-  let step (poolStart : Nat) (acc : ByteArray × List Nat) (payload : ByteArray) : ByteArray × List Nat :=
-    let (p, offs) := acc
-    (p ++ payload, offs ++ [poolStart + p.size])
-  let (pool1, imOffs) := im.foldl (fun acc r => step poolStart acc r.data) (ByteArray.empty, [])
-  let (pool2, wOffs) := ws.foldl (fun acc w => step poolStart acc w.data) (pool1, [])
-  let (pool3, eOffs) := es.foldl (fun acc e => step poolStart acc e.name.toUTF8) (pool2, [])
+  -- payloads, in section order; offsets absolute. Cons-reversed accumulation
+  -- (F4: O(1) per record; one reverse per section) — linear-time encode, so
+  -- the test runner can synthesize 200k-write fixtures quickly.
+  let step (acc : Nat × List ByteArray × List Nat) (payload : ByteArray) :
+      Nat × List ByteArray × List Nat :=
+    let (len, ps, offs) := acc
+    (len + payload.size, payload :: ps, (poolStart + len) :: offs)
+  let (imLen, imPs, imOffsR) := im.foldl (fun acc r => step acc r.data) (0, [], [])
+  let (wLen, wPs, wOffsR) := ws.foldl (fun acc w => step acc w.data) (imLen, [], [])
+  let (_, ePs, eOffsR) := es.foldl (fun acc e => step acc e.name.toUTF8) (wLen, [], [])
+  let imOffs := imOffsR.reverse
+  let wOffs := wOffsR.reverse
+  let eOffs := eOffsR.reverse
+  let pool := (imPs.reverse ++ wPs.reverse ++ ePs.reverse).foldl (init := ByteArray.empty) fun acc p =>
+    p.data.foldl (fun a b => a.push b) acc
 
   let imBody := (im.zip imOffs).foldl (init := ByteArray.empty) fun b (r, off) =>
     pushU32le (pushU32le (pushU32le (pushU32le (pushU64le (pushU64le b r.vaStart) r.size)
@@ -329,7 +379,7 @@ def encodeTtfx (tr : Trace) : ByteArray := Id.run do
     out := pushU32le out (UInt32.ofNat recSize)
     out := pushU64le out (UInt64.ofNat (body.size / recSize))
     out := out ++ body
-  out ++ pool3
+  out ++ pool
 
 
 
@@ -391,11 +441,12 @@ theorem decodeRecord_eq_decodeWrite (data : ByteArray) (frontier : Position) (tr
   unfold decodeRecord
   simp [SEC_WRITES, SEC_INITMEM]
 
-/-- Content of the write-order check: no anomalies ⇒ previous last write's
-    position ≤ the new write's position. -/
+/-- Content of the write-order check: no anomalies ⇒ previous head write's
+    position ≤ the new write's position (head = last decoded under the
+    cons-reversed accumulation). -/
 theorem decodeWrite_last_le (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat)
     (hano : (decodeWrite data frontier tr off).anomalies = [])
-    (l : WriteRecord) (hl : tr.writes.getLast? = some l) :
+    (l : WriteRecord) (hl : tr.writes.head? = some l) :
     l.pos ≤ (u64At data off).getD 0 := by
   unfold decodeWrite at hano
   dsimp only at hano
@@ -409,52 +460,97 @@ theorem decodeWrite_last_le (data : ByteArray) (frontier : Position) (tr : Trace
     exact hle
 
 theorem decodeWrite_ordered (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat)
-    (hord : PositionOrdered tr.writes)
+    (hord : PositionOrdered tr.writes.reverse)
     (hano : (decodeWrite data frontier tr off).anomalies = []) :
-    PositionOrdered (decodeWrite data frontier tr off).writes := by
-  have hw : (decodeWrite data frontier tr off).writes
-      = tr.writes ++ [{ pos := (u64At data off).getD 0, va := (u64At data (off + 8)).getD 0,
-                        data := sliceExact data (((u32At data (off + 20)).getD 0).toNat)
-                          (((u32At data (off + 16)).getD 0).toNat),
-                        provenance := prov off }] := rfl
-  rw [hw]
-  exact PositionOrdered.append_singleton hord
-    (fun l hl => decodeWrite_last_le data frontier tr off hano l hl)
+    PositionOrdered (decodeWrite data frontier tr off).writes.reverse := by
+  unfold decodeWrite
+  dsimp only
+  rw [List.reverse_cons]
+  apply PositionOrdered.append_singleton hord
+  intro l hl
+  exact decodeWrite_last_le data frontier tr off hano l (List.getLast?_reverse ▸ hl)
+
+private theorem finish_anomalies (kind : UInt32) (tr : Trace) :
+    (finish kind tr).anomalies = tr.anomalies := by
+  unfold finish
+  by_cases h1 : kind == SEC_INITMEM
+  · simp [h1]
+  · by_cases h2 : kind == SEC_WRITES
+    · simp [h1, h2]
+    · by_cases h3 : kind == SEC_EVENTS
+      · simp [h1, h2, h3]
+      · by_cases h4 : kind == SEC_THREADS
+        · simp [h1, h2, h3, h4]
+        · simp [h1, h2, h3, h4]
+
+private theorem finish_writes (kind : UInt32) (tr : Trace) (h : kind ≠ SEC_WRITES) :
+    (finish kind tr).writes = tr.writes := by
+  unfold finish
+  by_cases h1 : kind == SEC_INITMEM
+  · simp [h1]
+  · by_cases h2 : kind == SEC_WRITES
+    · exfalso; exact h (beq_iff_eq.1 h2)
+    · by_cases h3 : kind == SEC_EVENTS
+      · simp [h1, h2, h3]
+      · by_cases h4 : kind == SEC_THREADS
+        · simp [h1, h2, h3, h4]
+        · simp [h1, h2, h3, h4]
+
+private theorem finish_events (kind : UInt32) (tr : Trace) (h : kind ≠ SEC_EVENTS) :
+    (finish kind tr).events = tr.events := by
+  unfold finish
+  by_cases h1 : kind == SEC_INITMEM
+  · simp [h1]
+  · by_cases h2 : kind == SEC_WRITES
+    · simp [h1, h2]
+    · by_cases h3 : kind == SEC_EVENTS
+      · exfalso; exact h (beq_iff_eq.1 h3)
+      · by_cases h4 : kind == SEC_THREADS
+        · simp [h1, h2, h3, h4]
+        · simp [h1, h2, h3, h4]
 
 theorem sectionRecordLoop_anomalies_mono (data : ByteArray) (frontier : Position) (kind : UInt32)
     (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat) :
     ∃ e, (sectionRecordLoop data frontier kind body recordSize recordCnt tr i).anomalies
         = tr.anomalies ++ e := by
   fun_induction sectionRecordLoop data frontier kind body recordSize recordCnt tr i
-  · exact ⟨_, rfl⟩
+  · rename_i tr i hlt off hfit
+    rw [finish_anomalies]
+    exact ⟨[anom off s!"ttfx: truncated section {kind} at record {i}"], rfl⟩
   · rename_i tr i hlt off hfit ih
     obtain ⟨e1, h1⟩ := decodeRecord_anomalies data frontier tr kind off
     obtain ⟨e2, h2⟩ := ih
     exact ⟨e1 ++ e2, by rw [h2, h1, List.append_assoc]⟩
-  · exact ⟨[], by simp⟩
+  · rw [finish_anomalies]
+    exact ⟨[], by simp⟩
 
 theorem sectionRecordLoop_writes_frame (data : ByteArray) (frontier : Position) (kind : UInt32)
     (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat) (h : kind ≠ SEC_WRITES) :
     (sectionRecordLoop data frontier kind body recordSize recordCnt tr i).writes
       = tr.writes := by
   fun_induction sectionRecordLoop data frontier kind body recordSize recordCnt tr i
-  · rfl
+  · rename_i tr i hlt off hfit
+    exact finish_writes kind { tr with anomalies := tr.anomalies ++
+      [anom off s!"ttfx: truncated section {kind} at record {i}"] } h
   · rename_i tr i hlt off hfit ih
     rw [ih]
     exact decodeRecord_writes_frame data frontier tr kind off h
-  · rfl
+  · rename_i tr i hnot
+    exact finish_writes kind tr h
 
+/-- Loop postcondition in the cons-reversed world: the accumulated field's
+    reverse is position-ordered (the invariant), and after the per-section
+    `finish` the field itself is forward-ordered (the conclusion). -/
 theorem sectionRecordLoop_writes_ordered (data : ByteArray) (frontier : Position)
     (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat)
-    (hord : PositionOrdered tr.writes)
+    (hord : PositionOrdered tr.writes.reverse)
     (hano : (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt tr i).anomalies = [])
     (hano0 : tr.anomalies = []) :
     PositionOrdered
       (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt tr i).writes := by
   fun_induction sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt tr i
-  · rename_i tr i hlt htr
-    rw [hano0] at hano
-    simp at hano
+  · rename_i tr i hlt off hfit
+    simpa [finish, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS] using hord
   · rename_i tr i hlt off hfit ih
     obtain ⟨e1, h1⟩ := decodeRecord_anomalies data frontier tr SEC_WRITES off
     obtain ⟨e2, h2⟩ := sectionRecordLoop_anomalies_mono data frontier SEC_WRITES
@@ -469,7 +565,35 @@ theorem sectionRecordLoop_writes_ordered (data : ByteArray) (frontier : Position
       rw [← decodeRecord_eq_decodeWrite data frontier tr off, h1, hano10, hano11]; rfl
     exact ih ((decodeRecord_eq_decodeWrite data frontier tr off).symm ▸
       decodeWrite_ordered data frontier tr off hord hstep) hano hstep0
-  · exact hord
+  · simpa [finish, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS] using hord
+
+/-- The seed survives the loop: a nonempty initial field's last record is
+    the result's head (finish puts it at the front of the reversed field). -/
+theorem sectionRecordLoop_writes_head (data : ByteArray) (frontier : Position)
+    (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat) (hne : tr.writes ≠ []) :
+    (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt tr i).writes.head?
+      = tr.writes.getLast? := by
+  fun_induction sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt tr i
+  · rename_i tr i hlt off hfit
+    simpa [finish, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS, List.head?_reverse]
+  · rename_i tr i hlt off hfit ih
+    let w : WriteRecord :=
+      { pos := (u64At data off).getD 0, va := (u64At data (off + 8)).getD 0,
+        data := sliceExact data (((u32At data (off + 20)).getD 0).toNat)
+          (((u32At data (off + 16)).getD 0).toNat),
+        provenance := prov off }
+    have hw : (decodeRecord data frontier tr SEC_WRITES off).writes = w :: tr.writes := by
+      rw [decodeRecord_eq_decodeWrite]; rfl
+    have hne' : (decodeRecord data frontier tr SEC_WRITES off).writes ≠ [] := by
+      intro h; rw [hw] at h; contradiction
+    have hlast : (w :: tr.writes).getLast? = tr.writes.getLast? := by
+      cases hc : tr.writes with
+      | nil => contradiction
+      | cons x xs => rfl
+    rw [← hlast]
+    exact ih hne'
+  · rename_i tr i h
+    simpa [finish, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS, List.head?_reverse]
 
 theorem decodeSection_anomalies (data : ByteArray) (frontier : Position) (tr : Trace)
     (kind : UInt32) (body recordSize recordCnt : Nat) :
@@ -480,7 +604,27 @@ theorem decodeSection_anomalies (data : ByteArray) (frontier : Position) (tr : T
   · exact ⟨[], by simp⟩
   · split
     · exact ⟨_, rfl⟩
-    · exact sectionRecordLoop_anomalies_mono data frontier kind body recordSize recordCnt tr 0
+    · split
+      · obtain ⟨e, h⟩ := sectionRecordLoop_anomalies_mono data frontier SEC_WRITES
+          body recordSize recordCnt
+          { tr with writes := match tr.writes.getLast? with | some s => [s] | none => [] } 0
+        exact ⟨e, by simp [h]⟩
+      · split
+        · obtain ⟨e, h⟩ := sectionRecordLoop_anomalies_mono data frontier SEC_EVENTS
+            body recordSize recordCnt
+            { tr with events := match tr.events.getLast? with | some s => [s] | none => [] } 0
+          exact ⟨e, by simp [h]⟩
+        · split
+          · obtain ⟨e, h⟩ := sectionRecordLoop_anomalies_mono data frontier SEC_INITMEM
+              body recordSize recordCnt { tr with initMem := [] } 0
+            exact ⟨e, by simp [h]⟩
+          · split
+            · obtain ⟨e, h⟩ := sectionRecordLoop_anomalies_mono data frontier SEC_THREADS
+                body recordSize recordCnt { tr with threads := [] } 0
+              exact ⟨e, by simp [h]⟩
+            · obtain ⟨e, h⟩ := sectionRecordLoop_anomalies_mono data frontier SEC_CALLS
+                body recordSize recordCnt { tr with calls := [] } 0
+              exact ⟨e, by simp [h]⟩
 
 theorem decodeSection_writes_ordered (data : ByteArray) (frontier : Position) (tr : Trace)
     (kind : UInt32) (body recordSize recordCnt : Nat)
@@ -501,11 +645,104 @@ theorem decodeSection_writes_ordered (data : ByteArray) (frontier : Position) (t
     · simp only [hsz, Bool.false_eq_true, if_false] at hano ⊢
       by_cases hk : kind == SEC_WRITES
       · rw [beq_iff_eq] at hk; subst hk
-        exact sectionRecordLoop_writes_ordered data frontier body recordSize recordCnt tr 0
-          hord hano hano0
+        cases hb : tr.writes.getLast? with
+        | none =>
+          cases hc : tr.writes with
+          | nil =>
+            have hsec : (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+                { tr with writes := [] } 0).anomalies = [] := by
+              simpa [hc] using hano
+            have hrev : PositionOrdered (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+                { tr with writes := [] } 0).writes :=
+              sectionRecordLoop_writes_ordered data frontier body recordSize recordCnt
+                { tr with writes := [] } 0 (by simp [PositionOrdered]) hsec (by simpa using hano0)
+            simp [hc]
+            change PositionOrdered (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+              { tr with writes := [] } 0).writes
+            exact hrev
+          | cons x xs =>
+            rw [hc, List.getLast?_eq_none_iff] at hb
+            exact False.elim (List.cons_ne_nil x xs hb)
+        | some s =>
+          have hsec : (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+              { tr with writes := [s] } 0).anomalies = [] := by
+            simpa [hb] using hano
+          have hrev : PositionOrdered (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+              { tr with writes := [s] } 0).writes :=
+            sectionRecordLoop_writes_ordered data frontier body recordSize recordCnt
+              { tr with writes := [s] } 0 (by simp [PositionOrdered]) hsec (by simpa using hano0)
+          have hnew : PositionOrdered ((sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+              { tr with writes := [s] } 0).writes.tail) := by
+            simpa using PositionOrdered.drop 1 hrev
+          simp [hb]
+          change PositionOrdered (tr.writes ++ (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+            { tr with writes := [s] } 0).writes.tail)
+          apply PositionOrdered.append hord hnew
+          intro l hl y hy
+          have hls : l = s := by
+            have hs : s = l := by
+              rw [hb] at hl
+              exact Option.some.inj hl
+            exact hs.symm
+          have hframe : (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+              { tr with writes := [s] } 0).writes.head? = some s := by
+            simpa using
+              sectionRecordLoop_writes_head data frontier body recordSize recordCnt
+                { tr with writes := [s] } 0 (by simp)
+          cases hd : (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+              { tr with writes := [s] } 0).writes.tail with
+          | nil => simp [hd] at hy
+          | cons z zs =>
+            have hy' : (z :: zs).head? = some y := by simpa [hd] using hy
+            have hz : z = y := Option.some.inj (by simpa using hy')
+            cases hc : (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+              { tr with writes := [s] } 0).writes with
+            | nil => simp [hc] at hframe
+            | cons x xs =>
+              have hx : x = s := by simpa [hc] using hframe
+              have hxs : xs = z :: zs := by simpa [hc] using hd
+              have hrev1 : s.pos ≤ z.pos := by
+                rw [hc, hx, hxs] at hrev
+                exact hrev.1
+              rw [hls, ← hz]
+              exact hrev1
       · have hk' : kind ≠ SEC_WRITES := fun heq => hk (beq_iff_eq.2 heq)
-        rw [sectionRecordLoop_writes_frame data frontier kind body recordSize recordCnt tr 0 hk']
-        exact hord
+        by_cases hke : kind == SEC_EVENTS
+        · rw [beq_iff_eq] at hke; subst hke
+          have hframe := sectionRecordLoop_writes_frame data frontier SEC_EVENTS
+            body recordSize recordCnt
+            { tr with events := match tr.events.getLast? with | some s => [s] | none => [] } 0
+            (by decide)
+          change PositionOrdered (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+            { tr with events := match tr.events.getLast? with | some s => [s] | none => [] } 0).writes
+          rw [hframe]
+          exact hord
+        · by_cases hki : kind == SEC_INITMEM
+          · rw [beq_iff_eq] at hki; subst hki
+            have hframe := sectionRecordLoop_writes_frame data frontier SEC_INITMEM
+              body recordSize recordCnt { tr with initMem := [] } 0
+              (by decide)
+            change PositionOrdered (sectionRecordLoop data frontier SEC_INITMEM body recordSize recordCnt
+              { tr with initMem := [] } 0).writes
+            rw [hframe]
+            exact hord
+          · by_cases hkt : kind == SEC_THREADS
+            · rw [beq_iff_eq] at hkt; subst hkt
+              have hframe := sectionRecordLoop_writes_frame data frontier SEC_THREADS
+                body recordSize recordCnt { tr with threads := [] } 0
+                (by decide)
+              change PositionOrdered (sectionRecordLoop data frontier SEC_THREADS body recordSize recordCnt
+                { tr with threads := [] } 0).writes
+              rw [hframe]
+              exact hord
+            · have hframe := sectionRecordLoop_writes_frame data frontier SEC_CALLS
+                body recordSize recordCnt { tr with calls := [] } 0
+                (by decide)
+              simp [hk, hke, hki, hkt]
+              change PositionOrdered (sectionRecordLoop data frontier SEC_CALLS body recordSize recordCnt
+                { tr with calls := [] } 0).writes
+              rw [hframe]
+              exact hord
 
 theorem sectionLoop_anomalies_mono (data : ByteArray) (frontier : Position)
     (remaining : Nat) (off : Nat) (tr : Trace) :
@@ -582,11 +819,11 @@ theorem decodeRecord_eq_decodeEvent (data : ByteArray) (frontier : Position) (tr
   unfold decodeRecord
   simp [SEC_EVENTS, SEC_INITMEM, SEC_WRITES]
 
-/-- Content of the event-order check: no anomalies ⇒ previous last event's
+/-- Content of the event-order check: no anomalies ⇒ previous head event's
     position ≤ the new event's position. -/
 theorem decodeEvent_last_le (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat)
     (hano : (decodeEvent data frontier tr off).anomalies = [])
-    (l : TraceEvent) (hl : tr.events.getLast? = some l) :
+    (l : TraceEvent) (hl : tr.events.head? = some l) :
     l.pos ≤ (u64At data off).getD 0 := by
   unfold decodeEvent at hano
   dsimp only at hano
@@ -602,15 +839,16 @@ theorem decodeEvent_last_le (data : ByteArray) (frontier : Position) (tr : Trace
   · simp at hano
 
 theorem decodeEvent_ordered (data : ByteArray) (frontier : Position) (tr : Trace) (off : Nat)
-    (hord : EventsOrdered tr.events)
+    (hord : EventsOrdered tr.events.reverse)
     (hano : (decodeEvent data frontier tr off).anomalies = []) :
-    EventsOrdered (decodeEvent data frontier tr off).events := by
+    EventsOrdered (decodeEvent data frontier tr off).events.reverse := by
   unfold decodeEvent
   dsimp only
   split
-  · apply EventsOrdered.append_singleton hord
+  · rw [List.reverse_cons]
+    apply EventsOrdered.append_singleton hord
     intro l hl
-    exact decodeEvent_last_le data frontier tr off hano l hl
+    exact decodeEvent_last_le data frontier tr off hano l (List.getLast?_reverse ▸ hl)
   · exact hord
 
 theorem sectionRecordLoop_events_frame (data : ByteArray) (frontier : Position) (kind : UInt32)
@@ -618,23 +856,26 @@ theorem sectionRecordLoop_events_frame (data : ByteArray) (frontier : Position) 
     (sectionRecordLoop data frontier kind body recordSize recordCnt tr i).events
       = tr.events := by
   fun_induction sectionRecordLoop data frontier kind body recordSize recordCnt tr i
-  · rfl
+  · rename_i tr i hlt off hfit
+    exact finish_events kind { tr with anomalies := tr.anomalies ++
+      [anom off s!"ttfx: truncated section {kind} at record {i}"] } h
   · rename_i tr i hlt off hfit ih
     rw [ih]
     exact decodeRecord_events_frame data frontier tr kind off h
-  · rfl
+  · rename_i tr i hnot
+    exact finish_events kind tr h
 
+/-- Loop postcondition in the cons-reversed world (events half). -/
 theorem sectionRecordLoop_events_ordered (data : ByteArray) (frontier : Position)
     (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat)
-    (hord : EventsOrdered tr.events)
+    (hord : EventsOrdered tr.events.reverse)
     (hano : (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt tr i).anomalies = [])
     (hano0 : tr.anomalies = []) :
     EventsOrdered
       (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt tr i).events := by
   fun_induction sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt tr i
-  · rename_i tr i hlt htr
-    rw [hano0] at hano
-    simp at hano
+  · rename_i tr i hlt off hfit
+    simpa [finish, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS] using hord
   · rename_i tr i hlt off hfit ih
     have hano' := hano
     obtain ⟨e1, h1⟩ := decodeRecord_anomalies data frontier tr SEC_EVENTS off
@@ -649,7 +890,39 @@ theorem sectionRecordLoop_events_ordered (data : ByteArray) (frontier : Position
       rw [← decodeRecord_eq_decodeEvent data frontier tr off, h1, hano10, hano11]; rfl
     exact ih ((decodeRecord_eq_decodeEvent data frontier tr off).symm ▸
       decodeEvent_ordered data frontier tr off hord hstep) hano hstep0
-  · exact hord
+  · simpa [finish, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS] using hord
+
+/-- The seed survives the loop (events half). -/
+theorem sectionRecordLoop_events_head (data : ByteArray) (frontier : Position)
+    (body recordSize recordCnt : Nat) (tr : Trace) (i : Nat) (hne : tr.events ≠ []) :
+    (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt tr i).events.head?
+      = tr.events.getLast? := by
+  fun_induction sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt tr i
+  · rename_i tr i hlt off hfit
+    simpa [finish, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS, List.head?_reverse]
+  · rename_i tr i hlt off hfit ih
+    have hne' : (decodeRecord data frontier tr SEC_EVENTS off).events ≠ [] := by
+      intro h
+      have h' : (decodeEvent data frontier tr off).events = [] := by
+        simpa [decodeRecord_eq_decodeEvent] using h
+      unfold decodeEvent at h'
+      dsimp only at h'
+      split at h'
+      · exact List.cons_ne_nil _ _ h'
+      · exact hne h'
+    have hlast : (decodeEvent data frontier tr off).events.getLast? = tr.events.getLast? := by
+      unfold decodeEvent
+      dsimp only
+      cases hk : (u32At data (off + 8)).getD 0 == 0 || (u32At data (off + 8)).getD 0 == 1
+        || (u32At data (off + 8)).getD 0 == 2
+      · simp [hk]
+      · cases hc : tr.events with
+        | nil => contradiction
+        | cons x xs => rfl
+    rw [← hlast]
+    rw [← decodeRecord_eq_decodeEvent data frontier tr off]
+    exact ih hne'
+  · simpa [finish, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS, List.head?_reverse]
 
 theorem decodeSection_events_ordered (data : ByteArray) (frontier : Position) (tr : Trace)
     (kind : UInt32) (body recordSize recordCnt : Nat)
@@ -670,11 +943,104 @@ theorem decodeSection_events_ordered (data : ByteArray) (frontier : Position) (t
     · simp only [hsz, Bool.false_eq_true, if_false] at hano ⊢
       by_cases hk : kind == SEC_EVENTS
       · rw [beq_iff_eq] at hk; subst hk
-        exact sectionRecordLoop_events_ordered data frontier body recordSize recordCnt tr 0
-          hord hano hano0
+        cases hb : tr.events.getLast? with
+        | none =>
+          cases hc : tr.events with
+          | nil =>
+            have hsec : (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+                { tr with events := [] } 0).anomalies = [] := by
+              simpa [hc, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS] using hano
+            have hrev : EventsOrdered (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+                { tr with events := [] } 0).events :=
+              sectionRecordLoop_events_ordered data frontier body recordSize recordCnt
+                { tr with events := [] } 0 (by simp [EventsOrdered]) hsec (by simpa using hano0)
+            simp [hc]
+            change EventsOrdered (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+              { tr with events := [] } 0).events
+            exact hrev
+          | cons x xs =>
+            rw [hc, List.getLast?_eq_none_iff] at hb
+            exact False.elim (List.cons_ne_nil x xs hb)
+        | some s =>
+          have hsec : (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+              { tr with events := [s] } 0).anomalies = [] := by
+            simpa [hb, SEC_INITMEM, SEC_WRITES, SEC_EVENTS, SEC_THREADS, SEC_CALLS] using hano
+          have hrev : EventsOrdered (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+              { tr with events := [s] } 0).events :=
+            sectionRecordLoop_events_ordered data frontier body recordSize recordCnt
+              { tr with events := [s] } 0 (by simp [EventsOrdered]) hsec (by simpa using hano0)
+          have hnew : EventsOrdered ((sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+              { tr with events := [s] } 0).events.tail) := by
+            simpa using EventsOrdered.drop 1 hrev
+          simp [hb]
+          change EventsOrdered (tr.events ++ (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+            { tr with events := [s] } 0).events.tail)
+          apply EventsOrdered.append hord hnew
+          intro l hl y hy
+          have hls : l = s := by
+            have hs : s = l := by
+              rw [hb] at hl
+              exact Option.some.inj hl
+            exact hs.symm
+          have hframe : (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+              { tr with events := [s] } 0).events.head? = some s := by
+            simpa using
+              sectionRecordLoop_events_head data frontier body recordSize recordCnt
+                { tr with events := [s] } 0 (by simp)
+          cases hd : (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+              { tr with events := [s] } 0).events.tail with
+          | nil => simp [hd] at hy
+          | cons z zs =>
+            have hy' : (z :: zs).head? = some y := by simpa [hd] using hy
+            have hz : z = y := Option.some.inj (by simpa using hy')
+            cases hc : (sectionRecordLoop data frontier SEC_EVENTS body recordSize recordCnt
+              { tr with events := [s] } 0).events with
+            | nil => simp [hc] at hframe
+            | cons x xs =>
+              have hx : x = s := by simpa [hc] using hframe
+              have hxs : xs = z :: zs := by simpa [hc] using hd
+              have hrev1 : s.pos ≤ z.pos := by
+                rw [hc, hx, hxs] at hrev
+                exact hrev.1
+              rw [hls, ← hz]
+              exact hrev1
       · have hk' : kind ≠ SEC_EVENTS := fun heq => hk (beq_iff_eq.2 heq)
-        rw [sectionRecordLoop_events_frame data frontier kind body recordSize recordCnt tr 0 hk']
-        exact hord
+        by_cases hkw : kind == SEC_WRITES
+        · rw [beq_iff_eq] at hkw; subst hkw
+          have hframe := sectionRecordLoop_events_frame data frontier SEC_WRITES
+            body recordSize recordCnt
+            { tr with writes := match tr.writes.getLast? with | some s => [s] | none => [] } 0
+            (by decide)
+          change EventsOrdered (sectionRecordLoop data frontier SEC_WRITES body recordSize recordCnt
+            { tr with writes := match tr.writes.getLast? with | some s => [s] | none => [] } 0).events
+          rw [hframe]
+          exact hord
+        · by_cases hki : kind == SEC_INITMEM
+          · rw [beq_iff_eq] at hki; subst hki
+            have hframe := sectionRecordLoop_events_frame data frontier SEC_INITMEM
+              body recordSize recordCnt { tr with initMem := [] } 0
+              (by decide)
+            change EventsOrdered (sectionRecordLoop data frontier SEC_INITMEM body recordSize recordCnt
+              { tr with initMem := [] } 0).events
+            rw [hframe]
+            exact hord
+          · by_cases hkt : kind == SEC_THREADS
+            · rw [beq_iff_eq] at hkt; subst hkt
+              have hframe := sectionRecordLoop_events_frame data frontier SEC_THREADS
+                body recordSize recordCnt { tr with threads := [] } 0
+                (by decide)
+              change EventsOrdered (sectionRecordLoop data frontier SEC_THREADS body recordSize recordCnt
+                { tr with threads := [] } 0).events
+              rw [hframe]
+              exact hord
+            · have hframe := sectionRecordLoop_events_frame data frontier SEC_CALLS
+                body recordSize recordCnt { tr with calls := [] } 0
+                (by decide)
+              simp [hk, hkw, hki, hkt]
+              change EventsOrdered (sectionRecordLoop data frontier SEC_CALLS body recordSize recordCnt
+                { tr with calls := [] } 0).events
+              rw [hframe]
+              exact hord
 
 theorem sectionLoop_events_ordered (data : ByteArray) (frontier : Position)
     (remaining : Nat) (off : Nat) (tr : Trace)
