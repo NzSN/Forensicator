@@ -536,7 +536,10 @@ fn find_ept_base(
             if b < 0x10000 || b & 7 != 0 {
                 continue;
             }
-            let Some(entry) = try_read_u64(space, b + layout.ept_entry_size * idx) else {
+            let Some(entry_va) = b.checked_add(layout.ept_entry_size * idx) else {
+                continue;
+            };
+            let Some(entry) = try_read_u64(space, entry_va) else {
                 continue;
             };
             let resource = entry & layout.ept_payload_mask;
