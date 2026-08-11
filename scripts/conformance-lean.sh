@@ -1,5 +1,7 @@
 #!/bin/bash
 # Conformance gate: Rust forensicator (golden oracle) vs Lean forensicator.
+# Defaults post-pivot: oracle source is the rust-backup worktree at
+# ~/Repos/Forensicator-rust; fixtures stay in this repo's Case/ (untracked).
 # Both must produce identical JSON (normalized with jq -S) and zero anomalies.
 #
 # Env: PATH must include elan shims: export PATH="$HOME/.elan/bin:$PATH"
@@ -8,8 +10,8 @@
 set -u
 export PATH="$HOME/.elan/bin:$PATH"
 LEAN_REPO="$(cd "$(dirname "$0")/.." && pwd)"
-RUST="${FORENSICATOR_RUST:-$HOME/Repos/Forensicator}"
-CASES="${FORENSICATOR_CASE_DIR:-$RUST/Case}"
+RUST="${FORENSICATOR_RUST:-$HOME/Repos/Forensicator-rust}"
+CASES="${FORENSICATOR_CASE_DIR:-$HOME/Repos/Forensicator/Case}"
 RUST_BIN="$RUST/target/debug/forensicator-cli"
 LEAN_BIN="$LEAN_REPO/.lake/build/bin/forensicator"
 

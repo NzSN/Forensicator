@@ -1,6 +1,14 @@
 # Forensicator — AGENTS.md
 
-Rust workspace (edition 2024) for forensic analysis of Windows x64 minidumps. Custom hand-written parser, pointer graph inference, structure recovery.
+> **Repo layout (post-pivot, 2026-08-11):** `master` is the **Lean 4 port**
+> (this tree; build `lake build`, gate `scripts/conformance-lean.sh`).
+> The original **Rust implementation** lives on branch **`rust-backup`**
+> (worktree at `~/Repos/Forensicator-rust`). The conformance gate builds the
+> Rust oracle from that worktree by default
+> (`FORENSICATOR_RUST=$HOME/Repos/Forensicator-rust`).
+
+Rust workspace (edition 2024) for forensic analysis of Windows x64 minidumps. Custom hand-written parser, pointer graph inference, structure recovery. (The commands below apply to the Rust tree, i.e. branch rust-backup.)
+
 
 ## Commands
 
