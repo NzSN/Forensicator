@@ -12,7 +12,7 @@ inductive Json where
   | str (s : String)
   | arr (items : List Json)
   | obj (fields : List (String × Json))
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 namespace Json
 
@@ -62,6 +62,9 @@ end
 def obj! (fields : List (String × Json)) : Json := .obj fields
 
 def ofUInt64 (v : UInt64) : Json := .int v.toNat
+def get : Json → String → Option Json
+  | .obj fields, k => fields.find? (·.1 == k) |>.map (·.2)
+  | _, _ => none
 def ofUInt32 (v : UInt32) : Json := .int v.toNat
 def ofUSize (v : USize) : Json := .int v.toNat
 def ofNat (n : Nat) : Json := .int n

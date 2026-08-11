@@ -383,6 +383,52 @@ def runAll : IO UInt32 := do
     ((decode1 [0x80, 0x7E, 0x08, 0x00]).map (fun i => (i.kind, i.text))
       == some ((Util.InstrKind.memRead (some 4) 8), "cmp byte ptr [rsi+8],0"))
 
+  -- v8 JS-frame resolution (port of v8.rs decodes_js_frame_from_captured_heap)
+  let setU32 := fun (o : Nat) (v : UInt32) => (o, (List.range 4).map fun i => ((v.toUInt64 >>> (8 * UInt64.ofNat i)).toUInt8))
+  let setU64 := fun (o : Nat) (v : UInt64) => (o, (List.range 8).map fun i => ((v >>> (8 * UInt64.ofNat i)).toUInt8))
+  let setBytes := fun (o : Nat) (bs : List UInt8) => (o, bs)
+  let cage : UInt64 := 0x100000000
+  let mkHeap (va : UInt64) (writes : List (Nat × List UInt8)) : Forensicator.Spec.AddressRegion :=
+    { vaStart := va, size := 0x100
+      data := buildBuf 0x100 writes
+      protection := 3, state := .Commit, classification := .Other }
+  let jsSpace0 : AddressSpace := .new 64
+  let jsRegions : List Forensicator.Spec.AddressRegion :=
+    [ -- RO space: one-byte-string Map at cage+0x100 (itype 0x08 at Map+8)
+      { vaStart := cage, size := 0x200, data := buildBuf 0x200 [setU32 0x108 0x08]
+        protection := 3, state := .Commit, classification := .Other }
+    , mkHeap (cage + 0x40000) [setU32 0 0x101, setU32 16 0x80001, setU32 20 0x180001]
+    , mkHeap (cage + 0x80000) [setU32 0 0x101, setU32 12 0xC0001, setU32 20 0x100001]
+    , mkHeap (cage + 0xC0000) [setU32 0 0x101, setU32 8 6, setBytes 12 [0x6D, 0x79, 0x46, 0x75, 0x6E, 0x63]]
+    , mkHeap (cage + 0x100000) [setU32 0 0x101, setU32 8 0x140001]
+    , mkHeap (cage + 0x140000) [setU32 0 0x101, setU32 8 7, setBytes 12 [0x74, 0x65, 0x73, 0x74, 0x2E, 0x6A, 0x73]]
+    , -- stack: one JS frame at fp=0x10000 (marker/function/context at fp-24/-16/-8)
+      { vaStart := 0xF000, size := 0x2000
+        data := buildBuf 0x2000 [
+          setU64 (0x10000 - 24 - 0xF000) 3,
+          setU64 (0x10000 - 16 - 0xF000) ((cage + 0x40000) ||| 1),
+          setU64 (0x10000 - 8 - 0xF000) ((cage + 0x180000) ||| 1)]
+        protection := 3, state := .Commit, classification := .Stack } ]
+  let jsSpace := jsRegions.foldl (fun sp r =>
+    match sp.addRegion r with | .ok s => s | .error _ => sp) jsSpace0
+  let jsRegs := (Model.RegisterSet.new.set Model.X64.RBP 0x10000).set Model.X64.RSP 0xFF00
+    |>.set Model.X64.RIP 0x7FFA1000
+  let jsDump : Model.Dump := {
+    modules := [{ name := "test.dll", baseVa := 0x7FFA0000, size := 0x10000
+                  checksum := 0, provenance := { streamType := 2 } }]
+    threads := [{ id := 1, registers := jsRegs, stackVa := 0xF000, stackSize := 0x2000
+                  tebVa := 0, provenance := {} }]
+    annotations := [("ver", "41.0.0"), ("v8_isolate_address", "0x1001C0000"),
+                    ("v8_ro_space_firstpage_address", "0x100000000")] }
+  check ctx "v8 js frame resolution (synthetic heap)"
+    (match (Analyzer.V8.analyzer).run jsDump jsSpace |>.custom with
+     | cs =>
+       match cs.find? (·.1 == "v8_frames") with
+       | some (_, .arr (f0 :: _)) =>
+         Json.get f0 "js_function_name" == some (Json.str "myFunc")
+           && Json.get f0 "script_name" == some (Json.str "test.js")
+       | _ => false)
+
   let n ← ctx.failures.get
   IO.println (if n == 0 then "== ALL GUARDS PASSED ==" else s!"== {n} FAILURE(S) ==")
   pure n.toUInt32
