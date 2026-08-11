@@ -184,6 +184,10 @@ structure Decoded where
   text : String
   len : Nat
 
+private def jccName : Nat → String :=
+  fun r => ["jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja",
+            "js", "jns", "jp", "jnp", "jl", "jge", "jle", "jg"].getD r "?"
+
 private def grp1Name : Nat → String :=
   fun r => ["add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"].getD r "?"
 private def grp3Name : Nat → String :=
@@ -195,7 +199,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
     (rexW rexR rexX rexB : Bool) : Decoded :=
   let op := bytes.get! plen
   let other (len : Nat) (text : String) : Decoded := { kind := .other, text := text, len := plen + len }
-  let size : Nat := if op == 0x38 || op == 0x80 || op == 0x84 || op == 0x86 || op == 0x88 || op == 0x8A
+  let size : Nat := if op == 0x30 || op == 0x32 || op == 0x38 || op == 0x80 || op == 0x84 || op == 0x86 || op == 0x88 || op == 0x8A
                        || op == 0xC6 || op == 0xF6 || op == 0xFE then 1
                     else if rexW then 8 else 4
   -- decode helper for modrm forms: f gets (reg, rm, memOp?, totalLen)
@@ -236,6 +240,24 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       | some mo =>
         { kind := .other
           text := s!"{name} {ptrSize size} {memText mo ip total},{fmtNum (bytes.get! (total - 1)).toUInt64}"
+          len := total }
+  | 0x30 | 0x31 =>  -- xor r/m, reg (op0 write)
+    withModRM 0 fun reg rm mo total =>
+      match mo with
+      | none => { kind := .other
+                  text := s!"xor {regNameOf size rm},{regNameOf size reg}", len := total }
+      | some mo =>
+        { kind := .memWrite mo.baseX64 (finalDisp mo ip total)
+          text := s!"xor {ptrSize size} {memText mo ip total},{regNameOf size reg}"
+          len := total }
+  | 0x32 | 0x33 =>  -- xor reg, r/m (op1 mem read)
+    withModRM 0 fun reg rm mo total =>
+      match mo with
+      | none => { kind := .other
+                  text := s!"xor {regNameOf size reg},{regNameOf size rm}", len := total }
+      | some mo =>
+        { kind := .memRead mo.baseX64 (finalDisp mo ip total)
+          text := s!"xor {regNameOf size reg},{memText mo ip total}"
           len := total }
   | 0x38 | 0x39 =>  -- cmp r/m, reg (op0 mem read-only)
     withModRM 0 fun reg rm mo total =>
@@ -425,6 +447,22 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
             { kind := .memRead mo.baseX64 (finalDisp mo ip total)
               text := s!"{mne} {regName64 reg},{memText mo ip total}"
               len := total }
+      | 0x84 =>  -- je rel32
+        if plen + 6 ≤ bytes.size then
+          let rel := sext32 (readU32leAt bytes (plen + 2))
+          let target := Int.ofNat ip.toNat + Int.ofNat (plen + 6) + rel
+          { kind := .other
+            text := s!"je {fmtBranch (UInt64.ofNat (target.toNat % (2^64)))}"
+            len := plen + 6 }
+        else other 2 "db"
+      | 0x85 =>  -- jne rel32
+        if plen + 6 ≤ bytes.size then
+          let rel := sext32 (readU32leAt bytes (plen + 2))
+          let target := Int.ofNat ip.toNat + Int.ofNat (plen + 6) + rel
+          { kind := .other
+            text := s!"jne {fmtBranch (UInt64.ofNat (target.toNat % (2^64)))}"
+            len := plen + 6 }
+        else other 2 "db"
       | 0xAF =>  -- imul r, r/m
         withModRM2 (plen + 2) fun reg mo total =>
           match mo with
@@ -435,7 +473,15 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
               len := total }
       | _ => other 2 "db"
   | opx =>
-    if opx ≥ 0xB8 && opx ≤ 0xBF then  -- mov r, imm
+    if opx ≥ 0x70 && opx ≤ 0x7F then  -- Jcc rel8
+      if plen + 2 ≤ bytes.size then
+        let rel := sext8 (bytes.get! (plen + 1))
+        let target := Int.ofNat ip.toNat + Int.ofNat (plen + 2) + rel
+        { kind := .other
+          text := s!"{jccName (opx.toNat % 16)} short {fmtBranch (UInt64.ofNat (target.toNat % (2^64)))}"
+          len := plen + 2 }
+      else other 1 "db"
+    else if opx ≥ 0xB8 && opx ≤ 0xBF then  -- mov r, imm
       let r := opx.toNat - 0xB8 + (if rexB then 8 else 0)
       if rexW then
         if plen + 9 ≤ bytes.size then

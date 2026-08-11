@@ -110,8 +110,10 @@ private def findEptBase (space : AddressSpace) (isolateVa : VA) (handle : UInt32
           let b := readU64leAt region.data off
           if b < 0x10000 || b &&& 7 != 0 then scan (off + 8)
           else
-            -- v8.rs:539: `b + ept_entry_size * idx` overflows in debug Rust
-            if b.toNat + layout.eptEntrySize.toNat * idx.toNat ≥ 2 ^ 64 then .error ()
+            -- v8.rs:539 overflow → checked_add skips the candidate (fixed
+            -- upstream after the 13c81d0 investigation; the panic
+            -- reproduction is retired)
+            if b.toNat + layout.eptEntrySize.toNat * idx.toNat ≥ 2 ^ 64 then scan (off + 8)
             else
               match readU64o space (b + layout.eptEntrySize * idx) with
               | none => scan (off + 8)
