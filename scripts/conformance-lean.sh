@@ -68,6 +68,11 @@ check "trace minimal --writes json" trace "$T" --writes 0x1004 2 --json
 ANOM="$("$LEAN_BIN" trace "$T" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["anomalies"]))')"
 if [ "$ANOM" != "0" ]; then echo "FAIL: lean reported $ANOM anomalies on minimal.ttfx"; fail=1; fi
 
+# in-process guard suite (F2/F4/F5/F6 review-hardening guards + all earlier
+# spec guards); FORENSICATOR_CASE_DIR enables the minidump prefix/mutation fuzz
+echo "== forensicator-test guard suite =="
+FORENSICATOR_CASE_DIR="$CASES" "$LEAN_REPO/.lake/build/bin/forensicator-test" || { echo "FAIL: guard suite"; fail=1; }
+
 # encoder cross-check: Lean-encoded fixture must decode cleanly under the Rust oracle
 EMIT="$(mktemp -d)/lean-minimal.ttfx"
 "$LEAN_REPO/.lake/build/bin/forensicator-test" --emit "$EMIT" || { echo "FAIL: emit"; exit 1; }
