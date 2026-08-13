@@ -112,5 +112,52 @@ else
   echo "ok   negative: shell rejects .ttfx with 'ttfx removed'"
 fi
 
+# opt-in live proxy gate (plan C6; OFF by default): scripted lazy session
+# against the fixture trace, spot-comparing banner/writes/payloads against
+# the known fixture values recorded in the design's Implementation notes.
+# Requires: FORENSICATOR_PROXY_RUN=<trace path> (e.g.
+# D:/Codebase/TTFX/traces/hostname01.run) plus a transport —
+# FORENSICATOR_PROXY_SSH=windows-dev (rides ssh stdio) or a local
+# FORENSICATOR_PROXY_EXE interop path.
+if [ -z "${FORENSICATOR_PROXY_RUN:-}" ]; then
+  echo "skip proxy live gate (FORENSICATOR_PROXY_RUN unset)"
+else
+  echo "== proxy live gate ($FORENSICATOR_PROXY_RUN) =="
+  session="$(printf '%s\n' \
+      'seek 0x1A60AD500000003' \
+      'writes 0x9F4C2BF388 8' \
+      'seek 0x1A613E1000016C2' \
+      'writes 0x9F4C2BF3B0 8' \
+      'writes 0x9F4C2BDB60 8' \
+      'quit' | timeout 900 "$LEAN_BIN" shell --proxy "$FORENSICATOR_PROXY_RUN" 2>/dev/null)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL proxy gate: session rc=$rc"; fail=1
+  else
+    if printf '%s' "$session" | grep -qF \
+        "loaded $(basename "$FORENSICATOR_PROXY_RUN"): trace (lazy via proxy), frontier 0x1A613E1000016C2, 3 threads, 20 events"; then
+      echo "ok   proxy gate: handshake banner"
+    else echo "FAIL proxy gate: banner"; printf '%s\n' "$session" | head -3; fail=1; fi
+    # eager-.ttfx payload for write (0x1A60AD500000003, 0x9F4C2BF388)
+    if printf '%s' "$session" | grep -qF \
+        "@0x1A60AD500000003  [0x9F4C2BF388, 0x9F4C2BF390)  [1E, 5C, 16, BA, F8, 7F, 00, 00]  <-- last writer"; then
+      echo "ok   proxy gate: write payload == eager .ttfx"
+    else echo "FAIL proxy gate: payload"; fail=1; fi
+    # fixture write-count spot checks (overlapping-record counts pinned by
+    # the eager WRITES section; occurrence-grep, the prompt has no newline)
+    n="$(printf '%s\n' "$session" | grep -oE '@0x[0-9A-F]+  \[0x9F4C2BF3B[04],' | wc -l)"
+    if [ "$n" = "39" ]; then echo "ok   proxy gate: hot-VA write count (39)"
+    else echo "FAIL proxy gate: write count $n ≠ 39"; fail=1; fi
+    n="$(printf '%s\n' "$session" | grep -oE '@0x[0-9A-F]+  \[0x9F4C2BDB6[02468],' | wc -l)"
+    if [ "$n" = "1287" ]; then echo "ok   proxy gate: P3-page write count (1287)"
+    else echo "FAIL proxy gate: P3 write count $n ≠ 1287"; fail=1; fi
+    # P3 documented limitation: the probe-verified never-readable record's
+    # payload exists only in the eager .ttfx (probe_page.py, design notes)
+    if printf '%s' "$session" | grep -qF \
+        "@0x1A60DBE00002057  [0x9F4C2BDB60, 0x9F4C2BDB68)  <uncommitted>"; then
+      echo "ok   proxy gate: P3 record fails closed"
+    else echo "FAIL proxy gate: P3 record"; fail=1; fi
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then echo "== CONFORMANCE FAILED =="; exit 1; fi
 echo "== CONFORMANCE PASS =="
