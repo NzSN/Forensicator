@@ -1,5 +1,10 @@
 # Snapshot.tla → Rust landing design
 
+> **Lean-port note (2026-08-13):** Rust-era document — the implementation is
+> now the Lean 4 tree (`Forensicator/`, `Main.lean`, `Test/`; module map in
+> `docs/arch/README.md`). Rust references below (`forensicator-core/src/…`,
+> `cargo`, `tests/mbt_*`) are historical and kept as written for the record.
+
 Date: 2026-08-08
 Status: landed (2026-08-09, with adjustments — see "Landed adjustments" below)
 Spec: `specs/Snapshot.tla` (Apalache-verified, commit bd0736a)

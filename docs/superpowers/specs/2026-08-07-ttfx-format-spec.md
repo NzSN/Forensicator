@@ -1,5 +1,10 @@
 # TTFX — Forensicator Trace Container Format (v1)
 
+> **Lean-port note (2026-08-13):** Rust-era document — the implementation is
+> now the Lean 4 tree (`Forensicator/`, `Main.lean`, `Test/`; module map in
+> `docs/arch/README.md`). Rust references below (`forensicator-core/src/…`,
+> `cargo`, `tests/mbt_*`) are historical and kept as written for the record.
+
 ## Status
 Draft, v1. Matches `forensicator-core/src/parse/ttfx.rs` (`TTFX_VERSION = 1`).
 Formal behavioral contract: `specs/Timeline.tla`. Design rationale:

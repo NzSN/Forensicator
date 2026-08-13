@@ -15,22 +15,22 @@ reference (Electron 41.10.3 renderer, forced breakpoint dump `0x80000003`).
 
 ## Pieces
 
-### 1. Dump kind classification — `pipeline.rs`
+### 1. Dump kind classification — `Forensicator/Pipeline.lean`
 
-`Forensicator::classify_dump`: total captured bytes ≥ 64 MiB ⇒
-`DumpKind::FullMemory`, else `DumpKind::StackOnly`. Stored on `S1Output.kind`
-and printed by the CLI (`dump: stack-only, 1 image(s) supplemented`).
+`classifyDump`: total captured bytes ≥ 64 MiB ⇒ `DumpKind.FullMemory`, else
+`DumpKind.StackOnly` (Nat-lifted sum — no u64 wrap). Printed by the CLI
+(`dump: stack-only, 1 image(s) supplemented`).
 
-### 2. PE image backing — `image.rs`
+### 2. PE image backing — `Forensicator/Util/Image.lean`
 
-`ImageFile` parses DOS/NT headers + section table and maps VA → RVA → file
-offset. `ImageSet::discover(dump_dir, module_paths, base_vas)` locates each
-module by basename (Windows path separators handled) in the dump's directory.
-`AddressSpace::set_backing(images)` makes `read()` fall through to images for
-VAs not covered by any dump region — one change, transparent to all analyzers
-and to both dump kinds.
+The PE parser handles DOS/NT headers + section table and maps VA → RVA →
+file offset. Discovery locates each module by basename (Windows path
+separators handled) in the dump's directory; the session supplements the
+AddressSpace with image bytes so reads fall through to images for VAs not
+covered by any dump region — transparent to all analyzers and to both dump
+kinds (`Session.lean` `supplement`).
 
-### 3. x64 unwind walking — `unwind.rs`
+### 3. x64 unwind walking — `Forensicator/Util/Unwind.lean`
 
 - `.pdata` located via the PE exception directory (data directory #3, at
   optional header + 112 + 24 for PE32+) read **through the AddressSpace**, so
@@ -49,10 +49,10 @@ Gotchas encoded here, learned the hard way:
   (`UnwindOp : 4` is the first bitfield).
 - `count_of_codes` counts 2-byte **slots** (including extra slots of
   multi-slot ops), not ops.
-- Register numbers differ from the project's `x64_indices` (mapping table
-  `UWREG_MAP`).
+- Register numbers differ from the project's x64 indices (a mapping table
+  lives in `Util/Unwind.lean`).
 
-### 4. Hybrid walker — `analyzer/v8.rs`
+### 4. Hybrid walker — `Forensicator/Analyzer/V8.lean`
 
 Per thread, from the (exception) context, loop per frame:
 
@@ -70,18 +70,19 @@ stack-only dumps, so a blanket mapped-check would kill real JS frames).
 
 ### 5. Graceful V8 degradation
 
-- `decode_js_frame` already fails closed when heap reads miss — JS names,
+- `decodeJsFrame` already fails closed when heap reads miss — JS names,
   script names, and lines simply come out `None`.
 - The analyzer emits `v8_heap_captured: false` in JSON so consumers can tell
   "no JS on this thread" from "heap not in dump".
-- Frame classification still works: `StackFrame::Type` markers live on the
+- Frame classification still works: `StackFrame.Type` markers live on the
   captured stacks, so JIT frames are typed (`OptimizedJavaScript` etc.).
 
 ### 6. Crash-site disassembly
 
-`disassemble_exception` (iced-x86, Intel syntax) decodes ~10 instructions at
-the exception address through the layered space — on minidumps the bytes come
-from the supplemented image. Printed as a `Crash site:` block by the CLI.
+The crash-site disassembler (`Util/Disasm.lean` — native x86-64 subset,
+Intel syntax) decodes ~10 instructions at the exception address through the
+layered space — on minidumps the bytes come from the supplemented image.
+Printed as a `Crash site:` block by the CLI.
 
 ## Results on `Case/minidump`
 
@@ -117,8 +118,7 @@ stacks (e.g. `base::WaitableEvent::TimedWait`) instead of 1–2 noise frames.
 
 ## Tests
 
-- `image.rs`: synthetic PE parsing, section reads, rejection.
-- `unwind.rs`: `.pdata` lookup, `PUSH_NONVOL`+`ALLOC_SMALL`,
-  `SET_FPREG`+`SAVE_NONVOL`, `PUSH_MACHFRAME` (all against synthetic
-  UNWIND_INFO blobs).
-- All pre-existing suites unchanged (193 core tests).
+In the guard suite (`Test/Spec.lean`, run by `forensicator-test`):
+synthetic PE parsing/section reads/rejection (`Util/Image.lean` paths);
+`.pdata` lookup and `UNWIND_INFO` simulation (`PUSH_NONVOL`+`ALLOC_SMALL`,
+`SET_FPREG`+`SAVE_NONVOL`, `PUSH_MACHFRAME`) against synthetic blobs.

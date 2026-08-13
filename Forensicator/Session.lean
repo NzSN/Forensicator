@@ -9,7 +9,6 @@
    never diffed against the Rust binary's `error: {e}` output. -/
 import Forensicator.Model.Trace
 import Forensicator.Parse.Minidump
-import Forensicator.Parse.Ttfx
 import Forensicator.Pipeline
 import Forensicator.Util.Image
 import Forensicator.Util.Bytes
@@ -54,17 +53,14 @@ private def supplement (dump : Dump) (space : AddressSpace) (path : String) :
   pure (if images.images.isEmpty then space else space.setBacking images,
         images.images.length)
 
-/-- Open a dump or trace (magic sniff). -/
+/-- Open a dump or trace (magic sniff). Trace support is proxy-only since
+    the .ttfx v1 format was removed (2026-08-13); a `.ttfx` fails here with
+    an explicit error and never falls through to the minidump decoder. The
+    future Lean client constructs `.trace` sessions from the proxy. -/
 def Session.open (path : String) (symbols : Option String) : IO Session := do
   let head ← IO.FS.withFile path .read fun h => h.read 4
-  if head.size ≥ 4 && readU32leAt head 0 == TTFX_MAGIC then
-    let data ← IO.FS.readBinFile path
-    match decodeTtfx data with
-    | .error a => throw (IO.Error.userError a.description)
-    | .ok t =>
-      for a in t.anomalies do
-        IO.eprintln s!"warning: [stream 0x{hexPadUpper a.streamType.toUInt64 8} @ +{hexUpper a.fileOffset}] {a.description}"
-      pure { path := path, target := .trace t t.frontier, symbols := symbols }
+  if head.size ≥ 4 && readU32leAt head 0 == 0x58465454 then
+    throw (IO.Error.userError "ttfx removed: trace support is proxy-only (the Lean client is a follow-up)")
   else
     let data ← IO.FS.readBinFile path
     match Minidump.fromBytes data with

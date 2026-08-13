@@ -1,5 +1,10 @@
 # Forensicator — S1 (Foundation) Design
 
+> **Lean-port note (2026-08-13):** Rust-era document — the implementation is
+> now the Lean 4 tree (`Forensicator/`, `Main.lean`, `Test/`; module map in
+> `docs/arch/README.md`). Rust references below (`forensicator-core/src/…`,
+> `cargo`, `tests/mbt_*`) are historical and kept as written for the record.
+
 **Status:** CONFIRMED — all sections reviewed, TLA+ specs model-checked.
 **Date:** 2026-06-27
 **Sub-project:** S1 of S1–S4

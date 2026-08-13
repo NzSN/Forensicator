@@ -68,8 +68,9 @@ structure CallSpan where
   deriving Repr, Inhabited
 
 /-- The recorded trace (Timeline.tla state). Invariants (ordered logs,
-    nesting, intervals within lifetimes) are enforced at decode time in
-    Parse.Ttfx and recorded in `anomalies`. -/
+    nesting, intervals within lifetimes) were enforced by the eager decoder
+    (removed 2026-08-13); on the proxy path they are enforced client-side
+    as index/event windows arrive and recorded in `anomalies`. -/
 structure Trace where
   initMem : List MemoryRegionInfo := []
   writes : List WriteRecord := []

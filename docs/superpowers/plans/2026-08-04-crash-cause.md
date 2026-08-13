@@ -1,5 +1,10 @@
 # Crash-Cause Diagnosis — Implementation Plan
 
+> **Lean-port note (2026-08-13):** Rust-era document — the implementation is
+> now the Lean 4 tree (`Forensicator/`, `Main.lean`, `Test/`; module map in
+> `docs/arch/README.md`). Rust references below (`forensicator-core/src/…`,
+> `cargo`, `tests/mbt_*`) are historical and kept as written for the record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the crash-cause diagnosis from `docs/superpowers/specs/2026-08-04-crash-cause-design.md`: a `cause` analyzer that fuses exception semantics, disassembly, MemoryInfoList, and cage-aware heap decoding into a `CrashDiagnosis` verdict, fed by a V8HE v2 capture-side extension.

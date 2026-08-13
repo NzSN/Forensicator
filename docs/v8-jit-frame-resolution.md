@@ -430,23 +430,23 @@ and line numbers do not depend on the EPT and are not affected by this.
   (inline Seq*/internalized and external strings are covered).
 - Offsets are hardcoded for V8 14.6 (Electron 41 / Chromium 146). Other V8
   versions with different `JSFunction`/`SharedFunctionInfo`/`ScopeInfo`
-  layouts need another `V8Layout` table in `v8layout.rs` — everything is
+  layouts need another `V8Layout` table in `Util/V8Layout.lean` — everything is
   validated, so a wrong layout fails closed to `None`, never to wrong names.
 
 ## Implementation map
 
 | Piece | Location |
 |---|---|
-| Stack walk + frame decode orchestration | `forensicator-core/src/analyzer/v8.rs` — `walk_thread_stacks` |
+| Stack walk + frame decode orchestration | `Forensicator/Analyzer/V8.lean` — `walkGo`/`walkThreadStacks` |
 | Marker decode (`StackFrame::Type` ints) | `decode_v8_marker` |
 | JSFunction validation + name/script/line decode | `decode_js_frame` → `JsFrameInfo` |
 | ScopeInfo slot walk | `scope_info_function_name` |
 | String readers (inline/external) | `read_v8_string`, `read_external_chars` |
 | Line numbers | `decode_script_line` |
 | External strings via EPT | `decode_script_name`, `find_ept_base`, `external_string_via_ept` |
-| Frame model (`frame_pointer` field) | `forensicator-core/src/model.rs` — `V8StackFrame` |
-| CLI output (`[js: name @ script:line]`) | `forensicator-cli/src/main.rs` — `print_v8_frames` |
-| Unit tests (synthetic cage, EPT, line tables) | `analyzer/v8.rs` `mod tests` — 12 tests |
+| Frame model (`frame_pointer` field) | `Forensicator/Analyzer/V8.lean` — `V8StackFrame` |
+| CLI output (`[js: name @ script:line]`) | `Main.lean` — v8 frame printing |
+| Unit tests (synthetic cage, EPT, line tables) | `Test/Spec.lean` guard suite (synthetic V8 cages) |
 
 ## V8 source references
 

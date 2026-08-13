@@ -1,4 +1,4 @@
-# Verification: Specs, MBT, Fixtures, Tests
+# Verification: Specs, Theorems, Fixtures, Golden Gate
 
 ## TLA+ specifications (`specs/`)
 
@@ -11,33 +11,48 @@
 | `Arch.tla` | Exception CONTEXT register file | Apalache |
 | `Symbolizer.tla` | Module/symbol tables, sorted resolution | Apalache |
 | `CrashCause.tla` | Verdict discipline (classify → fire rules → decide; verdicts justified by fired rules) | Apalache |
-| `Timeline.tla` | TTD trace semantics: ordered logs, cursor bounds, snapshot consistency, call nesting | Apalache (depth 10) + TLC simulation |
+| `Timeline.tla` | TTD trace semantics: ordered logs, cursor bounds, snapshot consistency, call nesting | Apalache (depth 10) |
+| `Snapshot.tla` | The Timeline→Model link (`ModelAt(t)`, `SnapshotValid`, `SnapshotsAreModels`) | Apalache (`--features=no-rows`) |
+| `JigSawSpawner.tla` | Lazy-proxy loading path: write-index horizons, jigsaw cache validity, `CacheSound`/`AbsentSound` | Apalache (depth 10, `--features=no-rows`) |
 
 Conventions: tiny model-checking bounds, flat parallel sequences, `@type`
 annotations, constant quantifier domains with `Len` guards (Apalache's
-dynamic-range limitation), safety invariants only. Code modules cite their
-spec counterparts in comments (e.g. `pipeline.rs` stage methods ↔
-`Forensicator.tla` actions; `model/trace.rs` ↔ `Timeline.tla` variables).
+dynamic-range limitation), safety invariants only.
 
-## Model-based tests (`forensicator-core/tests/mbt_*.rs`)
+## Mechanized theorems (Lean, `Forensicator/Spec/` + in-module)
 
-`mbt_address_space`, `mbt_arch`, `mbt_model`, `mbt_forensicator` replay
-Apalache counterexample/witness traces against the Rust implementation via
-`mirrorrust`. `mbt_crash_cause` and `mbt_timeline` are spec-only stubs
-(replay not yet wired). All **auto-skip** when `MIRROR_BIN` is unset, so
-`cargo test --workspace` always passes; opt in with
-`MIRROR_BIN=... APALACHE_MC=... cargo test --test mbt_xxx -- --nocapture`.
+The specs are not just checked — their content is **proved about the
+shipping functions** (no `sorry`/`partial`/`panic!` in the library):
 
-## Unit and property-style tests
+| Theorem | Where | Proves |
+|---|---|---|
+| `regionAt_unique`, `WellFormed.*`, `addRegion` preservation | `Spec/AddressSpace.lean` | sorted, non-overlapping region map; `NoOverlap` |
+| `buildAddressSpace_wellFormed` | `Pipeline.lean` | the orchestrator only produces well-formed spaces |
+| `valueAt_agrees_with_fold` | `Spec/Timeline.lean` | `SnapshotConsistent`: `valueAt` ≡ brute-force fold over writes |
+| `snapshot_isSome` | `Spec/Timeline.lean` | `CursorBounded`: snapshot succeeds exactly within the frontier |
+| `PositionOrdered`/`EventsOrdered` lemmas | `Spec/Timeline.lean` | `TraceOrdered` building blocks |
 
-- Synthetic builders (`Dump`, `AddressSpace`, `Trace`, `V8HeapBuilder`) —
-  no live dumps needed.
-- `model::trace::tests::snapshot_consistent_with_brute_force` — the
-  Timeline.tla `SnapshotConsistent` invariant as a deterministically-seeded
-  exhaustive check over a fixture trace.
-- `parse/ttfx` round-trip plus one test per anomaly path (out-of-order,
-  beyond-frontier, crossing calls, unknown thread, inverted interval,
-  truncation).
+The Rust-era model-based tests (`forensicator-core/tests/mbt_*.rs`,
+mirrorrust) were retired with the Rust tree (2026-08-13) — their role is
+absorbed by these theorems. The `.ttfx` decoder theorems
+(`decodeRecord_*`/`decodeEvent_*`) died with the eager path the same day.
+
+## Guard suite (`forensicator-test`, `Test/`)
+
+In-process checks over synthetic builders (`Dump`, `AddressSpace`, `Trace`,
+V8 heap cages) — no live dumps needed; 70+ named `check`s in
+`Test/Spec.lean`. With `FORENSICATOR_CASE_DIR` set, the suite also runs the
+minidump prefix/mutation fuzz over `Case/` (review-hardening guards).
+
+## Golden gate (`scripts/conformance-lean.sh`)
+
+Post-pivot (2026-08-13): **Lean-only golden regression**. The gate compares
+the Lean CLI against reference outputs in `Case/golden/` (untracked, like
+the fixtures): 3 dumps × inspect (`--quiet` byte-exact, `--json` key-sorted)
++ analyze + match + shell scripts, plus the guard suite, the minidump fuzz,
+and a negative guard (the binary must reject `.ttfx` input with the explicit
+"ttfx removed" error). Goldens regenerate from a known-good build via
+`scripts/capture-goldens.sh` when fixtures change.
 
 ## Golden fixtures (`Case/`, gitignored except where forced)
 
@@ -46,14 +61,17 @@ Apalache counterexample/witness traces against the Rust implementation via
 | `Case/minidump/` | stack-only Crashpad dumps |
 | `Case/minidump_v2/` | instrumented-handler dump + matching `electron.exe` + `.pdb` |
 | `Case/fulldump/` | 1.2 GB full dump (slow; prefer `analyze` over `inspect`) |
-| `Case/ttfx/minimal.ttfx` | committed (force-added) hand-built trace: 2 regions, 2 writes, 2 events, 1 thread, 2 calls. Regenerate: `cargo test -p forensicator-core --lib -- parse::ttfx --ignored` |
+| `Case/golden/` | gate reference outputs (untracked) |
+
+(`Case/ttfx/minimal.ttfx` was deleted with the eager trace path,
+2026-08-13.)
 
 ## Commands
 
 ```
-cargo test --workspace          # everything (MBT auto-skips)
-cargo test -p forensicator-core -- model::trace
-cargo clippy --all-targets && cargo fmt --all
+lake build                          # library + CLI + forensicator-test
+.lake/build/bin/forensicator-test   # guard suite (FORENSICATOR_CASE_DIR=Case for fuzz)
+./scripts/conformance-lean.sh       # golden gate
 ```
 
 ## Known spec hygiene issues

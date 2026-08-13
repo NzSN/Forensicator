@@ -1,86 +1,100 @@
 # Timeline: TTD Trace Support
 
-Spec: `specs/Timeline.tla` (Apalache-verified).
+Spec: `specs/Timeline.tla` (Apalache-verified); mechanized theorems in
+`Forensicator/Spec/Timeline.lean` and `Forensicator/Model/Trace.lean`.
 Design: `docs/superpowers/specs/2026-08-07-timeline-design.md`.
-Format: `docs/superpowers/specs/2026-08-07-ttfx-format-spec.md` (TTFX v1).
-Code: `forensicator-core/src/model/trace.rs`, `forensicator-core/src/parse/ttfx.rs`.
+Code: `Forensicator/Model/Trace.lean` (model + views + `snapshot`).
+
+**Pivot state (2026-08-13):** the eager `.ttfx` v1 path is **removed**
+(decoder/encoder, `trace` subcommand, fixture — plan:
+`docs/plans/2026-08-13-remove-eager-trace-path.md`). The `Trace` model,
+views, and theorems stay; what is gone is the file loader. Trace consumption
+returns as the lazy jigsaw proxy (design authority:
+`docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md`, D1–D9 +
+Implementation notes; loading-path spec `specs/JigSawSpawner.tla`,
+Apalache-verified) — a resident Windows proxy serves positioned memory on
+demand and the analysis host accumulates pieces with validity intervals.
+The Lean proxy client (design D7, `IO.Process` stdio) is a follow-up plan;
+until it lands, no loader constructs a `Trace` at runtime. The `.ttfx` v1
+format doc survives as historical reference for a possible v2
+jigsaw-persistence format ([ttfx-format.md](ttfx-format.md), design §D8).
 
 ## Why a separate container
 
-Microsoft's `.run` trace format is proprietary and its only reader
-(`TTDReplay.dll`) is Windows-only COM. Forensicator never parses `.run`.
-Instead a Windows-side **extractor** (`ttfx-extract`, at `D:\Repositories\TTFX`
-— design: `docs/superpowers/specs/2026-08-09-ttfx-extractor-design.md`) emits
-our own versioned container, and everything downstream is pure Rust,
-specifiable, and testable with synthetic fixtures.
-`Timeline.tla` is the formal contract the extractor's output must satisfy —
-the same capture-side/analysis-side split as the V8HE crash handler.
+Microsoft's `.run` trace format is proprietary and its only readers
+(`TTDReplay.dll` / the dbgeng stack) are Windows-only. Forensicator never
+parses `.run`. A Windows-side component produces our own versioned container,
+and everything downstream is pure Lean, specifiable, and testable with
+synthetic fixtures. `Timeline.tla` is the formal contract the Windows side's
+output must satisfy — the same capture-side/analysis-side split as the V8HE
+crash handler.
 
-## Model (`model/trace.rs`) — Timeline.tla realized
+## Model (`Model/Trace.lean`) — Timeline.tla realized
 
-```rust
-pub struct Trace {
-    pub init_mem: Vec<MemoryRegionInfo>,   // contents at position 0
-    pub writes: Vec<WriteRecord>,          // (pos, va, data) — append-only, ordered
-    pub events: Vec<TraceEvent>,           // Exception / ModuleLoad / ModuleUnload
-    pub threads: Vec<(u32, Interval)>,     // lifetimes; end = None while alive
-    pub calls: Vec<CallSpan>,              // [start, end) per thread
-    pub frontier: Position,                // record head
-    pub anomalies: Vec<Anomaly>,
-}
+```lean
+structure Trace where
+  initMem  : List MemoryRegionInfo   -- contents at position 0
+  writes   : List WriteRecord        -- (pos, va, data) — append-only, ordered
+  events   : List TraceEvent         -- Exception / ModuleLoad / ModuleUnload
+  threads  : List (UInt32 × Interval)  -- lifetimes; stop = none while alive
+  calls    : List CallSpan           -- [start, end) per thread
+  frontier : Position                -- record head
+  anomalies : List Anomaly
 ```
 
-`Position = u64` packs TTD's `Major:Minor` pair. Spec's `end = -1` ↔ Rust
-`Interval.end = None`.
+`Position = UInt64` packs TTD's `Major:Minor` pair (`(major <<< 32) ||| minor`,
+`Basic.lean`). Spec's `end = -1` ↔ Lean `Interval.stop = none`.
 
-### Views (spec operators → methods)
+### Views (spec operators → defs)
 
-| Timeline.tla | `Trace` method | Meaning |
+| Timeline.tla | `Trace` def | Meaning |
 |---|---|---|
-| `LastWriter(a,t)` | `last_writer(va, t)` | last write covering `va` at/before `t` |
-| `ValueAt(a,t)` | `value_at(va, t)` | byte at `va` at `t` (snapshot-faithful: out-of-region writes never mask valid ones) |
-| `WritesBetween(a,t1,t2)` | `writes_between(va, len, t1, t2)` | "who wrote this range" |
-| `ExceptionsAt(t)` | `exceptions_at(t)` | CrashCause input, time-indexed |
-| — | `snapshot(t)` | materialize position into `Snapshot { dump, space, pos }`; `None` for `t > frontier` (CursorBounded) |
+| `LastWriter(a,t)` | `lastWriter tr va t` | last write covering `va` at/before `t` |
+| `ValueAt(a,t)` | `valueAt tr va t` | byte at `va` at `t` (snapshot-faithful: out-of-region writes never mask valid ones) |
+| `WritesBetween(a,t1,t2)` | `writesBetween tr va len t1 t2` | "who wrote this range" |
+| `ExceptionsAt(t)` | `exceptionsAt tr t` | CrashCause input, time-indexed |
+| — | `snapshot tr t` | materialize position into `Snapshot { dump, space, pos }`; `none` for `t > frontier` (CursorBounded) |
 
-`snapshot(t)` builds: memory = init_mem overlaid with writes ≤ t (last write
-per byte wins); modules = loads − unloads ≤ t; exception = last exception ≤ t;
-then a standard `AddressSpace`. The existing 8 analyzers consume it unchanged.
+`snapshot` builds: memory = initMem overlaid with writes ≤ t (last write per
+byte wins); modules = loads − unloads ≤ t; exception = last exception ≤ t;
+then a standard `AddressSpace` (`Pipeline.buildAddressSpace`). The existing 8
+analyzers consume it unchanged. Byte-level faithfulness is proved:
+`valueAt_agrees_with_fold` (the `SnapshotConsistent` counterpart) and
+`snapshot_isSome` live in `Spec/Timeline.lean`; divergences from Rust are
+Nat-lifted (`endVaNat`, overlap bounds — no `u64` wrap edges).
 
-## Wire format (`.ttfx`, v1)
+## Wire format (`.ttfx`, v1) — historical
 
-32-byte header (`TTFX` magic, version, flags, section count, frontier) → fixed
--record sections (`INITMEM`, `WRITES`, `EVENTS`, `THREADS`, `CALLS`) → payload
-pool referenced by absolute offsets. Versioned, truncation-tolerant; the full
-byte-level reference with a worked fixture dump is
-[ttfx-format.md](ttfx-format.md). Reader and writer are both in
-`parse/ttfx.rs` (writer serves tests/fixtures and the future extractor).
+The eager container (32-byte header → fixed-record sections `INITMEM`,
+`WRITES`, `EVENTS`, `THREADS`, `CALLS` → payload pool) is documented in
+[ttfx-format.md](ttfx-format.md) for the record; the decoder/encoder were
+removed with the eager path (2026-08-13). A v2 jigsaw-persistence format
+(design §D8 `DUMP CACHE`) may reuse the section ideas.
 
-## Invariants as decode-time validation
+## Invariants as load-time validation
 
-| Timeline.tla invariant | decode_ttfx behavior |
-|---|---|
-| `TraceOrdered` | non-decreasing positions, `pos ≤ frontier` → anomalies `write/event out of order`, `… beyond frontier` |
-| `ThreadIntervals` | `start ≤ end` → `thread … interval inverted` |
-| `CallNesting` | same-thread closed spans disjoint-or-nested → `crossing call spans` |
-| `CallsWithinThreads` | known thread, span ⊆ lifetime → `call on unknown thread`, `call outside thread … lifetime` |
-| `CursorBounded` | `snapshot(t > frontier)` → `None`; session refuses to move the cursor |
-| `SnapshotConsistent` | property test: `value_at` vs brute-force fold |
-
-Anomalies degrade, never abort: decoding continues past bad records.
+On the proxy path, the Timeline invariants are enforced as the client's
+index/event windows arrive (design D5/D6; `JigSawSpawner.tla`'s
+`JigSawInvariant` — `CacheSound`, `AbsentSound`, `HorizonBounded` — is the
+loading-path counterpart). The eager decoder's anomaly mapping
+(`TraceOrdered` → `… out of order`/`… beyond frontier`, etc.) is preserved
+in `ttfx-format.md` §8 for the record.
 
 ## Cursor ownership
 
 The cursor is *not* part of `Trace` — it belongs to the consumer. The
-interactive shell (`forensicator-cli shell trace.ttfx`) owns it:
-`seek`/`t+`/`t-`/`position` move it, `writes`/`intervals` query at it, and
-`inspect`/`analyze`/`match` operate on `trace.snapshot(cursor)`.
+interactive shell owns it (`seek`/`t+`/`t-`/`position` move it,
+`writes`/`intervals` query at it, `inspect`/`analyze`/`match` operate on
+`trace.snapshot cursor`) — currently unreachable until the Lean proxy
+client constructs trace sessions (`Session.lean`, `Target.trace`).
 
 ## Boundaries and non-goals
 
-- No `.run` parsing, no live debugging, no per-position register files (v2 candidate).
-- The `TemporalAnalyzer` trait (cross-position reasoning: verdict timelines,
-  corruption provenance) is designed but not yet implemented.
-- Extractor selectivity matters: full store logs from a renderer are huge;
-  expect VA-range filters / ring windows at extraction time (the LATS
-  argument) — the format itself is filter-agnostic.
+- No `.run` parsing, no live debugging, no per-position register files
+  (the public Replay API's `GetCrossPlatformContext` makes them cheap —
+  design P0′; candidate for the proxy era).
+- Cross-position reasoning (verdict timelines, corruption provenance — the
+  Rust-era `TemporalAnalyzer` sketch) is designed but not implemented.
+- The lazy proxy's write index is windowed: full store logs from a renderer
+  are huge; the host fetches per-range horizons (design D1) instead of one
+  eager log.

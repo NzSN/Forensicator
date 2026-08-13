@@ -1,16 +1,22 @@
 # TTFX Container Format (v1) — Detailed Reference
 
+> **Historical (2026-08-13):** the eager `.ttfx` path is removed — no
+> reader/writer, fixture, or CLI surface remains in the tree. This document
+> is kept for the record and as the seed for a possible v2
+> jigsaw-persistence format (lazy-proxy design §D8 `DUMP CACHE`,
+> `docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md`).
+
 Normative contract: `docs/superpowers/specs/2026-08-07-ttfx-format-spec.md`.
-Behavioral contract: `specs/Timeline.tla`. Reader/writer:
-`forensicator-core/src/parse/ttfx.rs`. Producer: the Windows extractor
-(`D:\Repositories\TTFX`, see `docs/arch/timeline.md` and the extractor
-design doc). This page is the byte-level walkthrough.
+Behavioral contract: `specs/Timeline.tla`. Reader/writer (removed
+2026-08-13): `Forensicator/Parse/Ttfx.lean`. Producer: the Windows extractor
+(`D:\Repositories\TTFX` — superseded by the lazy proxy design). This page is
+the byte-level walkthrough.
 
 ## 1. Purpose
 
 `.ttfx` carries the *observable structure* of a TTD trace between the
-Windows extractor (which reads `.run` via the debugger engine) and
-forensicator-core on any platform: initial memory, the write log, the event
+Windows extractor (which reads `.run` via the debugger engine) and the
+analysis host on any platform: initial memory, the write log, the event
 log, and thread/call intervals. It is not a re-encoding of `.run`; it is a
 deliberate projection — see timeline.md §"Why a separate container" for what
 is dropped and why.
@@ -85,7 +91,7 @@ Record *i* means: at `pos`, `[va, va+len)` became the payload bytes.
 Position-ordered (non-decreasing), all `pos ≤ frontier`; violations →
 anomalies `write out of order` / `write beyond frontier`. Writes outside all
 INITMEM regions are *unobservable* (never mask earlier valid writes —
-`Trace::value_at`).
+`Trace.valueAt`).
 
 ### 5.3 EVENTS (kind=3, 48 B/record) — the event log
 
@@ -141,16 +147,17 @@ not requirement).
 
 ## 7. Semantics — what a position means
 
-Decoding yields `model::trace::Trace`. Position `t` materializes
-(`Trace::snapshot(t)`, formalized by `specs/Snapshot.tla`):
+Decoding yields `Model.Trace` (`Forensicator/Model/Trace.lean`). Position
+`t` materializes (`Trace.snapshot tr t`, formalized by `specs/Snapshot.tla`
+and mechanized in `Forensicator/Spec/Timeline.lean`):
 
 - **memory**: INITMEM overlaid with WRITES `pos ≤ t` (last write per byte
   wins, in-region bytes only);
 - **modules**: ModuleLoad − ModuleUnload events `≤ t` (event-ordered);
 - **exception**: last Exception event `≤ t`;
-- `t > frontier` → `None` (**CursorBounded**, fail closed).
+- `t > frontier` → `none` (**CursorBounded**, fail closed).
 
-`Trace::snapshot` also runs `Dump::validate_model()` (Model.tla's structural
+`Trace.snapshot` also runs `Dump.validateModel` (Model.tla's structural
 invariants) and degrades violations into dump anomalies.
 
 ## 8. Invariants → decode anomalies
@@ -161,8 +168,8 @@ invariants) and degrades violations into dump anomalies.
 | ThreadIntervals | `start ≤ end` per thread |
 | CallNesting | per-thread spans disjoint-or-nested |
 | CallsWithinThreads | span's thread known, span ⊆ its lifetime |
-| CursorBounded | `snapshot(None)` past frontier; session cursor clamped |
-| SnapshotConsistent | property test: `value_at` ≡ brute-force fold |
+| CursorBounded | `snapshot` = `none` past frontier; session cursor clamped |
+| SnapshotConsistent | theorem `valueAt_agrees_with_fold` (`Spec/Timeline.lean`) |
 
 Anomalies degrade, never abort: later sections still decode.
 
@@ -218,9 +225,6 @@ Reading it: at position 0 the byte at 0x1004 is `0xAA` (init_mem); at 1 it
 becomes `0x11`; at 2 it becomes `0x33` (last write wins). The exception at
 pos 2 is `0xC0000005` (access violation) on thread 7 at `0x1004` — which is
 exactly the byte the two writes touched.
-
-Regenerate the fixture:
-`cargo test -p forensicator-core --lib -- parse::ttfx --ignored`.
 
 ## 11. Extractor notes (producer side)
 

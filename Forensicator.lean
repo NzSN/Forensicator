@@ -10,7 +10,6 @@ import Forensicator.Model.Dump
 import Forensicator.Model.Trace
 import Forensicator.Spec.Timeline
 import Forensicator.Util.Text
-import Forensicator.Parse.Ttfx
 import Forensicator.Parse.Minidump
 import Forensicator.Pipeline
 import Forensicator.Analyzer.Registry

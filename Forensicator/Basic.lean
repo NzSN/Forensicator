@@ -7,7 +7,7 @@ namespace Forensicator
 /-- Virtual address in the traced/dumped process. -/
 abbrev VA := UInt64
 
-/-- Packed timeline position `(major << 32) | minor` (.ttfx v1). -/
+/-- Packed timeline position `(major << 32) | minor`. -/
 abbrev Position := UInt64
 
 /-- A raw TTD position pair (data model `Sequence`/`Steps`). The u32 halves

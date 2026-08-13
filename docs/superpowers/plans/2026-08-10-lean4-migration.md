@@ -1,5 +1,10 @@
 # Lean 4 Migration — Implementation Plan
 
+> **Lean-port note (2026-08-13):** Rust-era document — the implementation is
+> now the Lean 4 tree (`Forensicator/`, `Main.lean`, `Test/`; module map in
+> `docs/arch/README.md`). Rust references below (`forensicator-core/src/…`,
+> `cargo`, `tests/mbt_*`) are historical and kept as written for the record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Port Forensicator to a standalone Lean 4 package at `~/Repos/Forensicator_Lean/` per `docs/superpowers/specs/2026-08-10-lean4-migration-design.md`: TLA+ specs become proved Lean theorems over the *executable* code; the Rust repo serves as golden oracle via a JSON-diff conformance gate.

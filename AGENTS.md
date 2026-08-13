@@ -1,49 +1,54 @@
 # Forensicator — AGENTS.md
 
-> **Repo layout (post-pivot, 2026-08-11):** `master` is the **Lean 4 port**
-> (this tree; build `lake build`, gate `scripts/conformance-lean.sh`).
-> The original **Rust implementation** lives on branch **`rust-backup`**
-> (worktree at `~/Repos/Forensicator-rust`). The conformance gate builds the
-> Rust oracle from that worktree by default
-> (`FORENSICATOR_RUST=$HOME/Repos/Forensicator-rust`).
+> **Repo layout (2026-08-13):** Lean-only. The Rust implementation is gone
+> entirely — worktree, local branch, and `origin/rust-backup` all deleted;
+> nothing Rust remains in play. The eager `.ttfx` v1 trace path is removed
+> the same day; trace support returns as the proxy-based Lean client
+> (follow-up plan). See
+> `docs/plans/2026-08-13-remove-eager-trace-path.md`.
 
-Rust workspace (edition 2024) for forensic analysis of Windows x64 minidumps. Custom hand-written parser, pointer graph inference, structure recovery. (The commands below apply to the Rust tree, i.e. branch rust-backup.)
-
+Lean 4 (v4.33.0) package for forensic analysis of Windows x64 minidumps.
+Custom hand-written parser, pointer graph inference, structure recovery,
+crash-cause diagnosis — focused on Electron/Chromium (V8) crashes.
 
 ## Commands
 
 | What | How |
 |------|-----|
-| Build all | `cargo build` |
-| Run core tests | `cargo test -p forensicator-core` |
-| Run specific module tests | `cargo test -p forensicator-core -- <module>::tests` (e.g. `recover::strings::tests`) |
-| Run CLI tests | `cargo test -p forensicator-cli` |
-| Full test suite | `cargo test --workspace` |
-| Lint | `cargo clippy --all-targets` |
-| Format | `cargo fmt --all` |
-| MBT (model-based tests) | `MIRROR_BIN=... APALACHE_MC=... cargo test --test mbt_xxx -- --nocapture` (see MBT section below) |
+| Build all | `export PATH="$HOME/.elan/bin:$PATH" && lake build` |
+| Guard suite (unit/property checks) | `.lake/build/bin/forensicator-test` (`FORENSICATOR_CASE_DIR=Case` enables the minidump fuzz) |
+| Golden gate | `./scripts/conformance-lean.sh` (regenerate references: `scripts/capture-goldens.sh`) |
+| Static binary | `./scripts/build-static.sh` |
+| TLA+ model check | `apalache-mc check --features=no-rows --config=<Spec>.cfg specs/<Spec>.tla` |
 
 ## Architecture
 
-**Two crates** in workspace: `forensicator-core` (lib) + `forensicator-cli` (bin, depends on core).
+**One Lean package:** `Forensicator/` (library) + `Main.lean` (CLI) +
+`Test/` (guard-suite binary). Zero Lean deps (no mathlib/batteries).
 
 **Pipeline (S1 → S2):**
-1. **Parse** — validate minidump header → stream directory → per-stream decoders → typed `Dump` with provenance
-2. **AddressSpace** — sorted, non-overlapping memory regions with `RegionClass` classification (Image/Stack/Private/Mapped/Other)
-3. **Analyze** — pluggable `Analyzer` pipeline: `cause` (crash-cause diagnosis), `strings`, `vtables`, `lists`, `arrays`, `chunks`, `shapes`, `v8` (JS stack recovery)
+1. **Parse** — `Forensicator/Parse/Minidump.lean`: validate header → stream directory → per-stream decoders → typed `Dump` with provenance
+2. **AddressSpace** — `Forensicator/Spec/AddressSpace.lean`: sorted, non-overlapping regions with `RegionClass` classification (Image/Stack/Private/Mapped/Other); spec and shipping structure are the same module
+3. **Analyze** — `Forensicator/Analyzer/`: pluggable `Analyzer` pipeline (`Registry.defaultPipeline`): `cause` (crash-cause diagnosis), `strings`, `vtables`, `lists`, `arrays`, `chunks`, `shapes`, `v8` (JS stack recovery)
 
-**`pipeline` module** — global workflow orchestrator (`Forensicator` struct) mirroring `specs/Forensicator.tla`. Composes `open()` → `analyze()` → `run_full()`.
+**`Forensicator/Pipeline.lean`** — workflow orchestrator mirroring
+`specs/Forensicator.tla`; proves `buildAddressSpace_wellFormed`.
 
-**Utility modules** — `disasm` (iced-x86 window decode + `InstrKind` classification), `v8obj` (cage-aware object walking: decompress/smi/instance_type/strings), `v8layout` (version-pinned V8 offsets), `symbolizer` (PDB), `unwind` (.pdata), `image` (on-disk module backing).
+**Utility modules** (`Forensicator/Util/`) — `Disasm` (native x86-64 subset
++ `InstrKind` classification, no iced-x86 FFI), `V8Layout` (version-pinned V8
+offsets; V8 object walking lives in `Analyzer/V8.lean`), `Pdb` (minimal
+MSF-7 reader for `match`), `Unwind` (.pdata), `Image` (on-disk module
+backing), `Json`, `Pattern`, `Bytes`, `Text`.
 
 ## Key conventions
 
-- **No external parse crate** — minidump parser is hand-written in `forensicator-core/src/parse/`
+- **No external parse library** — minidump parser is hand-written
 - **All outputs have confidence scores** — iterative inference, not certainty
-- **Provenance tracking** — every decoded fact records stream_type + file_offset + rva
-- **`edition = "2024"`** — requires Rust ≥1.85; no rust-toolchain.toml (no CI either, only `master` branch)
-- **`Cargo.lock` is in `.gitignore`** — not committed (workspace as library pattern)
-- **Minimal deps:** `serde_json` (core+cli), `clap` (cli); `minidumper` + `mirrorrust` + `num-bigint` + `num-traits` are dev-only
+- **Provenance tracking** — every decoded fact records streamType + fileOffset + rva
+- **No `sorry`/`partial`/`panic!` in the library** — totality replaces the Rust era's `catch_unwind`
+- **Zero deps** — no mathlib/batteries; JSON via `Util/Json.lean`
+- **Fail closed** — decoders/analyzers return `none`/`Unknown`/anomalies on inconsistency, never guess
+- **`Cargo.lock`/cargo anything: gone** — do not reintroduce Rust tooling
 
 ## CLI subcommands
 
@@ -52,46 +57,74 @@ forensicator inspect <dump.dmp>        # structural inventory (--json, --quiet)
 forensicator analyze <dump.dmp>        # run analyzers (--plugin, --json, --symbols <pdb_dir>)
 forensicator match <dump.dmp>          # verify dump ↔ exe/PDB build artifacts (--exe, --pdb, --json)
 forensicator list-plugins              # list registered analyzers
-forensicator shell <dump.dmp|trace.ttfx>  # interactive session (inspect/analyze/match/load/symbols/seek/t+/t-/writes/intervals/quit)
-forensicator trace <trace.ttfx>        # trace summary + queries (--pos, --writes <va> <len>, --json)
+forensicator shell <dump.dmp>          # interactive session (inspect/analyze/match/load/symbols/quit)
 ```
 
-## TTD trace support (.ttfx)
+Trace commands (`seek`/`t+`/`t-`/`position`/`writes`/`intervals`) remain in
+the session dispatcher against `Target.trace`, but no loader can construct a
+trace session until the Lean proxy client lands — they error with "trace
+support removed (…follow-up)". The `trace` subcommand and `.ttfx` loading
+are removed; `shell`/`load` reject TTFX magic explicitly.
 
-`specs/Timeline.tla` is the formal contract (Apalache-verified); design in `docs/superpowers/specs/2026-08-07-timeline-design.md`. `.ttfx` is our own versioned container for TTD trace data (initial memory + write/event logs + thread/call intervals), emitted by a Windows-side extractor from TTDReplay — `.run` files are never parsed directly. Core: `model::trace::Trace` (views `value_at`/`last_writer`/`writes_between`/`exceptions_at`/`snapshot(t)`), decoder `parse/ttfx.rs` (Timeline invariants → anomalies). Fixture: `Case/ttfx/minimal.ttfx` (regenerate: `cargo test -p forensicator-core --lib -- parse::ttfx --ignored`).
+## TTD trace support (proxy-only; `.ttfx` historical)
+
+`specs/Timeline.tla` is the formal contract (Apalache-verified);
+`specs/JigSawSpawner.tla` specifies the lazy loading path (Apalache-verified,
+full run green 2026-08-13). Design authority:
+`docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md` (D1–D9 +
+Implementation notes). The trace model + views + theorems stay in
+`Forensicator/Model/Trace.lean` / `Forensicator/Spec/Timeline.lean`
+(`valueAt_agrees_with_fold`, `snapshot_isSome`). The eager `.ttfx` v1
+decoder/encoder/fixture were removed 2026-08-13; `docs/arch/ttfx-format.md`
+is historical (kept for a possible v2 jigsaw-persistence format, design §D8).
+
+Current state (gap D-B): trace consumption requires the Windows proxy
+(`D:\Codebase\JigsawSpawner`) + the Lean client (stdio over `IO.Process`) —
+the client is a follow-up plan.
 
 ## Built-in pointer patterns
 
 `all_strict`, `all_loose`, `saved_frame_pointers`, `vtables`, `heap_references`
+(`Forensicator/Util/Pattern.lean`).
 
-## TLA+ model-based testing
+## TLA+ specs
 
-`specs/` contains TLA+ specs (AddressSpace, Arch, Model, etc.) with corresponding `forensicator-core/tests/mbt_*.rs` integration tests via `mirrorrust`. MBT tests are **opt-in** (require `MIRROR_BIN` + `APALACHE_MC` env vars). State traces in `states/` are TLA+ model-checking output, excluded from git.
+`specs/` contains TLA+ specs (AddressSpace, Arch, Model, Timeline, Snapshot,
+JigSawSpawner, etc.), Apalache-checked (`--features=no-rows` for the
+record-bearing ones). The Rust-side mirrorrust MBT drivers (`mbt_*.rs`) died
+with the Rust tree — their role is absorbed by the mechanized theorems
+(`Forensicator/Spec/`, plus in-module theorems in `Pipeline.lean`,
+`Model/Trace.lean`). State traces in `states/` are model-checking output,
+excluded from git.
 
-MBT test files: `mbt_address_space.rs`, `mbt_arch.rs`, `mbt_model.rs`, `mbt_forensicator.rs`, `mbt_crash_cause.rs` (spec-only stub), `mbt_timeline.rs` (spec-only stub), `mbt_snapshot.rs`. Each auto-skips with a message when `MIRROR_BIN` is unset, so `cargo test --workspace` always passes.
+## Verification story (Lean)
 
-## Lean 4 port
-
-A full Lean 4 (v4.33.0) port lives at `~/Repos/Forensicator_Lean` (GitHub: `NzSN/Forensicator_Lean`, branch `main`). Design: `docs/superpowers/specs/2026-08-10-lean4-migration-design.md`; plan: `docs/superpowers/plans/2026-08-10-lean4-migration.md` (all tasks complete). Highlights:
-
-- TLA+ specs mechanized as Lean theorems about the *shipping* functions: `pack_unpack`, `addRegion_preserves`, `regionAt_unique`, `valueAt_agrees_with_fold`, `snapshot_isSome`, `decodeTtfx_writes_ordered`/`decodeTtfx_events_ordered`, `buildAddressSpace_wellFormed`. No `sorry`/`partial`/`panic!` in the library.
-- Zero Lean deps (no mathlib/batteries). Build: `export PATH="$HOME/.elan/bin:$PATH" && lake build`.
-- Golden-oracle gate: `scripts/conformance-lean.sh` (44 checks: 3 dumps × inspect/analyze/match + minimal.ttfx + shell scripts; byte-exact text, JSON key-sorted).
-- Deliberate divergences, all documented in-file: Nat-lifted address arithmetic (kills Rust's u64-wrap edges); `arrays` on fulldump is quadratic in both implementations; the Rust debug overflow panic in `find_ept_base` (v8.rs:539) is *reproduced* on fulldump; disasm is a native x86-64 subset covering the cause-rule forms (no iced-x86 FFI); the PDB symbolizer is replaced by a minimal MSF-7 reader for `match`.
-
-MBT tests (`mbt_*.rs`) stay Rust-side; their role is absorbed by the Lean `Spec/` theorems.
+- TLA+ specs mechanized as Lean theorems about the *shipping* functions:
+  `pack_unpack`, `addRegion` preservation, `regionAt_unique`,
+  `valueAt_agrees_with_fold`, `snapshot_isSome`,
+  `buildAddressSpace_wellFormed`. No `sorry`/`partial`/`panic!`.
+- Golden gate: `scripts/conformance-lean.sh` (Lean vs `Case/golden/`:
+  3 dumps × inspect/analyze/match + shell scripts; byte-exact text, JSON
+  key-sorted; guard suite + minidump fuzz; negative guard: `.ttfx` rejected).
+- Deliberate divergences from the Rust era, all documented in-file:
+  Nat-lifted address arithmetic (kills u64-wrap edges); `arrays` on fulldump
+  is quadratic; the `find_ept_base` debug overflow panic was a Rust artifact
+  and is gone (checked_add equivalent); disasm is a native x86-64 subset
+  covering the cause-rule forms; the PDB symbolizer is a minimal MSF-7
+  reader for `match`.
 
 ## Custom minidump streams
 
-**V8HE** (stream type `0x45483856`, emitted by the instrumented handler): cage base + isolate VA + captured V8 heap regions, ingested as ordinary memory ranges. Version 2 adds a 32-byte extension after the header — allocation top/limit, `gc_state`, `last_gc_reason`, and a fatal-message string — decoded into `Dump.v8heap_ext` and consumed by the `cause` analyzer's OOM/CHECK rules.
+**V8HE** (stream type `0x45483856`, emitted by the instrumented handler): cage base + isolate VA + captured V8 heap regions, ingested as ordinary memory ranges. Version 2 adds a 32-byte extension after the header — allocation top/limit, `gc_state`, `last_gc_reason`, and a fatal-message string — decoded into `Dump.v8heapExt` and consumed by the `cause` analyzer's OOM/CHECK rules.
 
 ## Development approach
 
-Superpowers-driven: plans in `docs/superpowers/plans/`, designs in `docs/superpowers/specs/`. Commits follow plan task checkboxes.
+Superpowers-driven: plans in `docs/superpowers/plans/` (active removal plan
+in `docs/plans/`), designs in `docs/superpowers/specs/`. Commits follow plan
+task checkboxes.
 
 ## Gotchas
 
-- `.gitignore` also excludes `**/specs/`, `**/states/`, `**/_apalache-out` (TLA+ build artifacts)
+- `.gitignore` also excludes `**/specs/`, `**/states/`, `**/_apalache-out` (TLA+ build artifacts) — note `specs/` at repo root is force-added/tracked regardless
 - `.vscode/settings.json` contains a `DEEPSEEK_API_KEY` env — do not commit
-- `recover_all()` calls `ShapeClusterer::cluster()` directly (not via `StructureDetector` trait)
-- `PointerGraph` has `max_nodes` (1M) and `max_edges` (10M) caps
+- The guard suite's `--emit` fixture route died with the `.ttfx` encoder; regenerate goldens only via `scripts/capture-goldens.sh` from a known-good build

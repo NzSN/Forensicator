@@ -27,8 +27,8 @@ line_ends`, for every JIT frame of every thread.
 
 ## 2. What the decoder actually touches
 
-From `analyzer/v8.rs` (`decode_js_frame`, `decode_script_name`,
-`decode_script_line`), per JS frame:
+From `Forensicator/Analyzer/V8.lean` (`decodeJsFrame`, `decodeScriptName`,
+`decodeScriptLine`), per JS frame:
 
 | Step | Object(s) read | Size | Space |
 |---|---|---|---|
@@ -305,7 +305,7 @@ format (§4.1) is identical for all rows.
 | Chase reads freed/unmapped page | one region skipped | handler reads through `ProcessMemoryWin` (§4.3), which cannot fault; the frame degrades to `None`, never wrong names |
 | Vendoring the collector + Electron patch | changes to `third_party/crashpad/crashpad` + `run_as_crashpad_handler_win.cc` must be exported as Electron patches | the app already patches Electron for branding — add the collector files and the one-line `push_back` as a `patches/crashpad` (or `patches/chromium`) target via `e patches`. Offline-rewrite fallback (same V8HE format — ingestion code shared) if the handler can't be rebuilt |
 | EPT reservation huge / sparse | size blowup | cap at 8 MB; set partial-heap flag beyond cap |
-| Version drift (V8 ≥ 15 changes layouts) | wrong offsets | decoder layouts are per-version (`v8layout.rs`); V8HE `version` field allows region-format evolution |
+| Version drift (V8 ≥ 15 changes layouts) | wrong offsets | decoder layouts are per-version (`Forensicator/Util/V8Layout.lean`); V8HE `version` field allows region-format evolution |
 
 ## 6. Implementation plan (suggested phases)
 
@@ -347,9 +347,9 @@ renderer crash (V8 14.6 / Chromium 146 / Electron 41.10.3-jlc-sa).
 - Registered in `run_as_crashpad_handler_win.cc` (one-line `push_back`).
 - 8 unit tests (compiles `/W4 /WX /std:c++20`; all pass).
 
-**Forensicator parser** (`parse/v8heap.rs`):
-- `decode_v8heap` — parses the V8HE wire format into `RawMemoryRange`s.
-- Dispatched from `parse/dump.rs`; V8HE regions **prepended** before
+**Forensicator parser** (`Forensicator/Parse/Minidump.lean`):
+- `decodeV8heap` — parses the V8HE wire format into memory regions.
+- Dispatched from the stream decoder; V8HE regions **prepended** before
   `MemoryList` ranges (see §7.3 bug 3).
 - Integration test confirms a hand-built minidump with V8HE → regions land in
   `AddressSpace` → decoder resolves `name="myFunc"`.
@@ -367,7 +367,7 @@ discrepancies that only live testing could surface:
 |---|---|---|---|
 | 1 | RO not captured | RO space is a **64 KiB** committed read-only region, but `CaptureRange` read 256 KiB chunks — the read overshot into unmapped space and failed, dropping RO entirely | `CaptureRange` now reads **4 KiB sub-chunks** and coalesces contiguous readable ones |
 | 2 | Chase rejects real objects | `IsValidHeapObject` assumed V8 `Map` objects are in RO (cage offset < 4 MiB). In reality Maps live in **old/map space** (observed at cage +16 MiB) — so all real objects were rejected and map pages were never captured | `IsValidHeapObject` now **captures the map's page** (wherever it is) and validates by reading the instance type at map+8 |
-| 3 | V8HE regions silently dropped | Forensicator's `build_address_space` adds `MemoryList` ranges first; small heap fragments in `MemoryList` **overlap** V8HE's larger pages; `add_region` rejects overlaps → V8HE regions invisible | V8HE regions are now **prepended** before `MemoryList` in `dump.rs` |
+| 3 | V8HE regions silently dropped | Forensicator's `buildAddressSpace` adds `MemoryList` ranges first; small heap fragments in `MemoryList` **overlap** V8HE's larger pages; `addRegion` rejects overlaps → V8HE regions invisible | V8HE regions are now **prepended** before `MemoryList` in `Parse/Minidump.lean` |
 
 ### 7.3 End-to-end validation result
 
