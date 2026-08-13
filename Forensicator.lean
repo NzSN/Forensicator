@@ -9,6 +9,7 @@ import Forensicator.Spec.AddressSpace
 import Forensicator.Model.Dump
 import Forensicator.Model.Trace
 import Forensicator.Spec.Timeline
+import Forensicator.Trace.Proto
 import Forensicator.Util.Text
 import Forensicator.Parse.Minidump
 import Forensicator.Pipeline

@@ -229,6 +229,114 @@ def runAll : IO UInt32 := do
     (tr.threadAt 7 2 == some { start := 0, stop := none }
       && tr.threadAt 8 2 == none)
 
+  -- Trace.Proto golden frame vectors — byte-pinned against the proxy's
+  -- proto.rs unit tests (the two codecs are mirrored by hand, same
+  -- discipline as the Rust client's trace_client.rs).
+  let p32 (v : UInt64) : List UInt8 :=
+    (List.range 4).map fun i => ((v >>> (8 * UInt64.ofNat i)).toUInt8)
+  let p64 (v : UInt64) : List UInt8 :=
+    (List.range 8).map fun i => ((v >>> (8 * UInt64.ofNat i)).toUInt8)
+  let fr (tag : UInt64) (payload : List UInt8) : ByteArray :=
+    ba (p32 (UInt64.ofNat (payload.length + 4)) ++ p32 tag ++ payload)
+  let respEq (x : Except String Trace.Response) (y : Trace.Response) : Bool :=
+    match x with | .ok r => r == y | _ => false
+  let respErr : Except String Trace.Response → Bool
+    | .error _ => true | _ => false
+  check ctx "proto hello encode bytes"
+    (beqBytes (Trace.Request.hello 1).encode (ba [8,0,0,0, 1,0,0,0, 1,0,0,0]))
+  check ctx "proto info/close encode bytes"
+    (beqBytes Trace.Request.info.encode (ba [4,0,0,0, 7,0,0,0])
+      && beqBytes Trace.Request.close.encode (ba [4,0,0,0, 10,0,0,0]))
+  check ctx "proto writes_index encode bytes"
+    (beqBytes (Trace.Request.writesIndex 0x1000 0x2000 0 0xFFFF).encode
+      (fr 3 (p64 0x1000 ++ p64 0x2000 ++ p64 0 ++ p64 0xFFFF)))
+  check ctx "proto read_at encode bytes"
+    (beqBytes (Trace.Request.readAt 0xAAA 0x4000 4096).encode
+      (fr 5 (p64 0xAAA ++ p64 0x4000 ++ p32 4096)))
+  -- HELLO_ACK: version 1, frontier 0x123456789ABC (Rust frame_hello_ack_bytes)
+  check ctx "proto hello_ack decode"
+    (match Trace.decodeFrame (fr 2 (p32 1 ++ p64 0x123456789ABC)) with
+     | .frame tag payload consumed =>
+       consumed == 20 && tag == Trace.tagHelloAck
+         && respEq (Trace.parseResponse tag payload) (.helloAck 1 0x123456789ABC)
+     | _ => false)
+  check ctx "proto hello_ack bad length rejected"
+    (respErr (Trace.parseResponse Trace.tagHelloAck (ba (p32 1))))
+  -- PIECE round trip (Rust frame_round_trip): not_committed, then ok [DE AD]
+  let pieceNc := fr 6 (p32 1 ++ p32 0)
+  let pieceOkF := fr 6 (p32 0 ++ p32 2 ++ [0xDE, 0xAD])
+  check ctx "proto piece round trip"
+    (match Trace.decodeFrame (pieceNc ++ pieceOkF) with
+     | .frame t1 p1 c1 =>
+       (match Trace.parseResponse t1 p1, Trace.decodeFrame ((pieceNc ++ pieceOkF).extract c1 (pieceNc.size + pieceOkF.size)) with
+        | .ok (.piece .notCommitted b1), .frame t2 p2 _ =>
+          b1.size == 0 && respEq (Trace.parseResponse t2 p2)
+            (.piece .ok (ba [0xDE, 0xAD]))
+        | _, _ => false)
+     | _ => false)
+  check ctx "proto piece unknown status rejected"
+    (respErr (Trace.parseResponse Trace.tagPiece (ba (p32 7 ++ p32 0))))
+  -- Framing violations (Rust frame_rejects_bad_lengths)
+  check ctx "proto frame body_len < 4 bad"
+    (match Trace.decodeFrame (ba [3,0,0,0, 1,2,3]) with | .bad _ => true | _ => false)
+  check ctx "proto frame oversized bad"
+    (match Trace.decodeFrame (ba (p32 (512*1024*1024 + 1))) with
+     | .bad _ => true | _ => false)
+  check ctx "proto truncated frame needs more"
+    (match Trace.decodeFrame (ba (p32 20 ++ p32 1 ++ p64 0)) with
+     | .needMore => true | _ => false)
+  check ctx "proto short buffer needs more"
+    (match Trace.decodeFrame (ba [1,2,3]) with | .needMore => true | _ => false)
+  -- INDEX payload (Rust index_payload_offsets)
+  let idxPayload := p64 2
+    ++ p64 0x10 ++ p64 0x1000 ++ p32 8 ++ p32 0
+    ++ p64 0x11 ++ p64 0x2000 ++ p32 16 ++ p32 0
+  check ctx "proto index decode"
+    (respEq (Trace.parseResponse Trace.tagIndex (ba idxPayload))
+      (.index #[{ pos := 0x10, va := 0x1000, len := 8 },
+                { pos := 0x11, va := 0x2000, len := 16 }]))
+  check ctx "proto index truncated rejected"
+    (respErr (Trace.parseResponse Trace.tagIndex
+      ((ba idxPayload).extract 0 (idxPayload.length - 1))))
+  check ctx "proto index empty"
+    (respEq (Trace.parseResponse Trace.tagIndex (ba (p64 0))) (.index #[]))
+  check ctx "proto index count mismatch rejected"
+    (respErr (Trace.parseResponse Trace.tagIndex (ba (idxPayload.take 8))))
+  -- THREADS payload (Rust threads_payload_layout)
+  let thrPayload := p64 2
+    ++ p32 7 ++ p32 0 ++ p64 0 ++ p64 0xFFFFFFFFFFFFFFFF
+    ++ p32 9 ++ p32 0 ++ p64 0x100 ++ p64 0x200
+  check ctx "proto threads decode (open end sentinel)"
+    (respEq (Trace.parseResponse Trace.tagThreads (ba thrPayload))
+      (.threads #[{ id := 7, start := 0, stop := none },
+                  { id := 9, start := 0x100, stop := some 0x200 }]))
+  -- EVENTS payload (Rust events_payload_layout_and_pool): name pool at 152
+  let evRec0 := p64 1 ++ p32 1 ++ p32 0 ++ p64 0x70000000 ++ p32 0
+    ++ p64 0x1000 ++ p32 3 ++ p32 152 ++ p32 0
+  let evRec1 := p64 2 ++ p32 0 ++ p32 0xC0000005 ++ p64 0x1234 ++ p32 3
+    ++ p64 0 ++ p32 0 ++ p32 0 ++ p32 0
+  let evRec2 := p64 3 ++ p32 2 ++ p32 0 ++ p64 0x70000000 ++ p32 0
+    ++ p64 0 ++ p32 0 ++ p32 0 ++ p32 0
+  let evPayload := p64 3 ++ evRec0 ++ evRec1 ++ evRec2 ++ [0x61, 0x70, 0x70]
+  check ctx "proto events decode with name pool"
+    (respEq (Trace.parseResponse Trace.tagEvents (ba evPayload))
+      (.events #[.moduleLoad 1 0x70000000 0x1000 "app",
+                 .exception 2 0xC0000005 0x1234 3,
+                 .moduleUnload 3 0x70000000]))
+  check ctx "proto events bad kind rejected"
+    (respErr (Trace.parseResponse Trace.tagEvents
+      (ba (p64 1 ++ p64 1 ++ p32 9 ++ p32 0 ++ p64 0 ++ p32 0
+        ++ p64 0 ++ p32 0 ++ p32 0 ++ p32 0))))
+  check ctx "proto events name out of bounds rejected"
+    (respErr (Trace.parseResponse Trace.tagEvents
+      (ba (p64 1 ++ p64 1 ++ p32 1 ++ p32 0 ++ p64 0 ++ p32 0
+        ++ p64 0 ++ p32 4 ++ p32 9000 ++ p32 0))))
+  check ctx "proto error payload is message"
+    (respEq (Trace.parseResponse Trace.tagError (ba [0x62, 0x61, 0x64])) (.error "bad"))
+  check ctx "proto unknown tag rejected"
+    (respErr (Trace.parseResponse 42 ByteArray.empty))
+
+
   -- F5: minidump prefix + mutation fuzz over Case/*.dmp fixtures. The
   -- decoder must always *return* (ok or error); a Lean panic/stack overflow
   -- crashes this binary. Skipped when FORENSICATOR_CASE_DIR is unset or
