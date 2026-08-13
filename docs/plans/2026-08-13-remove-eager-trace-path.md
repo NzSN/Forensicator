@@ -152,6 +152,7 @@ from Rust code.
       `KnownAt`/`GapAt` views, cache soundness theorems. There is no Rust
       reference to port — the design doc is the specification. Until it
       lands, the `trace`/`shell` trace story is documented as a gap (D-B).
+      **Plan written: `docs/plans/2026-08-13-lean-trace-client.md`.**
 
 ## Final verification
 
