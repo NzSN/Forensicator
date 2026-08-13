@@ -117,6 +117,20 @@ def Session.current (s : Session) : Except String (Dump × AddressSpace) :=
     | none => .error "cursor out of recorded range"
     | some snap => .ok (snap.dump, snap.space)
 
+/-- IO variant of `current`: for a lazy trace this is the two-phase
+    snapshot (design D4 — closure fetch, then pure materialize); dumps and
+    proxy-less skeletons take the pure path. -/
+def Session.currentIO (s : Session) : IO (Except String (Dump × AddressSpace)) := do
+  match s.target, s.proxy with
+  | .trace _ cursor, some ps =>
+    match (← ps.guarded (do
+        match ← ps.snapshotAt cursor with
+        | some snap => pure (snap.dump, snap.space)
+        | none => throw (IO.Error.userError "cursor out of recorded range"))) with
+    | .ok r => pure (.ok r)
+    | .error e => pure (.error e)
+  | _, _ => pure (s.current)
+
 /-- Split a command line into argv, honoring double quotes. -/
 def Session.tokenize (line : String) : List String :=
   let rec go (cs : List Char) (cur : List Char) (inQ : Bool) (acc : List String) : List String :=

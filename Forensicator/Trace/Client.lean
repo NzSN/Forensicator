@@ -21,6 +21,7 @@ import Forensicator.Model.Trace
 import Forensicator.Trace.Proto
 import Forensicator.Trace.Index
 import Forensicator.Trace.Jigsaw
+import Std.Data.HashSet
 
 namespace Forensicator.Trace
 
@@ -46,6 +47,9 @@ structure ProxySession where
   skel : Model.Trace
   index : IO.Ref IndexState
   cache : IO.Ref Jigsaw
+  /-- set on a session-fatal transport/protocol error (plan C4: ERROR
+      frames, framing violations, EOF are session-fatal — fail closed). -/
+  dead : IO.Ref (Option String)
 
 /-- Above this many outstanding page-index fetches, `ensurePages` collapses
     to one wide window (plan task 3 fan-out limit). -/
@@ -138,6 +142,7 @@ def spawn (tracePath : String) : IO ProxySession := do
                                  : IO.Process.SpawnArgs }
   let index ← IO.mkRef ({} : IndexState)
   let cache ← IO.mkRef ({} : Jigsaw)
+  let dead ← IO.mkRef none
   try
     child.stdin.write (Request.hello protoVersion).encode
     child.stdin.flush
@@ -160,7 +165,7 @@ def spawn (tracePath : String) : IO ProxySession := do
       | .ok (.events es) => pure es
       | .ok (.error msg) => throw (IO.Error.userError s!"proxy error: {msg}")
       | _ => throw (IO.Error.userError "proxy handshake: expected EVENTS")
-    pure { child, frontier, skel := skeleton frontier threads events, index, cache }
+    pure { child, frontier, skel := skeleton frontier threads events, index, cache, dead }
   catch e =>
     try child.kill catch _ => pure ()
     throw e
@@ -254,6 +259,117 @@ def fetchPage (ps : ProxySession) (page : VA) (t : Position) : IO Unit := do
         ps.cache.modify fun c => c.insertFetched page t ps.frontier none st
     else
       ps.cache.modify fun c => c.insertFetched page t ps.frontier none st
+
+/-- Run a two-phase action under the session-fatal policy: a dead proxy
+    refuses work; a transport/protocol error poisons the session (fail
+    closed, never fudge) and surfaces as a command error. -/
+def guarded (ps : ProxySession) (k : IO α) : IO (Except String α) := do
+  match ← ps.dead.get with
+  | some msg => pure (.error s!"proxy session dead: {msg}")
+  | none =>
+    try
+      pure (.ok (← k))
+    catch e =>
+      ps.dead.set (some (toString e))
+      pure (.error s!"proxy error: {e}")
+
+/-- Full-space write index (the fan-out collapse): one window over
+    `[0, 2⁶⁴)` × `[0, frontier]`. Merged once; `fullCoverage` makes every
+    page known at the frontier without per-page fetches. -/
+def ensureFullIndex (ps : ProxySession) : IO Unit := do
+  if (← ps.index.get).fullCoverage then return
+  ps.fetchWindow { vaLo := 0, vaHi := 0xFFFFFFFFFFFFFFFF, t1 := 0, t2 := ps.frontier }
+  ps.index.modify fun st => { st with fullCoverage := true }
+
+/-- Byte at `va` at model position `t` via the jigsaw (two-phase:
+    pure gap check → IO fetch → pure answer). -/
+def valueAt (ps : ProxySession) (va : VA) (t : Position) : IO (Option UInt8) := do
+  if ps.frontier < t then return none
+  let page := pageBaseOf va
+  if (← ps.cache.get).gapAt page t then ps.fetchPage page t
+  match (← ps.cache.get).bytesAt page t with
+  | some bytes =>
+    let off := (va - page).toNat
+    pure (if off < bytes.size then some (bytes.get! off) else none)
+  | none => pure none
+
+/-- Writes overlapping `[va, va+len)` in `(t1, t2]` (two-phase: index
+    window fetch, then the pure filter). -/
+def writesBetween (ps : ProxySession) (va : VA) (len : UInt64) (t1 t2 : Position) :
+    IO (List Model.WriteRecord) := do
+  ps.ensureRange va len
+  pure ((← ps.index.get).writesBetween va len t1 t2)
+
+/-- Resolve a write record's payload through the cache (design risk 5:
+    lazy records stay metadata-only, one truth source). Payload-backed
+    records return their data. Absent pages fail closed (`none`); a
+    fallback piece (page state after a later write) is used only when no
+    known write in between overlaps the needed bytes (the overlap guard,
+    Implementation notes). Capped at 4096 pages per record. -/
+def writeBytes (ps : ProxySession) (w : Model.WriteRecord) : IO (Option ByteArray) := do
+  if w.len == 0 then return some w.data
+  let endVa := w.endVaNat
+  if endVa ≤ w.va.toNat then return none
+  let firstPage := pageBaseOf w.va
+  let pageCount := (endVa - 1 - firstPage.toNat) / pageSize.toNat + 1
+  if pageCount > 4096 then return none
+  let st ← ps.index.get
+  let mut out := ByteArray.empty
+  for i in [:pageCount] do
+    let pbase := firstPage + UInt64.ofNat (i * pageSize.toNat)
+    let subLo := max w.va.toNat pbase.toNat
+    let subHi := min endVa (pbase.toNat + pageSize.toNat)
+    ps.fetchPage pbase w.pos
+    match (← ps.cache.get).pieces[pbase]? with
+    | none => return none
+    | some pc =>
+      let sliceFrom (bytes : ByteArray) :=
+        bytes.extract (subLo - pbase.toNat) (subHi - pbase.toNat)
+      if pc.present && decide (pc.lo ≤ w.pos) && decide (w.pos < pc.hi) then
+        out := out ++ sliceFrom pc.bytes
+      else if pc.present && decide (w.pos ≤ pc.lo) then
+        let conflict := st.records.any fun wr =>
+          wr.overlapsPage pbase && decide (w.pos < wr.pos) && decide (wr.pos ≤ pc.lo)
+            && decide (wr.va.toNat < subHi) && decide (subLo < wr.endVaNat)
+        if conflict then return none
+        out := out ++ sliceFrom pc.bytes
+      else return none
+  pure (some out)
+
+/-- Two-phase snapshot (design D4): full index → referenced-closure page
+    set at `t` ∪ probed pages → batch-fetch gaps at `t` → pure
+    materialization. Regions are derived, never enumerated (P3): committed
+    pages only, adjacent pages merged, protection approximate (R|W). -/
+def snapshotAt (ps : ProxySession) (t : Position) : IO (Option Model.Snapshot) := do
+  if ps.frontier < t then return none
+  ps.ensureFullIndex
+  let st ← ps.index.get
+  let closure := st.closurePages t
+  for p in closure do
+    if (← ps.cache.get).gapAt p t then ps.fetchPage p t
+  let c ← ps.cache.get
+  let closureSet : Std.HashSet UInt64 :=
+    closure.foldl (init := ({} : Std.HashSet UInt64)) (·.insert ·)
+  let probed := c.lru.filter fun p =>
+    !(closureSet.contains p) && c.knownAt p t
+  let mut segs : List (VA × ByteArray) := []
+  for p in closure ++ probed do
+    match c.bytesAt p t with
+    | some b => segs := (p, b) :: segs
+    | none => pure ()
+  let sorted := segs.mergeSort fun a b => decide (a.1 ≤ b.1)
+  let merged := (sorted.foldl (init := ([] : List (VA × ByteArray))) fun acc (base, data) =>
+    match acc with
+    | (b0, d0) :: rest =>
+      if b0.toNat + d0.size == base.toNat then (b0, d0 ++ data) :: rest
+      else (base, data) :: acc
+    | [] => [(base, data)]).reverse
+  let prov : Provenance := { streamType := PROXY_STREAM_TYPE }
+  let regions := merged.map fun (base, data) =>
+    ({ vaStart := base, size := UInt64.ofNat data.size, data
+       protection := 3, state := .Commit, memType := .Private
+       provenance := prov, regionClass := some .Private } : Model.MemoryRegionInfo)
+  pure (({ ps.skel with initMem := regions } : Model.Trace).snapshot t)
 
 /-- Orderly shutdown: CLOSE frame, then reap (the proxy terminates itself
     on CLOSE). Errors are swallowed — the session is over either way. -/

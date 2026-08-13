@@ -57,44 +57,57 @@ structure IndexWindow where
   deriving Repr, DecidableEq, BEq, Inhabited
 
 /-- The accumulated client index. `records` is sorted by `(pos, va, len)`
-    with no duplicate keys; `horizon`/`window` are per page base. -/
+    with no duplicate keys; `horizon`/`window` are per page base.
+    `fullCoverage` is set once a full-space `[0, 2⁶⁴)` window has been
+    merged (the fan-out collapse) — every page is then known up to
+    `frontier` even without a per-page entry. -/
 structure IndexState where
   records : List Model.WriteRecord := []
   /-- page base → `idx_F`: index complete for positions ≤ this horizon. -/
   horizon : Std.HashMap UInt64 Position := {}
   /-- page base → the position window that established the horizon. -/
   window : Std.HashMap UInt64 (Position × Position) := {}
-  anomalies : List Anomaly := {}
+  anomalies : List Anomaly := []
+  /-- set by the last `mergeWindow` call (frontiers are static at attach). -/
+  frontier : Position := 0
+  fullCoverage : Bool := false
+
+/-- The page's horizon: per-page entry, else the frontier under
+    fullCoverage. -/
+def IndexState.horizonOf (st : IndexState) (page : VA) : Option Position :=
+  match st.horizon[page]? with
+  | some h => some h
+  | none => if st.fullCoverage then some st.frontier else none
 
 /-- Does the index know page `page`'s writes up to `t` (spec NeedsIndex's
     negation: `idx_known[p] ∧ t ≤ idx_F[p]`)? -/
 def IndexState.known (st : IndexState) (page : VA) (t : Position) : Bool :=
-  (st.horizon[page]?).map (fun h => decide (t ≤ h)) |>.getD false
+  (st.horizonOf page).map (fun h => decide (t ≤ h)) |>.getD false
 
 /-- Record overlaps page `page`'s byte range? -/
-private def overlapsPage (w : Model.WriteRecord) (page : VA) : Bool :=
+def _root_.Forensicator.Model.WriteRecord.overlapsPage (w : Model.WriteRecord) (page : VA) : Bool :=
   decide (w.va.toNat < page.toNat + pageSize.toNat)
     && decide (page.toNat < w.endVaNat)
 
 /-- Last known write position on `page` at or before `t`, or 0 (spec
     LastKnownWrite — only records within the page's horizon count). -/
 def IndexState.lastKnownWrite (st : IndexState) (page : VA) (t : Position) : Position :=
-  match st.horizon[page]? with
+  match st.horizonOf page with
   | none => 0
   | some h =>
     (st.records.filter fun w =>
-      overlapsPage w page && decide (w.pos ≤ h) && decide (w.pos ≤ t))
+      w.overlapsPage page && decide (w.pos ≤ h) && decide (w.pos ≤ t))
       |>.foldl (fun acc w => max acc w.pos) 0
 
 /-- First known write position on `page` strictly after `t`, or the horizon
     sentinel `idx_F[page] + 1` (spec NextKnownWrite — validity never outruns
     knowledge). -/
 def IndexState.nextKnownWrite (st : IndexState) (page : VA) (t : Position) : Position :=
-  match st.horizon[page]? with
+  match st.horizonOf page with
   | none => 1
   | some h =>
     let later := st.records.filter fun w =>
-      overlapsPage w page && decide (w.pos ≤ h) && decide (t < w.pos)
+      w.overlapsPage page && decide (w.pos ≤ h) && decide (t < w.pos)
     later.foldl (fun acc w => min acc w.pos) (h + 1)
 
 /-- Known writes overlapping `[va, va+len)` in `(t1, t2]` — the index-level
@@ -151,6 +164,22 @@ def IndexState.mergeWindow (st : IndexState) (win : IndexWindow)
               (hz.insert p win.t2, wd.insert p (win.t1, win.t2), anoms))
         (st.horizon, st.window, [])
   { records, horizon, window
-    anomalies := st.anomalies ++ beyondAnoms ++ gapAnoms }
+    anomalies := st.anomalies ++ beyondAnoms ++ gapAnoms
+    frontier := frontier, fullCoverage := st.fullCoverage }
+
+/-- Pages with any write ≤ `t` (design D4 step 1: the referenced
+    closure), sorted and deduped. Wide writes contribute every page they
+    span; empty-range records are skipped (fail closed). -/
+def IndexState.closurePages (st : IndexState) (t : Position) : List VA :=
+  let per := (st.records.filter fun w =>
+      decide (w.pos ≤ t) && decide (w.va.toNat < w.endVaNat)).flatMap fun w =>
+    let firstP := pageBaseOf w.va
+    let n := (w.endVaNat - 1 - firstP.toNat) / pageSize.toNat + 1
+    (List.range n).map fun i => firstP + UInt64.ofNat (i * pageSize.toNat)
+  let sorted := per.mergeSort fun a b => decide (a ≤ b)
+  (sorted.foldl (init := ([] : List VA)) fun acc p =>
+    match acc with
+    | last :: _ => if last == p then acc else p :: acc
+    | [] => [p]).reverse
 
 end Forensicator.Trace

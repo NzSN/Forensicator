@@ -365,7 +365,7 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
     s.closeProxy
     pure (s, false)
   | "inspect" :: rest =>
-    match s.current with
+    match (← s.currentIO) with
     | .error e => IO.eprintln s!"error: {e}"
     | .ok (dump, _) =>
       if (match s.target with | .trace _ _ => true | _ => false) then
@@ -375,7 +375,7 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
       inspectPrint dump ("--json" ∈ rest) ("--quiet" ∈ rest)
     pure (s, true)
   | "analyze" :: rest =>
-    match s.current with
+    match (← s.currentIO) with
     | .error e => IO.eprintln s!"error: {e}"
     | .ok (dump, space) =>
       let plugin := match rest.find? (· == "--plugin") with
@@ -390,7 +390,7 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
       analyzePrint dump space plugin json
     pure (s, true)
   | "match" :: rest =>
-    match s.current with
+    match (← s.currentIO) with
     | .error e => IO.eprintln s!"error: {e}"
     | .ok (dump, _) =>
       let rec collect (xs : List String) (exes pdbs : List String) : List String × List String :=
@@ -468,16 +468,33 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
       match s.target with
       | .dump _ _ => IO.eprintln "error: not a trace session (trace support removed; the proxy-based Lean client is a follow-up)"
       | .trace t cursor =>
-        let last := t.lastWriter va cursor
-        let writes := t.writesBetween va len 0 cursor
-        if writes.isEmpty then
-          IO.println s!"no writes to [{hexUpper va}, {hexUpper (va + len)}) up to cursor"
-        for w in writes do
-          let marker := match last with
-            | some lw => if lw.pos == w.pos && lw.va == w.va && lw.data == w.data
-                then "  <-- last writer" else ""
-            | none => ""
-          IO.println s!"  @{hexUpper w.pos}  [{hexUpper w.va}, {hexUpper (UInt64.ofNat (min w.endVaNat (2^64-1)))})  {byteDebug w.data}{marker}"
+        let printWrites (writes : List Model.WriteRecord) (last : Option Model.WriteRecord)
+            (payloads : List (Option ByteArray)) : IO Unit := do
+          if writes.isEmpty then
+            IO.println s!"no writes to [{hexUpper va}, {hexUpper (va + len)}) up to cursor"
+          for w in writes.zip payloads do
+            let (w, payload) := (w.1, w.2)
+            let marker := match last with
+              | some lw => if lw.pos == w.pos && lw.va == w.va && lw.len == w.len
+                  then "  <-- last writer" else ""
+              | none => ""
+            let dataStr := match payload with
+              | some bs => byteDebug bs
+              | none => "<uncommitted>"
+            IO.println s!"  @{hexUpper w.pos}  [{hexUpper w.va}, {hexUpper (UInt64.ofNat (min w.endVaNat (2^64-1)))})  {dataStr}{marker}"
+        match s.proxy with
+        | none =>
+          let writes := t.writesBetween va len 0 cursor
+          printWrites writes (t.lastWriter va cursor) (writes.map (some ·.data))
+        | some ps =>
+          match (← ps.guarded (do
+            let writes ← ps.writesBetween va len 0 cursor
+            let payloads ← writes.mapM ps.writeBytes
+            pure (writes, payloads))) with
+          | .error e => IO.eprintln s!"error: {e}"
+          | .ok (writes, payloads) =>
+            let last := Model.lastCoveringWrite writes va
+            printWrites writes last payloads
     | _, _ => IO.eprintln "error: bad writes arguments"
     pure (s, true)
   | ["intervals"] =>
