@@ -31,6 +31,9 @@ shipping functions** (no `sorry`/`partial`/`panic!` in the library):
 | `valueAt_agrees_with_fold` | `Spec/Timeline.lean` | `SnapshotConsistent`: `valueAt` ≡ brute-force fold over writes |
 | `snapshot_isSome` | `Spec/Timeline.lean` | `CursorBounded`: snapshot succeeds exactly within the frontier |
 | `PositionOrdered`/`EventsOrdered` lemmas | `Spec/Timeline.lean` | `TraceOrdered` building blocks |
+| `IndexState.history_agree` | `Spec/JigSaw.lean` | pure `CacheSound` half: the known write history is constant over a piece's validity interval `[lo, hi)` |
+| `IndexState.lastKnownWrite_le`/`lt_nextKnownWrite`/`no_known_write_within` | `Spec/JigSaw.lean` | interval bounds + emptiness (`HorizonBounded` shape) |
+| `mergeRecords_sorted`/`nodupKeys`/`mem_*`, `mergeWindow_sorted`/`mergeWindow_mem` | `Spec/JigSaw.lean` | mergeIndex order/dedup/absorption invariants |
 
 The Rust-era model-based tests (`forensicator-core/tests/mbt_*.rs`,
 mirrorrust) were retired with the Rust tree (2026-08-13) — their role is
@@ -40,9 +43,14 @@ absorbed by these theorems. The `.ttfx` decoder theorems
 ## Guard suite (`forensicator-test`, `Test/`)
 
 In-process checks over synthetic builders (`Dump`, `AddressSpace`, `Trace`,
-V8 heap cages) — no live dumps needed; 70+ named `check`s in
-`Test/Spec.lean`. With `FORENSICATOR_CASE_DIR` set, the suite also runs the
-minidump prefix/mutation fuzz over `Case/` (review-hardening guards).
+V8 heap cages) — no live dumps needed; 114 named `check`s in
+`Test/Spec.lean`, including the trace-client surfaces: protocol golden
+frame vectors (byte-pinned against the proxy's `proto.rs` tests), index
+merge/horizon checks, and the jigsaw cache property run (400 deterministic
+random fetch/query pairs against a pure engine oracle — CacheSound/
+AbsentSound, absent points, eviction, horizon truncation, p+1 clamp).
+With `FORENSICATOR_CASE_DIR` set, the suite also runs the minidump
+prefix/mutation fuzz over `Case/` (review-hardening guards).
 
 ## Golden gate (`scripts/conformance-lean.sh`)
 
@@ -53,6 +61,13 @@ the fixtures): 3 dumps × inspect (`--quiet` byte-exact, `--json` key-sorted)
 and a negative guard (the binary must reject `.ttfx` input with the explicit
 "ttfx removed" error). Goldens regenerate from a known-good build via
 `scripts/capture-goldens.sh` when fixtures change.
+
+**Opt-in live proxy gate** (off by default):
+`FORENSICATOR_PROXY_RUN=<trace.run>` plus a transport
+(`FORENSICATOR_PROXY_SSH=windows-dev` or a local `FORENSICATOR_PROXY_EXE`)
+adds a scripted lazy-proxy session against the fixture trace — banner,
+eager-`.ttfx` payload equality, overlapping write-count spots, and the
+documented P3 fail-closed record (all pinned against fixture facts).
 
 ## Golden fixtures (`Case/`, gitignored except where forced)
 
@@ -72,6 +87,7 @@ and a negative guard (the binary must reject `.ttfx` input with the explicit
 lake build                          # library + CLI + forensicator-test
 .lake/build/bin/forensicator-test   # guard suite (FORENSICATOR_CASE_DIR=Case for fuzz)
 ./scripts/conformance-lean.sh       # golden gate
+FORENSICATOR_PROXY_RUN=… FORENSICATOR_PROXY_SSH=windows-dev ./scripts/conformance-lean.sh  # + live proxy gate
 ```
 
 ## Known spec hygiene issues

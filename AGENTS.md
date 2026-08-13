@@ -3,9 +3,9 @@
 > **Repo layout (2026-08-13):** Lean-only. The Rust implementation is gone
 > entirely — worktree, local branch, and `origin/rust-backup` all deleted;
 > nothing Rust remains in play. The eager `.ttfx` v1 trace path is removed
-> the same day; trace support returns as the proxy-based Lean client
-> (follow-up plan). See
-> `docs/plans/2026-08-13-remove-eager-trace-path.md`.
+> the same day; trace support returned the same day as the proxy-based Lean
+> client (plan `docs/plans/2026-08-13-lean-trace-client.md`, tasks 0–8 all
+> landed). See `docs/plans/2026-08-13-remove-eager-trace-path.md`.
 
 Lean 4 (v4.33.0) package for forensic analysis of Windows x64 minidumps.
 Custom hand-written parser, pointer graph inference, structure recovery,
@@ -18,6 +18,7 @@ crash-cause diagnosis — focused on Electron/Chromium (V8) crashes.
 | Build all | `export PATH="$HOME/.elan/bin:$PATH" && lake build` |
 | Guard suite (unit/property checks) | `.lake/build/bin/forensicator-test` (`FORENSICATOR_CASE_DIR=Case` enables the minidump fuzz) |
 | Golden gate | `./scripts/conformance-lean.sh` (regenerate references: `scripts/capture-goldens.sh`) |
+| Live proxy gate (opt-in) | `FORENSICATOR_PROXY_RUN=<trace.run> FORENSICATOR_PROXY_SSH=windows-dev ./scripts/conformance-lean.sh` |
 | Static binary | `./scripts/build-static.sh` |
 | TLA+ model check | `apalache-mc check --features=no-rows --config=<Spec>.cfg specs/<Spec>.tla` |
 
@@ -25,6 +26,10 @@ crash-cause diagnosis — focused on Electron/Chromium (V8) crashes.
 
 **One Lean package:** `Forensicator/` (library) + `Main.lean` (CLI) +
 `Test/` (guard-suite binary). Zero Lean deps (no mathlib/batteries).
+
+**Trace modules** (`Forensicator/Trace/`) — `Proto`/`Index`/`Jigsaw` are
+pure and total; `Client` confines the `IO.Process` boundary. Mirrors
+`specs/JigSawSpawner.tla`.
 
 **Pipeline (S1 → S2):**
 1. **Parse** — `Forensicator/Parse/Minidump.lean`: validate header → stream directory → per-stream decoders → typed `Dump` with provenance
@@ -58,13 +63,16 @@ forensicator analyze <dump.dmp>        # run analyzers (--plugin, --json, --symb
 forensicator match <dump.dmp>          # verify dump ↔ exe/PDB build artifacts (--exe, --pdb, --json)
 forensicator list-plugins              # list registered analyzers
 forensicator shell <dump.dmp>          # interactive session (inspect/analyze/match/load/symbols/quit)
+forensicator shell --proxy <trace.run> # lazy trace session via the proxy (seek/t+/t-/position/writes/intervals work)
 ```
 
-Trace commands (`seek`/`t+`/`t-`/`position`/`writes`/`intervals`) remain in
-the session dispatcher against `Target.trace`, but no loader can construct a
-trace session until the Lean proxy client lands — they error with "trace
-support removed (…follow-up)". The `trace` subcommand and `.ttfx` loading
-are removed; `shell`/`load` reject TTFX magic explicitly.
+The `trace` subcommand and `.ttfx` loading are removed; `shell`/`load`
+reject TTFX magic explicitly. Trace sessions attach through
+`load --proxy <trace.run>` (or `shell --proxy`): spawn `ttfx-proxy.exe`,
+HELLO handshake, eager skeleton (threads/events/frontier), lazy write index
++ jigsaw page cache. Transport: `FORENSICATOR_PROXY_EXE` (local interop,
+default `/mnt/d/…/release/ttfx-proxy.exe`) or `FORENSICATOR_PROXY_SSH=<host>`
+(rides the ssh pipes; `…_EXE` then names the remote exe).
 
 ## TTD trace support (proxy-only; `.ttfx` historical)
 
@@ -78,9 +86,21 @@ Implementation notes). The trace model + views + theorems stay in
 decoder/encoder/fixture were removed 2026-08-13; `docs/arch/ttfx-format.md`
 is historical (kept for a possible v2 jigsaw-persistence format, design §D8).
 
-Current state (gap D-B): trace consumption requires the Windows proxy
-(`D:\Codebase\JigsawSpawner`) + the Lean client (stdio over `IO.Process`) —
-the client is a follow-up plan.
+Gap D-B closed (2026-08-13): the Lean client is shipped —
+`Forensicator/Trace/Proto.lean` (pure frame codec, golden vectors
+byte-pinned against the proxy's `proto.rs` tests), `Trace/Index.lean`
+(windowed write index, per-page horizons, `mergeWindow` dedup/gap
+anomalies), `Trace/Jigsaw.lean` (page cache with validity intervals, ABSENT
+points, LRU cap, p+1 clamp, P3 next-write fallback), `Trace/Client.lean`
+(the only IO: `IO.Process` spawn + request loop + two-phase commands).
+Two-phase snapshots (design D4) feed `inspect`/`analyze` at cursor.
+Mechanized: `Spec/JigSaw.lean` (validity-interval arithmetic —
+`history_agree`, the pure `CacheSound` half — plus `mergeRecords`/
+`mergeWindow` order/dedup/membership invariants, sorry-free). Live-verified
+against `hostname01.run`: 435,030 index records == eager `.ttfx`, sampled
+payloads + 35/35 INITMEM regions byte-equal; the opt-in live gate
+(`FORENSICATOR_PROXY_RUN=… ./scripts/conformance-lean.sh`) replays those
+fixture facts.
 
 ## Built-in pointer patterns
 
