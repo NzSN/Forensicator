@@ -19,13 +19,11 @@
      (default `D:/Codebase/JigsawSpawner/target/release/ttfx-proxy.exe`). -/
 import Forensicator.Model.Trace
 import Forensicator.Trace.Proto
+import Forensicator.Trace.Index
 
 namespace Forensicator.Trace
 
-/-- Pseudo stream-type in provenance for proxy-sourced facts ("JGSW" LE). -/
-def PROXY_STREAM_TYPE : UInt32 := 0x5753474A
-
-/-- Translate `/mnt/<drive>/…` to `<drive>:/…` for interop/ssh transports;
+/--- Translate `/mnt/<drive>/…` to `<drive>:/…` for interop/ssh transports;
     anything else passes through unchanged. -/
 def windowsPath (p : String) : String :=
   match p.toList with
@@ -39,11 +37,17 @@ def windowsPath (p : String) : String :=
 def proxySpawnCfg : IO.Process.StdioConfig :=
   { stdin := .piped, stdout := .piped, stderr := .inherit }
 
-/-- A live proxy: one child process, one outstanding request. -/
+-- A live proxy: one child process, one outstanding request. `index`
+-- accumulates fetched write-index windows (design D1/D9).
 structure ProxySession where
   child : IO.Process.Child proxySpawnCfg
   frontier : Position
   skel : Model.Trace
+  index : IO.Ref IndexState
+
+/-- Above this many outstanding page-index fetches, `ensurePages` collapses
+    to one wide window (plan task 3 fan-out limit). -/
+def fanoutLimit : Nat := 256
 
 namespace ProxySession
 
@@ -130,6 +134,7 @@ def spawn (tracePath : String) : IO ProxySession := do
   let child ← IO.Process.spawn { cmd := cmd, args := args
                                  stdin := .piped, stdout := .piped, stderr := .inherit
                                  : IO.Process.SpawnArgs }
+  let index ← IO.mkRef ({} : IndexState)
   try
     child.stdin.write (Request.hello protoVersion).encode
     child.stdin.flush
@@ -152,10 +157,63 @@ def spawn (tracePath : String) : IO ProxySession := do
       | .ok (.events es) => pure es
       | .ok (.error msg) => throw (IO.Error.userError s!"proxy error: {msg}")
       | _ => throw (IO.Error.userError "proxy handshake: expected EVENTS")
-    pure { child, frontier, skel := skeleton frontier threads events }
+    pure { child, frontier, skel := skeleton frontier threads events, index }
   catch e =>
     try child.kill catch _ => pure ()
     throw e
+
+/-- One `WRITES_INDEX` round trip, merged into the client index. -/
+def fetchWindow (ps : ProxySession) (win : IndexWindow) : IO Unit := do
+  match ← ps.request (.writesIndex win.vaLo win.vaHi win.t1 win.t2) with
+  | .index recs => ps.index.modify fun st => st.mergeWindow win recs ps.frontier
+  | _ => throw (IO.Error.userError "proxy protocol error: expected INDEX")
+
+/-- Clamp a VA-range end into u64 (Nat-lifted, documented: a range crossing
+    2⁶⁴ loses its top byte — nonsense input, fail-bounded not fail-wild). -/
+private def rangeEnd (va : VA) (len : UInt64) : VA :=
+  UInt64.ofNat (min (va.toNat + len.toNat) (2^64 - 1))
+
+/-- Fetch write metadata for `[va, va+len)` over `[0, frontier]` (one
+    window). Pages already known at the frontier are skipped only when the
+    whole range is known; the window merge dedups regardless. -/
+def ensureRange (ps : ProxySession) (va : VA) (len : UInt64) : IO Unit := do
+  if len == 0 then return
+  let st ← ps.index.get
+  let lastByte := va + (len - 1)
+  let pageCount := (pageBaseOf lastByte - pageBaseOf va).toNat / pageSize.toNat + 1
+  let allKnown := pageCount ≤ maxMarkPages.toNat
+    && (List.range pageCount).all fun i =>
+      st.known (pageBaseOf va + UInt64.ofNat (i * pageSize.toNat)) ps.frontier
+  if allKnown then return
+  ps.fetchWindow { vaLo := va, vaHi := rangeEnd va len, t1 := 0, t2 := ps.frontier }
+
+/-- Ensure the index knows every page in `pages` (page bases) up to the
+    frontier (design D2 dependency rule). Missing pages are fetched as
+    consecutive-run windows; beyond `fanoutLimit` pages, one wide window
+    `[minBase, maxBase + pageSize)` instead. -/
+def ensurePages (ps : ProxySession) (pages : List VA) : IO Unit := do
+  let st ← ps.index.get
+  let sorted := (pages.filter fun p => !st.known p ps.frontier).mergeSort
+    fun a b => decide (a ≤ b)
+  let need := (sorted.foldl (init := ([] : List VA)) fun acc p =>
+    match acc with
+    | last :: _ => if last == p then acc else p :: acc
+    | [] => [p]).reverse
+  if need.isEmpty then return
+  if need.length > fanoutLimit then
+    match need.head?, need.getLast? with
+    | some lo, some hi =>
+      ps.fetchWindow { vaLo := lo, vaHi := hi + pageSize, t1 := 0, t2 := ps.frontier }
+    | _, _ => pure ()
+  else
+    let runs := need.foldl (init := ([] : List (VA × VA))) fun runs p =>
+      match runs with
+      | (lo, hi) :: rest =>
+        if p == hi + pageSize then (lo, p) :: rest
+        else (p, p) :: runs
+      | [] => [(p, p)]
+    for (lo, hi) in runs.reverse do
+      ps.fetchWindow { vaLo := lo, vaHi := hi + pageSize, t1 := 0, t2 := ps.frontier }
 
 /-- Orderly shutdown: CLOSE frame, then reap (the proxy terminates itself
     on CLOSE). Errors are swallowed — the session is over either way. -/

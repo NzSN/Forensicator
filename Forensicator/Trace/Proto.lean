@@ -15,6 +15,9 @@ import Forensicator.Util.Text
 
 namespace Forensicator.Trace
 
+/--- Pseudo stream-type in provenance for proxy-sourced facts ("JGSW" LE). -/
+def PROXY_STREAM_TYPE : UInt32 := 0x5753474A
+
 /-- Protocol version both sides must agree on (proxy rejects on mismatch). -/
 def protoVersion : UInt32 := 1
 

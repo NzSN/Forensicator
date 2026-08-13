@@ -346,6 +346,55 @@ def runAll : IO UInt32 := do
   check ctx "proto unknown tag rejected"
     (respErr (Trace.parseResponse 42 ByteArray.empty))
 
+  -- Trace.Index: mergeRecords / mergeWindow / horizon views (design D1).
+  let irec (pos va : UInt64) (len : UInt32) : Trace.IndexRecord := { pos, va, len }
+  let wrec (pos va : UInt64) (len : UInt64) : Model.WriteRecord :=
+    { pos, va, data := ByteArray.empty, len }
+  let keysOf (rs : List Model.WriteRecord) : List (UInt64 × UInt64 × UInt64) :=
+    rs.map fun w => (w.pos, w.va, w.len)
+  check ctx "index mergeRecords sorts and dedups"
+    (keysOf (Trace.mergeRecords [wrec 1 0x1000 4, wrec 3 0x1000 2] [wrec 2 0x2000 8, wrec 3 0x1000 2])
+      == [(1, 0x1000, 4), (2, 0x2000, 8), (3, 0x1000, 2)])
+  let st1 := ({} : Trace.IndexState).mergeWindow
+    { vaLo := 0x1000, vaHi := 0x2000, t1 := 0, t2 := 10 }
+    #[irec 1 0x1004 4, irec 3 0x1008 2] 10
+  check ctx "index window merge: records + horizon"
+    (st1.records.length == 2 && st1.known 0x1000 10 && !st1.known 0x1000 11
+      && !st1.known 0x2000 10 && st1.anomalies.isEmpty)
+  check ctx "index last/next known write with sentinel"
+    (st1.lastKnownWrite 0x1000 0 == 0 && st1.lastKnownWrite 0x1000 2 == 1
+      && st1.lastKnownWrite 0x1000 3 == 3 && st1.nextKnownWrite 0x1000 0 == 1
+      && st1.nextKnownWrite 0x1000 1 == 3 && st1.nextKnownWrite 0x1000 3 == 11)
+  let st2 := st1.mergeWindow { vaLo := 0x1000, vaHi := 0x2000, t1 := 0, t2 := 10 }
+    #[irec 1 0x1004 4] 10
+  check ctx "index idempotent re-merge (dedup, no anomaly)"
+    (st2.records.length == 2 && st2.anomalies.isEmpty)
+  let st3 := st1.mergeWindow { vaLo := 0x1000, vaHi := 0x2000, t1 := 0, t2 := 12 } #[] 12
+  check ctx "index window gap anomaly on re-window"
+    ((st3.anomalies.filter (·.description == "index window gap")).length == 1)
+  let st4 := ({} : Trace.IndexState).mergeWindow
+    { vaLo := 0x1000, vaHi := 0x2000, t1 := 0, t2 := 10 }
+    #[irec 1 0x1004 4, irec 99 0x1010 1] 10
+  check ctx "index beyond-frontier record dropped with anomaly"
+    (st4.records.length == 1
+      && (st4.anomalies.filter (·.description == "index record beyond frontier")).length == 1)
+  -- Partial coverage: only the fully covered page gets a horizon.
+  let st5 := ({} : Trace.IndexState).mergeWindow
+    { vaLo := 0x800, vaHi := 0x3800, t1 := 0, t2 := 10 } #[] 10
+  check ctx "index partial boundary pages not marked"
+    (!st5.known 0 10 && st5.known 0x1000 10 && st5.known 0x2000 10 && !st5.known 0x3000 10)
+  -- A wide write spilling into the next page overlaps both for the views.
+  let st6 := ({} : Trace.IndexState).mergeWindow
+    { vaLo := 0x1000, vaHi := 0x3000, t1 := 0, t2 := 10 } #[irec 2 0x1FFC 8] 10
+  check ctx "index wide write overlaps both pages"
+    (st6.lastKnownWrite 0x1000 10 == 2 && st6.lastKnownWrite 0x2000 10 == 2
+      && st6.nextKnownWrite 0x1000 2 == 11)
+  check ctx "index writesBetween over metadata"
+    (keysOf (st1.writesBetween 0x1000 16 0 2) == [(1, 0x1004, 4)]
+      && (st1.writesBetween 0x1000 16 0 3).length == 2
+      && keysOf (st1.writesBetween 0x1000 16 1 3) == [(3, 0x1008, 2)]
+      && (st1.writesBetween 0x1000 16 3 3).isEmpty)
+
 
   -- F5: minidump prefix + mutation fuzz over Case/*.dmp fixtures. The
   -- decoder must always *return* (ok or error); a Lean panic/stack overflow
