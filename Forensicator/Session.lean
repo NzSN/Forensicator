@@ -12,6 +12,7 @@ import Forensicator.Parse.Minidump
 import Forensicator.Pipeline
 import Forensicator.Util.Image
 import Forensicator.Util.Bytes
+import Forensicator.Trace.Client
 import Std.Data.HashSet
 
 namespace Forensicator
@@ -21,12 +22,14 @@ open Model Parse Spec
 /-- What the session is pointed at. -/
 inductive Target where
   | dump (s1 : Dump × AddressSpace × DumpKind) (images : Nat)
-  | trace (t : Trace) (cursor : Position)
+  | trace (t : Model.Trace) (cursor : Position)
 
 structure Session where
   path : String
   target : Target
   symbols : Option String
+  /-- The live proxy when `target` is a lazy trace (plan §C5). -/
+  proxy : Option Trace.ProxySession := none
 
 private def hexDigitsU (v : UInt64) : String :=
   String.ofList ((Nat.toDigits 16 v.toNat).map fun c => if c.isAlpha then c.toUpper else c)
@@ -71,6 +74,20 @@ def Session.open (path : String) (symbols : Option String) : IO Session := do
              target := .dump (dump, space, classifyDump dump) images
              symbols := symbols }
 
+/-- Attach to a trace through the lazy proxy (plan §C5): spawn +
+    handshake, then a `Target.trace` over the eager skeleton. Memory and
+    the write index fill lazily (two-phase commands). -/
+def Session.openProxy (path : String) (symbols : Option String) : IO Session := do
+  let ps ← Trace.ProxySession.spawn path
+  pure { path := path, target := .trace ps.skel 0, symbols := symbols
+         proxy := some ps }
+
+/-- Close the proxy if this session holds one. -/
+def Session.closeProxy (s : Session) : IO Unit := do
+  match s.proxy with
+  | some ps => ps.close
+  | none => pure ()
+
 private def kindStr : DumpKind → String
   | .FullMemory => "full-memory" | .StackOnly => "stack-only"
 
@@ -79,7 +96,11 @@ def Session.banner (s : Session) : String :=
   | .dump (_, _, kind) images =>
     s!"{Session.baseName s.path}: {kindStr kind}, {images} image(s) supplemented, symbols: {s.symbols.getD "<none>"}"
   | .trace t _ =>
-    s!"{Session.baseName s.path}: trace, frontier {hexUpper t.frontier}, {t.writes.length} writes, {t.events.length} events, symbols: {s.symbols.getD "<none>"}"
+    match s.proxy with
+    | some _ =>
+      s!"{Session.baseName s.path}: trace (lazy via proxy), frontier {hexUpper t.frontier}, {t.threads.length} threads, {t.events.length} events, symbols: {s.symbols.getD "<none>"}"
+    | none =>
+      s!"{Session.baseName s.path}: trace, frontier {hexUpper t.frontier}, {t.writes.length} writes, {t.events.length} events, symbols: {s.symbols.getD "<none>"}"
 
 def Session.prompt (s : Session) : String :=
   match s.target with

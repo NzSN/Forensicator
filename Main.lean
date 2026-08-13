@@ -361,7 +361,9 @@ private def cmdMatch (path : String) (exes pdbs : List String) (json : Bool) : I
 
 private def shellDispatch (s : Session) (args : List String) : IO (Session × Bool) := do
   match args with
-  | "quit" :: _ => pure (s, false)
+  | "quit" :: _ => do
+    s.closeProxy
+    pure (s, false)
   | "inspect" :: rest =>
     match s.current with
     | .error e => IO.eprintln s!"error: {e}"
@@ -403,10 +405,20 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
   | ["list-plugins"] =>
     let _ ← cmdListPlugins
     pure (s, true)
-  | "load" :: path :: _ =>
-    let s' ← Session.open path s.symbols
-    IO.println s!"loaded {s'.banner}"
-    pure (s', true)
+  | "load" :: rest =>
+    let proxy := "--proxy" ∈ rest
+    match rest.find? fun x => !x.startsWith "-" with
+    | none => IO.eprintln "error: load needs a path"; pure (s, true)
+    | some path =>
+      try
+        let s' ← if proxy then Session.openProxy path s.symbols
+                 else Session.open path s.symbols
+        s.closeProxy
+        IO.println s!"loaded {s'.banner}"
+        pure (s', true)
+      catch e =>
+        IO.eprintln s!"error: {e}"
+        pure (s, true)
   | "symbols" :: rest =>
     match rest with
     | [] =>
@@ -506,11 +518,13 @@ private partial def shellLoop (s : Session) (stdin stdout : IO.FS.Stream) : IO U
       let (s', cont) ← shellDispatch s argv
       if cont then shellLoop s' stdin stdout
 
-private def cmdShell (path : String) (symbols : Option String) : IO UInt32 := do
-  let s ← Session.open path symbols
+private def cmdShell (path : String) (symbols : Option String) (proxy : Bool) : IO UInt32 := do
+  let s ← if proxy then Session.openProxy path symbols else Session.open path symbols
   IO.println s!"loaded {s.banner}"
   IO.println "type 'help' for commands, 'quit' to exit"
   shellLoop s (← IO.getStdin) (← IO.getStdout)
+  (← IO.getStdout).flush
+  s.closeProxy
   pure 0
 
 private def usage : IO UInt32 := do
@@ -551,11 +565,12 @@ def main (args : List String) : IO UInt32 := do
   | ["list-plugins"] => cmdListPlugins
   | "shell" :: rest =>
     let path := rest.find? fun x => !x.startsWith "-"
+    let proxy := "--proxy" ∈ rest
     let symbols := match (rest.zipIdx).find? fun (x, _) => x == "--symbols" with
       | some (_, i) => rest[i+1]?
       | none => none
     match path with
-    | some p => cmdShell p symbols
+    | some p => cmdShell p symbols proxy
     | none => usage
   | "match" :: rest =>
     let rec parseM (path : Option String) (exes pdbs : List String) (json : Bool)
