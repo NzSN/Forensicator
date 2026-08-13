@@ -20,6 +20,7 @@
 import Forensicator.Model.Trace
 import Forensicator.Trace.Proto
 import Forensicator.Trace.Index
+import Forensicator.Trace.Jigsaw
 
 namespace Forensicator.Trace
 
@@ -44,6 +45,7 @@ structure ProxySession where
   frontier : Position
   skel : Model.Trace
   index : IO.Ref IndexState
+  cache : IO.Ref Jigsaw
 
 /-- Above this many outstanding page-index fetches, `ensurePages` collapses
     to one wide window (plan task 3 fan-out limit). -/
@@ -135,6 +137,7 @@ def spawn (tracePath : String) : IO ProxySession := do
                                  stdin := .piped, stdout := .piped, stderr := .inherit
                                  : IO.Process.SpawnArgs }
   let index ← IO.mkRef ({} : IndexState)
+  let cache ← IO.mkRef ({} : Jigsaw)
   try
     child.stdin.write (Request.hello protoVersion).encode
     child.stdin.flush
@@ -157,7 +160,7 @@ def spawn (tracePath : String) : IO ProxySession := do
       | .ok (.events es) => pure es
       | .ok (.error msg) => throw (IO.Error.userError s!"proxy error: {msg}")
       | _ => throw (IO.Error.userError "proxy handshake: expected EVENTS")
-    pure { child, frontier, skel := skeleton frontier threads events, index }
+    pure { child, frontier, skel := skeleton frontier threads events, index, cache }
   catch e =>
     try child.kill catch _ => pure ()
     throw e
@@ -214,6 +217,43 @@ def ensurePages (ps : ProxySession) (pages : List VA) : IO Unit := do
       | [] => [(p, p)]
     for (lo, hi) in runs.reverse do
       ps.fetchWindow { vaLo := lo, vaHi := hi + pageSize, t1 := 0, t2 := ps.frontier }
+
+/-- Raw positioned page read. Short reads are a protocol violation
+    (fail closed); `notCommitted` is a fact, not an error (D3). -/
+private def readPageRaw (ps : ProxySession) (page : VA) (engPos : Position) :
+    IO (Option ByteArray) := do
+  match ← ps.request (.readAt engPos page pageSize.toUInt32) with
+  | .piece .ok bytes =>
+    if bytes.size == pageSize.toNat then pure (some bytes)
+    else throw (IO.Error.userError
+      s!"proxy protocol error: PIECE size {bytes.size} ≠ {pageSize.toNat}")
+  | .piece .notCommitted _ => pure none
+  | _ => throw (IO.Error.userError "proxy protocol error: expected PIECE")
+
+/-- Fetch one page into the jigsaw cache for model query `t` (design
+    D2/D3 + Implementation notes): dependency rule (index first), READ_AT
+    at the p+1-clamped position, P3 next-write fallback (the retried piece
+    is cached at the fallback's honest model position), ABSENT point
+    otherwise. -/
+def fetchPage (ps : ProxySession) (page : VA) (t : Position) : IO Unit := do
+  ps.ensurePages [page]
+  let st ← ps.index.get
+  match ← ps.readPageRaw page (fetchPosition t ps.frontier) with
+  | some bytes =>
+    ps.cache.modify fun c => c.insertFetched page t ps.frontier (some bytes) st
+  | none =>
+    if st.lastKnownWrite page t != 0 then
+      match fallbackPosition st page t ps.frontier with
+      | some e2 =>
+        match ← ps.readPageRaw page e2 with
+        | some bytes2 =>
+          ps.cache.modify fun c => c.insertFetched page (e2 - 1) ps.frontier (some bytes2) st
+        | none =>
+          ps.cache.modify fun c => c.insertFetched page t ps.frontier none st
+      | none =>
+        ps.cache.modify fun c => c.insertFetched page t ps.frontier none st
+    else
+      ps.cache.modify fun c => c.insertFetched page t ps.frontier none st
 
 /-- Orderly shutdown: CLOSE frame, then reap (the proxy terminates itself
     on CLOSE). Errors are swallowed — the session is over either way. -/

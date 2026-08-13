@@ -395,6 +395,111 @@ def runAll : IO UInt32 := do
       && keysOf (st1.writesBetween 0x1000 16 1 3) == [(3, 0x1008, 2)]
       && (st1.writesBetween 0x1000 16 3 3).isEmpty)
 
+  -- Trace.Jigsaw cache property checks (plan C6): deterministic random
+  -- (fetch, query) pairs against a pure engine oracle — cached ≡ refetched
+  -- ≡ oracle, incl. absent points, eviction, horizon truncation, p+1 clamp.
+  -- One byte of content per page (spec: one cell per page); decommit-only
+  -- commit changes + one first-commit (NoRecommitWithin stays assumed).
+  let simFrontier : UInt64 := 63
+  let simW : List (UInt64 × UInt64 × UInt8) := [
+    (2, 0, 0xA0), (5, 5, 0xB1), (8, 1, 0xC2), (12, 0, 0xA3), (18, 2, 0xD4),
+    (25, 5, 0xB5), (28, 3, 0xE6), (35, 1, 0xC7), (40, 4, 0xF8), (50, 0, 0xA9),
+    (55, 6, 0x6A), (60, 2, 0xDB), (63, 2, 0xDC)]
+  let simC : List (UInt64 × UInt64 × Bool) := [(10, 3, false), (20, 5, true), (30, 1, false)]
+  let initCommitted (p : UInt64) : Bool := p != 5 && p != 6
+  let committedAt (p : UInt64) (e : UInt64) : Bool :=
+    (simC.filter fun (pos, pg, _) => pg == p && pos ≤ e).foldl (init := initCommitted p)
+      fun _ (_, _, on) => on
+  let modelValue (p t : UInt64) : UInt8 :=
+    (simW.filter fun (pos, pg, _) => pg == p && pos ≤ t).foldl (init := 0) fun _ (_, _, v) => v
+  -- engine read at e ≥ 1 shows modelValue(e - 1) (p+1 write visibility)
+  let engineRead (p : UInt64) (e : UInt64) : Option ByteArray :=
+    if e ≥ 1 && committedAt p e then
+      some (ByteArray.mk (Array.replicate 4096 (modelValue p (e - 1))))
+    else none
+  let pageOfSim (p : UInt64) : UInt64 := p * 0x1000
+  let idxSt := ({} : Trace.IndexState).mergeWindow
+    { vaLo := 0, vaHi := 0x8000, t1 := 0, t2 := simFrontier }
+    (simW.map fun (pos, pg, _) =>
+      ({ pos := pos, va := pg * 0x1000 + 0x100, len := 1 } : Trace.IndexRecord)).toArray
+    simFrontier
+  -- pure mirror of Client.fetchPage
+  let simFetch (c : Trace.Jigsaw) (p t : UInt64) : Trace.Jigsaw :=
+    let page := pageOfSim p
+    match engineRead p (Trace.fetchPosition t simFrontier) with
+    | some b => c.insertFetched page t simFrontier (some b) idxSt
+    | none =>
+      if idxSt.lastKnownWrite page t != 0 then
+        match Trace.fallbackPosition idxSt page t simFrontier with
+        | some e2 =>
+          match engineRead p e2 with
+          | some b2 => c.insertFetched page (e2 - 1) simFrontier (some b2) idxSt
+          | none => c.insertFetched page t simFrontier none idxSt
+        | none => c.insertFetched page t simFrontier none idxSt
+      else c.insertFetched page t simFrontier none idxSt
+  let lcgStep (s : UInt64) : UInt64 := s * 6364136223846793005 + 1442695040888963407
+  let mut cache : Trace.Jigsaw := { capacity := 5 }
+  let mut soundOk := true
+  let mut absentOk := true
+  let mut seed : UInt64 := 0x9E3779B97F4A7C15
+  for _ in [:400] do
+    seed := lcgStep seed
+    let p := seed % 8
+    let t := (seed >>> 8) % 62
+    let page := pageOfSim p
+    if cache.gapAt page t then cache := simFetch cache p t
+    if cache.knownAbsentAt page t then
+      if committedAt p (Trace.fetchPosition t simFrontier) then absentOk := false
+    match cache.bytesAt page t with
+    | some b =>
+      if committedAt p (Trace.fetchPosition t simFrontier) then
+        if !beqBytes b (ByteArray.mk (Array.replicate 4096 (modelValue p t))) then
+          soundOk := false
+    | none => pure ()
+  check ctx "jigsaw CacheSound (400 random fetch/query vs oracle)" soundOk
+  check ctx "jigsaw AbsentSound (absent points truthful)" absentOk
+  check ctx "jigsaw capacity respected under churn" (cache.pieces.size ≤ 5)
+  -- ABSENT is a point interval (D3): page 6 never committed, has writes.
+  let cacheA := simFetch ({ capacity := 16 } : Trace.Jigsaw) 6 10
+  check ctx "jigsaw absent is a point interval"
+    (cacheA.knownAbsentAt 0x6000 10 && !cacheA.knownAbsentAt 0x6000 11
+      && cacheA.bytesAt 0x6000 10 == none)
+  -- P3 fallback: page 5 commits at 20; query at 10 falls back to the next
+  -- write's materialization and is cached at the honest position.
+  let cacheF := simFetch ({ capacity := 16 } : Trace.Jigsaw) 5 10
+  check ctx "jigsaw P3 next-write fallback"
+    (cacheF.knownAt 0x5000 25 && !cacheF.knownAt 0x5000 10
+      && match cacheF.bytesAt 0x5000 25 with
+         | some b => beqBytes b (ByteArray.mk (Array.replicate 4096 (modelValue 5 25)))
+         | none => false)
+  -- p+1 clamp at the frontier: a write exactly at the frontier never
+  -- materializes (documented divergence) — the piece serves engine truth.
+  let cacheC := simFetch ({ capacity := 16 } : Trace.Jigsaw) 2 63
+  check ctx "jigsaw frontier clamp (documented divergence)"
+    (match cacheC.bytesAt 0x2000 63 with
+     | some b => beqBytes b (ByteArray.mk (Array.replicate 4096 (modelValue 2 62)))
+       && modelValue 2 63 != modelValue 2 62
+     | none => false)
+  -- Horizon truncation: interval never outruns the index horizon.
+  let idxP := ({} : Trace.IndexState).mergeWindow
+    { vaLo := 0, vaHi := 0x8000, t1 := 0, t2 := 30 }
+    ((simW.filter fun (pos, _, _) => pos ≤ 30).map fun (pos, pg, _) =>
+      ({ pos := pos, va := pg * 0x1000 + 0x100, len := 1 } : Trace.IndexRecord)).toArray 30
+  let cacheT := ({ capacity := 16 } : Trace.Jigsaw).insertFetched 0 25 30
+    (engineRead 0 (Trace.fetchPosition 25 30)) idxP
+  check ctx "jigsaw horizon truncation (sentinel idx_F + 1)"
+    (match cacheT.pieces[(0 : UInt64)]? with
+     | some pc => pc.lo == 12 && pc.hi == 31
+     | none => false)
+  -- LRU eviction: capacity 4, six pages inserted → two oldest gone.
+  let cacheV := [0, 1, 2, 3, 4, 5].foldl (init := ({ capacity := 4 } : Trace.Jigsaw))
+    fun c p =>
+      c.insertFetched (UInt64.ofNat p * 0x1000) 1 simFrontier
+        (some (ByteArray.mk (Array.replicate 4 0))) idxSt
+  check ctx "jigsaw LRU eviction"
+    (cacheV.pieces.size == 4 && cacheV.gapAt 0 1 && cacheV.gapAt 0x1000 1
+      && cacheV.knownAt 0x5000 1 && cacheV.knownAt 0x4000 1)
+
 
   -- F5: minidump prefix + mutation fuzz over Case/*.dmp fixtures. The
   -- decoder must always *return* (ok or error); a Lean panic/stack overflow

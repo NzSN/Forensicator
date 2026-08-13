@@ -11,6 +11,7 @@ import Forensicator.Model.Trace
 import Forensicator.Spec.Timeline
 import Forensicator.Trace.Proto
 import Forensicator.Trace.Index
+import Forensicator.Trace.Jigsaw
 import Forensicator.Trace.Client
 import Forensicator.Util.Text
 import Forensicator.Parse.Minidump
