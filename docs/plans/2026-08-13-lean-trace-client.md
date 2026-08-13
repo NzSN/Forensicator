@@ -1,5 +1,15 @@
 # Lean trace client (jigsaw proxy) — design + plan (2026-08-13)
 
+**Status: shipped 2026-08-13.** All tasks landed the same day; gap D-B of
+the removal plan is closed. Live-verified against `hostname01.run`
+(435,030 index records == eager `.ttfx`; sampled payloads + 35/35 INITMEM
+regions byte-equal; opt-in live gate green). Notable implementation
+findings beyond the plan text: `IO.FS.Handle.read n` blocks until all `n`
+bytes or EOF (fread semantics — the client reads exact header/body sizes,
+never "up to n"); `Handle.readExact` loops handle short reads; proxy stderr
+is inherited (an undrained pipe would deadlock the proxy); the eager
+`~568,550` estimate was off — the true fixture write count is 435,030.
+
 **Goal:** restore trace consumption in the Lean-only tree by implementing
 the analysis-host side of the lazy trace proxy: spawn `ttfx-proxy.exe`,
 speak the stdio protocol, accumulate the write index + jigsaw cache, and
@@ -164,35 +174,35 @@ Test/Spec.lean                   # codec vectors, cache properties, interval lem
 
 ## Tasks
 
-- [ ] 0. **Spike `IO.Process`** (half a day, unblocks everything): spawn
+- [x] 0. **Spike `IO.Process`** (half a day, unblocks everything): spawn
       `cat` with piped stdio, write/read frames, detect EOF/exit. Confirms
       the toolchain's `IO.Process` API shape (no deps allowed —
       `Init.System.IO` only; `Std` is already used by `Session.lean`).
-- [ ] 1. **`Trace/Proto.lean`** — types + pure total codec + golden frame
+- [x] 1. **`Trace/Proto.lean`** — types + pure total codec + golden frame
       vectors in `Test/Spec.lean`. Verify: `lake build`, guard suite green.
-- [ ] 2. **`Trace/Client.lean` handshake + INFO → skeleton** — spawn,
+- [x] 2. **`Trace/Client.lean` handshake + INFO → skeleton** — spawn,
       HELLO/HELLO_ACK (version check, frontier), INFO → `Trace` skeleton
       (threads/events with Timeline-invariant anomalies). Session:
       `load --proxy` constructs `Target.trace`; banner shows lazy mode.
       Verify: manual smoke against the real proxy via interop.
-- [ ] 3. **`Trace/Index.lean`** — WRITES_INDEX windows, per-page horizons,
+- [x] 3. **`Trace/Index.lean`** — WRITES_INDEX windows, per-page horizons,
       `mergeIndex` (dedup by `(pos, va, len)`, `index window gap` +
       beyond-frontier anomalies), fan-out limit → full-space window for
       wide ranges. `WriteRecord.len` (C2) + guard-suite repairs.
-- [ ] 4. **`Trace/Jigsaw.lean`** — cache with validity intervals, ABSENT
+- [x] 4. **`Trace/Jigsaw.lean`** — cache with validity intervals, ABSENT
       points, LRU cap, p+1 clamped fetch positions, next-write fallback
       for P3 pages. Cache property checks green.
-- [ ] 5. **Two-phase commands** — `writes` payload resolution; two-phase
+- [x] 5. **Two-phase commands** — `writes` payload resolution; two-phase
       snapshot (D4 closure derivation + batch fetch + pure materialize);
       `analyze`/`inspect` at cursor. Verify: scripted shell session over
       the real proxy reproduces known fixture facts (writes counts,
       closure samples from the Implementation notes).
-- [ ] 6. **Theorems** — validity-interval arithmetic + `mergeIndex`
+- [x] 6. **Theorems** — validity-interval arithmetic + `mergeIndex`
       invariants (`Spec/JigSaw.lean`); `sorry`-free. Verify: `lake build`.
-- [ ] 7. **Opt-in live gate** — env-gated proxy check in
+- [x] 7. **Opt-in live gate** — env-gated proxy check in
       `scripts/conformance-lean.sh` (skip by default; requires
       `FORENSICATOR_PROXY_EXE` + fixture trace on windows-dev).
-- [ ] 8. **Docs** — AGENTS.md (gap D-B note flips to shipped; commands
+- [x] 8. **Docs** — AGENTS.md (gap D-B note flips to shipped; commands
       gain `shell --proxy`), `docs/arch/timeline.md` (loading-path section
       becomes real), `docs/arch/cli.md` (trace group un-pended),
       `docs/arch/verification.md` (opt-in proxy check).
