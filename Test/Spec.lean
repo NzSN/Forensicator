@@ -229,6 +229,16 @@ def runAll : IO UInt32 := do
     (tr.threadAt 7 2 == some { start := 0, stop := none }
       && tr.threadAt 8 2 == none)
 
+  -- WriteRecord.len (plan C2): metadata-only index entries cover by `len`,
+  -- payload-backed records by `data.size`; byteAt fails closed on metadata.
+  let mrec : Model.WriteRecord := { pos := 5, va := 0x1000, data := ByteArray.empty, len := 8 }
+  check ctx "write record len coverage (metadata-only)"
+    (mrec.endVaNat == 0x1008 && decide (mrec.covers 0x1007) && !decide (mrec.covers 0x1008)
+      && mrec.byteAt 0x1004 == none)
+  let pay : Model.WriteRecord := { pos := 5, va := 0x1000, data := ba [0xAA, 0xBB] }
+  check ctx "write record len = 0 keeps eager semantics"
+    (pay.endVaNat == 0x1002 && pay.byteAt 0x1001 == some 0xBB)
+
   -- Trace.Proto golden frame vectors — byte-pinned against the proxy's
   -- proto.rs unit tests (the two codecs are mirrored by hand, same
   -- discipline as the Rust client's trace_client.rs).

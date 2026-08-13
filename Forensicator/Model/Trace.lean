@@ -14,16 +14,21 @@ namespace Forensicator.Model
 def TTFX_STREAM_TYPE : UInt32 := 0x54465854
 
 /-- One recorded memory write (Timeline.tla wr_pos/wr_addr/wr_val generalized
-    to a byte range). -/
+    to a byte range). `len = 0` (eager): the record is payload-backed and
+    `endVaNat` is `va + data.size`. `len ≠ 0` (lazy index entry): the record
+    is metadata-only — `endVaNat` is `va + len`, `data` is empty and
+    `byteAt` fails closed (`none`: unknown until fetched). -/
 structure WriteRecord where
   pos : Position
   va : VA
   data : ByteArray
+  len : UInt64 := 0
   provenance : Provenance := {}
   deriving Inhabited
 
 /-- End VA as Nat (no saturation). -/
-def WriteRecord.endVaNat (w : WriteRecord) : Nat := w.va.toNat + w.data.size
+def WriteRecord.endVaNat (w : WriteRecord) : Nat :=
+  w.va.toNat + if w.len == 0 then w.data.size else w.len.toNat
 
 /-- The write covers `va` (w.va ≤ va < endVa). -/
 def WriteRecord.covers (w : WriteRecord) (va : VA) : Prop :=
