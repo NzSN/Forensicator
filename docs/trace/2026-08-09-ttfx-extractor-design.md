@@ -8,7 +8,7 @@
 Date: 2026-08-09
 Status: complete (2026-08-09) — all sections implemented; conformance harness
 green (`scripts/conformance.sh`: extract → WSL decode, zero anomalies)
-Format contract: `docs/superpowers/specs/2026-08-07-ttfx-format-spec.md` (v1)
+Format contract: `docs/trace/2026-08-07-ttfx-format-spec.md` (v1)
 Behavioral contract: `specs/Timeline.tla` (Apalache-verified)
 Target host directory: `D:\Repositories\TTFX` (Windows; exists, empty)
 

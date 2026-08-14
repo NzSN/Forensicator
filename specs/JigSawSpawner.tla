@@ -3,7 +3,7 @@ EXTENDS Timeline
 
 \* ── JigSawSpawner — the lazy trace proxy's client core ───────────────────
 \*
-\* Formal counterpart of docs/superpowers/specs/2026-08-12-lazy-trace-proxy
+\* Formal counterpart of docs/trace/2026-08-12-lazy-trace-proxy
 \* -design.md. Timeline.tla models the recorded trace (append-only write
 \* log, frontier, cursor). This module models what the *analysis host* knows
 \* and caches when memory is served lazily by a Windows-side proxy instead

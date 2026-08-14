@@ -21,7 +21,7 @@ through the lazy proxy: `shell --proxy <trace.run>` (or `load --proxy` from
 an existing session) spawns `ttfx-proxy.exe` (protocol v1,
 `Forensicator/Trace/`), performs the HELLO handshake, and serves the eager
 skeleton + lazy memory (design:
-`docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md`). Transport:
+`docs/trace/2026-08-12-lazy-trace-proxy-design.md`). Transport:
 `FORENSICATOR_PROXY_EXE` (local interop path) or
 `FORENSICATOR_PROXY_SSH=<host>` (the binary stdio protocol rides the ssh
 pipes; `FORENSICATOR_PROXY_EXE` then names the *remote* exe). v1 is blocking

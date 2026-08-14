@@ -8,7 +8,7 @@
 Date: 2026-08-08
 Status: landed (2026-08-09, with adjustments — see "Landed adjustments" below)
 Spec: `specs/Snapshot.tla` (Apalache-verified, commit bd0736a)
-Predecessor: `docs/superpowers/specs/2026-08-07-timeline-design.md`
+Predecessor: `docs/trace/2026-08-07-timeline-design.md`
 
 ## Landed adjustments (2026-08-09)
 
@@ -301,4 +301,4 @@ machinery is unaffected.
 | `forensicator-core/tests/mbt_snapshot.rs` | stub → full `SnapshotComputer` |
 | `AGENTS.md` | `mbt_snapshot.rs` loses its "(spec-only stub)" tag |
 
-Follow-up: a plan in `docs/superpowers/plans/` checkboxing Components A→C.
+Follow-up: a plan in `docs/plans/` checkboxing Components A→C.

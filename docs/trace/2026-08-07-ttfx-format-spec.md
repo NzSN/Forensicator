@@ -8,7 +8,7 @@
 ## Status
 Draft, v1. Matches `forensicator-core/src/parse/ttfx.rs` (`TTFX_VERSION = 1`).
 Formal behavioral contract: `specs/Timeline.tla`. Design rationale:
-`docs/superpowers/specs/2026-08-07-timeline-design.md`.
+`docs/trace/2026-08-07-timeline-design.md`.
 
 ## 1. Purpose
 

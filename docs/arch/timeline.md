@@ -2,7 +2,7 @@
 
 Spec: `specs/Timeline.tla` (Apalache-verified); mechanized theorems in
 `Forensicator/Spec/Timeline.lean` and `Forensicator/Model/Trace.lean`.
-Design: `docs/superpowers/specs/2026-08-07-timeline-design.md`.
+Design: `docs/trace/2026-08-07-timeline-design.md`.
 Code: `Forensicator/Model/Trace.lean` (model + views + `snapshot`).
 
 **Pivot state (2026-08-13):** the eager `.ttfx` v1 path is **removed**
@@ -10,7 +10,7 @@ Code: `Forensicator/Model/Trace.lean` (model + views + `snapshot`).
 `docs/plans/2026-08-13-remove-eager-trace-path.md`), and trace consumption
 returned the same day as the **shipped** lazy jigsaw proxy client (plan:
 `docs/plans/2026-08-13-lean-trace-client.md`; design authority:
-`docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md`, D1–D9 +
+`docs/trace/2026-08-12-lazy-trace-proxy-design.md`, D1–D9 +
 Implementation notes; loading-path spec `specs/JigSawSpawner.tla`,
 Apalache-verified). A resident Windows proxy (`ttfx-proxy.exe`,
 `D:\Codebase\JigsawSpawner`) serves positioned memory on demand; the Lean

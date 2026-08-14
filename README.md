@@ -78,4 +78,4 @@ scripts/                # conformance-lean.sh (gate), capture-goldens.sh, build-
 specs/                  # TLA+ (Apalache-checked): Timeline, Snapshot, JigSawSpawner, …
 ```
 
-Design authority for the trace path: `docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md`; client plan: `docs/plans/2026-08-13-lean-trace-client.md`; migration record: `docs/superpowers/plans/2026-08-10-lean4-migration.md`.
+Design authority for the trace path: `docs/trace/2026-08-12-lazy-trace-proxy-design.md`; client plan: `docs/plans/2026-08-13-lean-trace-client.md`; migration record: `docs/plans/2026-08-10-lean4-migration.md`.

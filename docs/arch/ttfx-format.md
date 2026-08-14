@@ -4,9 +4,9 @@
 > reader/writer, fixture, or CLI surface remains in the tree. This document
 > is kept for the record and as the seed for a possible v2
 > jigsaw-persistence format (lazy-proxy design §D8 `DUMP CACHE`,
-> `docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md`).
+> `docs/trace/2026-08-12-lazy-trace-proxy-design.md`).
 
-Normative contract: `docs/superpowers/specs/2026-08-07-ttfx-format-spec.md`.
+Normative contract: `docs/trace/2026-08-07-ttfx-format-spec.md`.
 Behavioral contract: `specs/Timeline.tla`. Reader/writer (removed
 2026-08-13): `Forensicator/Parse/Ttfx.lean`. Producer: the Windows extractor
 (`D:\Repositories\TTFX` — superseded by the lazy proxy design). This page is
@@ -230,7 +230,7 @@ exactly the byte the two writes touched.
 
 The Windows extractor (`ttfx-extract`) emits this format from TTDReplay via
 the dbgeng data model; its practical caveats are documented in
-`docs/superpowers/specs/2026-08-09-ttfx-extractor-design.md`: TTD sentinel
+`docs/trace/2026-08-09-ttfx-extractor-design.md`: TTD sentinel
 positions (`major ≥ 0xFFFFFFFF00000000`) are dropped; >8-byte writes keep
 their truthful low 8 bytes; INITMEM is a referenced-closure capture
 (engine cannot enumerate the address map on TTD targets); CALLS require

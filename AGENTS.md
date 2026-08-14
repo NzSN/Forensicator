@@ -80,7 +80,7 @@ default `/mnt/d/…/release/ttfx-proxy.exe`) or `FORENSICATOR_PROXY_SSH=<host>`
 `specs/Timeline.tla` is the formal contract (Apalache-verified);
 `specs/JigSawSpawner.tla` specifies the lazy loading path (Apalache-verified,
 full run green 2026-08-13). Design authority:
-`docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md` (D1–D9 +
+`docs/trace/2026-08-12-lazy-trace-proxy-design.md` (D1–D9 +
 Implementation notes). The trace model + views + theorems stay in
 `Forensicator/Model/Trace.lean` / `Forensicator/Spec/Timeline.lean`
 (`valueAt_agrees_with_fold`, `snapshot_isSome`). The eager `.ttfx` v1
@@ -140,11 +140,10 @@ excluded from git.
 
 ## Development approach
 
-Superpowers-driven: plans in `docs/plans/` and `docs/superpowers/plans/`,
-designs in `docs/superpowers/specs/`. Commits follow plan task checkboxes.
+Superpowers-driven: plans in `docs/plans/`, designs in topic folders under `docs/` (`foundation/`, `analyzers/`, `trace/`, `migration/`, `workflow/`). Commits follow plan task checkboxes.
 
 ## Gotchas
 
-- `.gitignore` also excludes `**/specs/`, `**/states/`, `**/_apalache-out` (TLA+ build artifacts) — note `specs/` at repo root is force-added/tracked regardless
+- `.gitignore` excludes `**/states/` and `**/_apalache-out` (TLA+ build artifacts); there is no `**/specs/` pattern, and `specs/` at the repo root is tracked regardless
 - `.vscode/settings.json` contains a `DEEPSEEK_API_KEY` env — do not commit
 - The guard suite's `--emit` fixture route died with the `.ttfx` encoder; regenerate goldens only via `scripts/capture-goldens.sh` from a known-good build

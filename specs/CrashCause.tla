@@ -9,7 +9,7 @@ EXTENDS Integers, Sequences, FiniteSets
 \* highest-confidence firing as the verdict — or UNKNOWN when nothing fired.
 \*
 \* Mirrors analyzer/cause.rs. See
-\* docs/superpowers/specs/2026-08-04-crash-cause-design.md.
+\* docs/analyzers/2026-08-04-crash-cause-design.md.
 
 \* Model-checking bound (verification artifact, not a format limit).
 MaxRules == 10

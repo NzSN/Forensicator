@@ -19,7 +19,7 @@ that is the only carried-forward knowledge, and it is enough: the future
 Lean client is built from the design doc + `specs/JigSawSpawner.tla`, not
 from Rust code.
 
-**Design authority:** `docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md`
+**Design authority:** `docs/trace/2026-08-12-lazy-trace-proxy-design.md`
 (D1–D9 + Implementation notes). Loading-path spec: `specs/JigSawSpawner.tla`
 (Apalache-verified to depth 10).
 
@@ -84,7 +84,7 @@ from Rust code.
   worktree is already gone; the uncommitted lazy work is discarded, its
   findings recorded in the design doc's Implementation notes).
   `origin/rust-backup` — the last Rust artifact — is deleted in Task 1.
-  Historical Rust-era docs under `docs/superpowers/` (migration plan/design,
+  Historical Rust-era docs under `docs/plans/` and the design topic folders under `docs/` (migration plan/design,
   extractor design, lazy-proxy plan/design) stay as dated history; active
   docs (`AGENTS.md`, `docs/arch/`) are scrubbed.
 

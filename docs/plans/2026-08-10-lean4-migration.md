@@ -7,7 +7,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Port Forensicator to a standalone Lean 4 package at `~/Repos/Forensicator_Lean/` per `docs/superpowers/specs/2026-08-10-lean4-migration-design.md`: TLA+ specs become proved Lean theorems over the *executable* code; the Rust repo serves as golden oracle via a JSON-diff conformance gate.
+**Goal:** Port Forensicator to a standalone Lean 4 package at `~/Repos/Forensicator_Lean/` per `docs/migration/2026-08-10-lean4-migration-design.md`: TLA+ specs become proved Lean theorems over the *executable* code; the Rust repo serves as golden oracle via a JSON-diff conformance gate.
 
 **Architecture:** One Lake package, no dependencies. `Spec/` (mechanized TLA+ with theorems) → `Parse/` (total cursor-monad decoders) → `Model/` (Dump/AddressSpace/Trace) → `Analyzer/` (pure parity ports) → `Main.lean` CLI. FFI shims only for disasm (iced-x86) and PDB symbolizer.
 

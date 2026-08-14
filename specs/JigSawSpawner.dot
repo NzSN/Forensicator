@@ -1,0 +1,151 @@
+// JigSawSpawner.tla — lazy trace proxy client core (specs/JigSawSpawner.tla).
+// State machine + data-flow diagram: Timeline state | proxy truth | client.
+// Render:  dot -Tsvg specs/JigSawSpawner.dot -o specs/JigSawSpawner.svg
+digraph jigsaw {
+    graph  [rankdir=TB, splines=true, nodesep=0.35, ranksep=0.5, bgcolor=white,
+            fontname="Helvetica", fontsize=11, label="JigSawSpawner — lazy trace proxy client core (TLA+)",
+            labelloc=t, labeljust=l, pad=0.4];
+    node   [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+            fillcolor=white, color="#333333", penwidth=1.2];
+    edge   [fontname="Helvetica", fontsize=10, color="#555555"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // State owners
+    // ──────────────────────────────────────────────────────────────────
+    subgraph cluster_timeline {
+        label="Timeline state (Timeline.tla — the recorded trace)";
+        style="rounded,filled"; color="#c9d6ef"; fillcolor="#eef3fc";
+        timeline [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>init_mem</B> · contents at position 0</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>wr_pos / wr_addr / wr_val</B> · append-only write log</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>ev_pos / ev_kind</B> · event log</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>frontier</B> · record head (0..=frontier exist)</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>cursor</B> · current query position</TD></TR>
+            <TR><TD ALIGN="LEFT">threads · calls</TD></TR>
+        </TABLE>>];
+    }
+
+    subgraph cluster_proxy {
+        label="Proxy / engine — the truth oracle (no region enumeration, P3/P0′)";
+        style="rounded,filled"; color="#b7d7c3"; fillcolor="#eef7f1";
+        proxy [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>init_committed</B> : 1..MaxAddr → BOOL · committed at position 0</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>cm_pos / cm_page / cm_on</B> · commit-change log (recorded steps)</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>CmAt(p, t)</B> · last commit change ≤ t (engine truth)</TD></TR>
+            <TR><TD ALIGN="LEFT">reads answer <B>ValueAt(p, t)</B> if committed, else <B>ABSENT</B></TD></TR>
+        </TABLE>>];
+    }
+
+    subgraph cluster_client {
+        label="Analysis host (client)";
+        style="rounded,filled"; color="#d9c9a3"; fillcolor="#fdf8ec";
+        subgraph cluster_index {
+            label="Write index (D1) — metadata-only, fetched per page";
+            style="rounded,filled"; color="#e2d49e"; fillcolor="#fef8e3";
+            index [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+                <TR><TD ALIGN="LEFT"><B>idx_known[p]</B> · page index fetched</TD></TR>
+                <TR><TD ALIGN="LEFT"><B>idx_F[p]</B> · horizon: index complete for positions ≤ idx_F[p]</TD></TR>
+                <TR><TD ALIGN="LEFT"><B>LastKnownWrite(p, t)</B> · last write ≤ t (known)</TD></TR>
+                <TR><TD ALIGN="LEFT"><B>NextKnownWrite(p, t)</B> · first write &gt; t; sentinel <B>idx_F[p]+1</B></TD></TR>
+            </TABLE>>];
+        }
+        subgraph cluster_cache {
+            label="Jigsaw cache (D2/D3) — one piece per page";
+            style="rounded,filled"; color="#ecc9ae"; fillcolor="#fdf1e6";
+            cache [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+                <TR><TD ALIGN="LEFT"><B>cache_state[p]</B> ∈ {EMPTY, PRESENT, ABSENT}</TD></TR>
+                <TR><TD ALIGN="LEFT"><B>cache_val[p]</B> · the page&apos;s byte (PRESENT)</TD></TR>
+                <TR><TD ALIGN="LEFT"><B>validity interval</B> [cache_lo[p], cache_hi[p] − 1]</TD></TR>
+                <TR><TD ALIGN="LEFT">ABSENT = point interval [t, t] — absence is a fact, not an error</TD></TR>
+            </TABLE>>];
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Actions
+    // ──────────────────────────────────────────────────────────────────
+    act_init [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>JInit</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">Timeline&apos;s Init</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">init_committed : 1..MaxAddr → BOOL</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">cm log empty · idx_known=FALSE · idx_F=0</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">cache EMPTY (lo=0, hi=1)</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_trace [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>TraceStep</B> = Next ∧ UNCHANGED jvars</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">Timeline records (writes / events / threads / cursor)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">jigsaw untouched</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_commit [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>CommitStep</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: frontier &lt; MaxPos</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">append (frontier+1, p, on) to commit log</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">frontier&apos; = frontier + 1</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">jigsaw untouched</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_fetchidx [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>FetchIndex(p)</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: ¬idx_known[p] ∨ idx_F[p] &lt; frontier</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">idx_known[p]&apos; = TRUE</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">idx_F[p]&apos; = frontier&nbsp;&nbsp;<I>(horizon refresh)</I></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">append-only ⇒ known facts stay true</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_fetchpage [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>FetchPage(p)</B> — the D2 dependency rule</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: idx_known[p] ∧ cursor ≤ idx_F[p]</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">if <B>CmAt(p, cursor)</B>:&nbsp;&nbsp;PRESENT</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">&nbsp;&nbsp;cache_val[p] = <B>ValueAt(p, cursor)</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">&nbsp;&nbsp;lo = LastKnownWrite(p, cursor)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">&nbsp;&nbsp;hi = NextKnownWrite(p, cursor) &nbsp;→ [lo, hi−1]</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">else:&nbsp;&nbsp;ABSENT, point interval [cursor, cursor+1)</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_evict [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>Evict(p)</B> — pure LRU</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: cache_state[p] ≠ EMPTY</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">cache_state[p]&apos; = EMPTY</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">retention never affects correctness (D2)</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // Effects (solid) and reads (dashed)
+    // ──────────────────────────────────────────────────────────────────
+    act_init -> timeline   [style=solid,  color="#666666"];
+    act_init -> proxy      [style=solid,  color="#666666"];
+    act_init -> index      [style=solid,  color="#666666"];
+    act_init -> cache      [style=solid,  color="#666666"];
+
+    act_trace -> timeline  [style=solid,  color="#4a7db1", label="records"];
+
+    act_commit -> proxy    [style=solid,  color="#3d8b5a", label="cm log append"];
+    act_commit -> timeline [style=dashed, color="#3d8b5a", label="frontier+1"];
+
+    act_fetchidx -> index  [style=solid,  color="#b08a1e", label="idx_known, idx_F"];
+    act_fetchidx -> timeline [style=dashed, color="#b08a1e", label="reads frontier"];
+
+    act_fetchpage -> cache     [style=solid,  color="#c96a1e", label="piece: val + [lo, hi−1]"];
+    act_fetchpage -> index     [style=dashed, color="#c96a1e", label="reads index (bounds)"];
+    act_fetchpage -> proxy     [style=dashed, color="#c96a1e", label="probe: CmAt / ValueAt"];
+    act_fetchpage -> timeline  [style=dashed, color="#c96a1e", label="reads cursor"];
+
+    act_evict -> cache     [style=solid,  color="#c96a1e", label="state → EMPTY"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // Invariants
+    // ──────────────────────────────────────────────────────────────────
+    inv [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+        <TR><TD ALIGN="LEFT"><B>JigSawInvariant</B> = JigSawTypes ∧ CacheSound ∧ AbsentSound ∧ HorizonBounded</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>CacheSound</B> (the money property): PRESENT ∧ lo ≤ t ≤ hi−1 ∧ CmAt(p,t) ⇒ cache_val[p] = ValueAt(p,t)</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>AbsentSound</B>: ABSENT ∧ t ∈ interval ⇒ ¬CmAt(p,t)</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>HorizonBounded</B>: PRESENT ⇒ idx_known[p] ∧ hi ≤ idx_F[p]+1 ∧ lo ≤ hi−1</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#a33"><B>NoRecommitWithin</B> — stated, <U>not conjoined, not checked</U> (KNOWN GAP):</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#a33">no commit change to p inside (lo, hi−1] — decommit→recommit zero-fills</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#a33">invisibly; mitigation candidate: proxy N-mask watchpoint pass</TD></TR>
+    </TABLE>>, style="rounded,dashed,filled", fillcolor="#fdf3f3", color="#cc6666"];
+
+    cache -> inv [style=dotted, color="#888888"];
+}

@@ -3123,4 +3123,4 @@ Run: `git add -A; git commit -m "test(mbt): update MBT tests for 2-stage pluggab
 
 <｜｜DSML｜｜tool_calls>
 <｜｜DSML｜｜invoke name="read">
-<｜｜DSML｜｜parameter name="filePath" string="true">D:\Codebase\Forensicator\docs\superpowers\plans\2026-07-01-pluggable-s2.md
+<｜｜DSML｜｜parameter name="filePath" string="true">D:\Codebase\Forensicator\docs\plans\2026-07-01-pluggable-s2.md

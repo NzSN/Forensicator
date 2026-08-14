@@ -5,7 +5,7 @@
 > `docs/arch/README.md`). Rust references below (`forensicator-core/src/…`,
 > `cargo`, `tests/mbt_*`) are historical and kept as written for the record.
 
-Implements `docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md`
+Implements `docs/trace/2026-08-12-lazy-trace-proxy-design.md`
 in the Rust worktree (client) + a new Windows crate `D:\Codebase\JigsawSpawner`
 (proxy — the design's `D:\Repositories\TTFX` path had drifted; the proxy
 landed as a standalone crate reusing the TTFX backend code).

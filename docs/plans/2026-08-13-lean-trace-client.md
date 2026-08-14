@@ -18,7 +18,7 @@ cursor work again. Closes gap D-B of
 `docs/plans/2026-08-13-remove-eager-trace-path.md`.
 
 **Design authority:**
-`docs/superpowers/specs/2026-08-12-lazy-trace-proxy-design.md` (D1–D9 +
+`docs/trace/2026-08-12-lazy-trace-proxy-design.md` (D1–D9 +
 Implementation notes — p+1 write visibility, P3 absent pages,
 page-lifecycle divergence, transport). Loading-path spec:
 `specs/JigSawSpawner.tla` (Apalache full run OK, depth 12). There is no
