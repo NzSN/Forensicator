@@ -58,12 +58,12 @@ private def supplement (dump : Dump) (space : AddressSpace) (path : String) :
 
 /-- Open a dump or trace (magic sniff). Trace support is proxy-only since
     the .ttfx v1 format was removed (2026-08-13); a `.ttfx` fails here with
-    an explicit error and never falls through to the minidump decoder. The
-    future Lean client constructs `.trace` sessions from the proxy. -/
+    an explicit error and never falls through to the minidump decoder.
+    `openProxy` (below) constructs `.trace` sessions from the proxy. -/
 def Session.open (path : String) (symbols : Option String) : IO Session := do
   let head ← IO.FS.withFile path .read fun h => h.read 4
   if head.size ≥ 4 && readU32leAt head 0 == 0x58465454 then
-    throw (IO.Error.userError "ttfx removed: trace support is proxy-only (the Lean client is a follow-up)")
+    throw (IO.Error.userError "ttfx removed: trace support is proxy-only (use load --proxy / shell --proxy)")
   else
     let data ← IO.FS.readBinFile path
     match Minidump.fromBytes data with
