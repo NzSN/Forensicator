@@ -1,11 +1,9 @@
 # Forensicator — AGENTS.md
 
-> **Repo layout (2026-08-13):** Lean-only. The Rust implementation is gone
-> entirely — worktree, local branch, and `origin/rust-backup` all deleted;
-> nothing Rust remains in play. The eager `.ttfx` v1 trace path is removed
-> the same day; trace support returned the same day as the proxy-based Lean
-> client (plan `docs/plans/2026-08-13-lean-trace-client.md`, tasks 0–8 all
-> landed). See `docs/plans/2026-08-13-remove-eager-trace-path.md`.
+> **Repo layout (2026-08-13):** Lean-only. No Rust anywhere (worktree,
+> branch, `origin/rust-backup` all deleted — do not reintroduce). The eager
+> `.ttfx` v1 trace path is removed; trace support is the proxy-based Lean
+> client (`docs/plans/2026-08-13-lean-trace-client.md`, shipped same day).
 
 Lean 4 (v4.33.0) package for forensic analysis of Windows x64 minidumps.
 Custom hand-written parser, pointer graph inference, structure recovery,
@@ -21,6 +19,9 @@ crash-cause diagnosis — focused on Electron/Chromium (V8) crashes.
 | Live proxy gate (opt-in) | `FORENSICATOR_PROXY_RUN=<trace.run> FORENSICATOR_PROXY_SSH=windows-dev ./scripts/conformance-lean.sh` |
 | Static binary | `./scripts/build-static.sh` |
 | TLA+ model check | `apalache-mc check --features=no-rows --config=<Spec>.cfg specs/<Spec>.tla` |
+
+The gate takes ~8 min (1.2 GB fulldump analyze checks) — not hung. The
+guard suite is all-or-nothing (no per-check filter).
 
 ## Architecture
 
@@ -87,8 +88,8 @@ decoder/encoder/fixture were removed 2026-08-13; `docs/arch/ttfx-format.md`
 is historical (kept for a possible v2 jigsaw-persistence format, design §D8).
 
 Gap D-B closed (2026-08-13): the Lean client is shipped —
-`Forensicator/Trace/Proto.lean` (pure frame codec, golden vectors
-byte-pinned against the proxy's `proto.rs` tests), `Trace/Index.lean`
+`Forensicator/Trace/Proto.lean` (pure frame codec, byte-pinned golden
+vectors in `Test/Spec.lean`), `Trace/Index.lean`
 (windowed write index, per-page horizons, `mergeWindow` dedup/gap
 anomalies), `Trace/Jigsaw.lean` (page cache with validity intervals, ABSENT
 points, LRU cap, p+1 clamp, P3 next-write fallback), `Trace/Client.lean`
@@ -139,9 +140,8 @@ excluded from git.
 
 ## Development approach
 
-Superpowers-driven: plans in `docs/superpowers/plans/` (active removal plan
-in `docs/plans/`), designs in `docs/superpowers/specs/`. Commits follow plan
-task checkboxes.
+Superpowers-driven: plans in `docs/plans/` and `docs/superpowers/plans/`,
+designs in `docs/superpowers/specs/`. Commits follow plan task checkboxes.
 
 ## Gotchas
 
