@@ -507,11 +507,16 @@ ReplayFwd(c, dest) ==
                      ELSE IF eHit <= pHit THEN eHit ELSE pHit
        IN IF target <= dest
           THEN /\ cur_pos' = [cur_pos EXCEPT ![c] = target]
+               \* reason must name a kind that genuinely hit at the stop
+               \* position: set membership, not extremal-value equality
+               \* (MinPos({}) = MaxPos+1 is unreachable here, so equality
+               \* was sentinel-safe in this direction; membership is the
+               \* honest form and the only safe one backward — see ReplayBwd).
                /\ \E reason \in {r \in {"MEMORY_WATCHPOINT", "EXCEPTION",
                                         "POSITION_WATCHPOINT"} :
-                      (r = "MEMORY_WATCHPOINT" => target = wHit)
-                      /\ (r = "EXCEPTION" => target = eHit)
-                      /\ (r = "POSITION_WATCHPOINT" => target = pHit)} :
+                      (r = "MEMORY_WATCHPOINT" => target \in WatchHitsFwd(c, dest))
+                      /\ (r = "EXCEPTION" => target \in ExcHitsFwd(c, dest))
+                      /\ (r = "POSITION_WATCHPOINT" => target \in PwpHitsFwd(c, dest))} :
                     cur_stop' = [cur_stop EXCEPT ![c] = reason]
           ELSE /\ cur_pos' = [cur_pos EXCEPT ![c] = dest]
                /\ cur_stop' = [cur_stop EXCEPT ![c] =
@@ -538,11 +543,18 @@ ReplayBwd(c, dest) ==
        IN IF target >= dest /\ (WatchHitsBwd(c, dest) \cup ExcHitsBwd(c, dest)
                                 \cup PwpHitsBwd(c, dest)) # {}
           THEN /\ cur_pos' = [cur_pos EXCEPT ![c] = target]
+               \* reason must name a kind that genuinely hit at the stop
+               \* position: set membership, NOT extremal-value equality.
+               \* MaxPosOf({}) = 0 collides with real position 0 — the
+               \* 2026-08-18 length-6 counterexample: a genuine
+               \* POSITION_WATCHPOINT hit at 0 made wHit = eHit = pHit = 0,
+               \* and "target = wHit" held spuriously, licensing a bogus
+               \* MEMORY_WATCHPOINT stop with no memory watchpoint armed.
                /\ \E reason \in {r \in {"MEMORY_WATCHPOINT", "EXCEPTION",
                                         "POSITION_WATCHPOINT"} :
-                      (r = "MEMORY_WATCHPOINT" => target = wHit)
-                      /\ (r = "EXCEPTION" => target = eHit)
-                      /\ (r = "POSITION_WATCHPOINT" => target = pHit)} :
+                      (r = "MEMORY_WATCHPOINT" => target \in WatchHitsBwd(c, dest))
+                      /\ (r = "EXCEPTION" => target \in ExcHitsBwd(c, dest))
+                      /\ (r = "POSITION_WATCHPOINT" => target \in PwpHitsBwd(c, dest))} :
                     cur_stop' = [cur_stop EXCEPT ![c] = reason]
           ELSE /\ cur_pos' = [cur_pos EXCEPT ![c] = dest]
                /\ cur_stop' = [cur_stop EXCEPT ![c] =

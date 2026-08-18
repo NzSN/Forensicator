@@ -59,13 +59,24 @@ several comment inaccuracies, all fixed in the working tree.
   omissions bullet, corrected docs-tree divergence list (EventMask page
   exonerated; SetPosition-bool and NewCursor-signature bugs added),
   STL-veneer out-of-scope note.
-- [ ] 3. **Run the Apalache full check** — `apalache-mc check
+- [~] 3. **Run the Apalache full check** — `apalache-mc check
   --features=no-rows --config=specs/ReplayApi.cfg specs/ReplayApi.tla`
   (TimelineInvariant + ReplayApiInvariant). The post-edit run was
   cancelled at commit time (2026-08-15) still in flight — re-run from
   scratch. If it surfaces a counterexample, fix the mask-gating
   interaction and re-run. Expected state-space growth is modest (mask
   domain 2 → 8 subsets per cursor).
+  - **2026-08-18 addendum:** staged re-verification (length 6 first).
+    The length-6 full-config run found a post-re-pin counterexample at
+    State 6 in `WatchStopsFirst` (1h42m): a backward replay to
+    `dest = 0` stopped on a genuine POSITION_WATCHPOINT hit at
+    position 0 but reported MEMORY_WATCHPOINT — `MaxPosOf({}) = 0`
+    (the empty-set sentinel) collides with real position 0, so the
+    empty `WatchHitsBwd`/`ExcHitsBwd` spuriously satisfied
+    `target = wHit`/`target = eHit`. Fixed by selecting the stop
+    reason by set membership (`target ∈ WatchHitsBwd` etc.) in both
+    replay directions. Length-6 re-run in flight; full length-10 run
+    follows once depth 6 is green.
 - [-] 4. **Fast-config smoke pass** — deferred: subsumed by the full
   run (task 3 checks ReplayApiInvariant + TimelineInvariant); the fast
   config remains for future quick regression runs.
