@@ -13,7 +13,7 @@
 | `CrashCause.tla` | Verdict discipline (classify → fire rules → decide; verdicts justified by fired rules) | Apalache |
 | `Timeline.tla` | TTD trace semantics: ordered logs, cursor bounds, snapshot consistency, call nesting | Apalache (depth 10) |
 | `Snapshot.tla` | The Timeline→Model link (`ModelAt(t)`, `SnapshotValid`, `SnapshotsAreModels`) | Apalache (`--features=no-rows`) |
-| `JigSawSpawner.tla` | Lazy-proxy loading path: write-index horizons, jigsaw cache validity, `CacheSound`/`AbsentSound` | Apalache (depth 10, `--features=no-rows`) |
+| `JigSawSpawner.tla` | Lazy-proxy loading path over the ReplayApi engine surface (2026-08-18 refactor; the dbgeng-oracle revision was Apalache depth-10 green): watchpoint-scan index horizons, jigsaw cache validity, `CacheSound`/`AbsentSound` | Apalache length-1 smoke only — re-verification deferred (decision 2026-08-18) |
 | `ReplayApi.tla` | The public TTD Replay API as an engine surface (pinned to the real v0.9.5 NuGet header): independent cursors, policy-driven memory queries (`QueryHonest`, `ExactAtCursor`), range provenance (`RangeFresh`), EventMask-gated watchpoint replay scans (`WatchStopsFirst`/`PwpStopsFirst`/`EventStopsFirst` with mask membership) | Apalache (`--features=no-rows`; NoError to length 6, depth 8 clean pre-fix; EventMask-fix re-check in flight 2026-08-15) |
 
 Conventions: tiny model-checking bounds, flat parallel sequences, `@type`
