@@ -75,8 +75,11 @@ several comment inaccuracies, all fixed in the working tree.
     empty `WatchHitsBwd`/`ExcHitsBwd` spuriously satisfied
     `target = wHit`/`target = eHit`. Fixed by selecting the stop
     reason by set membership (`target ∈ WatchHitsBwd` etc.) in both
-    replay directions. Length-6 re-run in flight; full length-10 run
-    follows once depth 6 is green.
+    replay directions. Length-6 re-run GREEN (NoError, both
+    invariants, 1h35m28s, run 2026-08-18T14-10-51); full length-10
+    run launched 2026-08-18 ~15:50, in flight (day-scale budget:
+    the pre-fix deep run took 16h+ without finishing state-10
+    invariant checks).
 - [-] 4. **Fast-config smoke pass** — deferred: subsumed by the full
   run (task 3 checks ReplayApiInvariant + TimelineInvariant); the fast
   config remains for future quick regression runs.
