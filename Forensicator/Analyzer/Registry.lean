@@ -8,12 +8,14 @@ import Forensicator.Analyzer.Chunks
 import Forensicator.Analyzer.Shapes
 import Forensicator.Analyzer.Cause
 import Forensicator.Analyzer.V8
+import Forensicator.Analyzer.Jit
 
 namespace Forensicator
 
 /-- The default analyzer set, in registration order (analyzer.rs:102). -/
 def defaultPipeline : List Analyzer :=
   [Analyzer.Cause.analyzer, Analyzer.Strings.analyzer, Analyzer.Vtables.analyzer, Analyzer.Lists.analyzer,
-   Analyzer.Arrays.analyzer, Analyzer.Chunks.analyzer, Analyzer.Shapes.analyzer, Analyzer.V8.analyzer]
+   Analyzer.Arrays.analyzer, Analyzer.Chunks.analyzer, Analyzer.Shapes.analyzer, Analyzer.V8.analyzer,
+   Analyzer.Jit.analyzer]
 
 end Forensicator

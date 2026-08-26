@@ -62,6 +62,19 @@ structure V8Layout where
   eptEntrySize : UInt64
   eptIndexShift : Nat
   eptPayloadMask : UInt64
+  -- Phase 1 (in-cage, compressed pointers): FeedbackVector / FeedbackCell
+  jsfunctionFeedbackCell : UInt64
+  feedbackCellVector : UInt64
+  feedbackVectorLength : UInt64
+  feedbackVectorSfi : UInt64
+  feedbackVectorSlots : UInt64
+  itypeFeedbackVector : UInt16
+  itypeWeakArrayList : UInt16
+  itypeMap : UInt16
+  itypeFeedbackCell : UInt16
+  itypeClosureFeedbackCellArray : UInt16
+  weakArrayListLength : UInt64
+  weakArrayListData : UInt64
   deriving Inhabited
 
 /-- StackFrame::Type mapping for V8 14.6. -/
@@ -112,6 +125,28 @@ def V8Layout.v14_6 : V8Layout where
   eptEntrySize := 16
   eptIndexShift := 6
   eptPayloadMask := 0x0000FFFFFFFFFFFF
+  -- Phase 1: FeedbackVector / FeedbackCell (V8 14.6, compressed pointers)
+  -- JSFunction.feedback_cell @ +24 (after dispatch_handle@12, sfi@16, context@20)
+  jsfunctionFeedbackCell := 24
+  -- FeedbackCell: map(4) + value@4 (Tagged<HeapObject>) + dispatch_handle@8(int32) + interrupt_budget@12(int32)
+  feedbackCellVector := 4
+  -- FeedbackVector (V8 14.6, compressed pointers, from feedback-vector.tq):
+  --   map(4) + length@4(int32) + invocation_count@8(int32)
+  --   + invocation_count_before_stable@12(u8) + osr_state@13(u8) + flags@14(u16)
+  --   + shared_function_info@16(compressed) + closure_feedback_cell_array@20
+  --   + parent_feedback_cell@24 + raw_feedback_slots[]@28
+  feedbackVectorLength := 4
+  feedbackVectorSfi := 16
+  feedbackVectorSlots := 28
+  -- Instance type constants (from v8::internal::InstanceType, V8 14.6)
+  itypeFeedbackVector := 0x0083
+  itypeWeakArrayList := 0x008c
+  itypeMap := 0x0116
+  itypeFeedbackCell := 0x009c
+  itypeClosureFeedbackCellArray := 0x010f
+  -- WeakArrayList: map(4) + capacity(4 Smi) + elements[]@8
+  weakArrayListLength := 4
+  weakArrayListData := 8
 
 /-- V8 version (major, minor) → layout. -/
 def V8Layout.forV8Version (major _minor : UInt32) : Option V8Layout :=

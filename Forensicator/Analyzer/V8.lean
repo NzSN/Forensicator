@@ -6,6 +6,7 @@
 import Forensicator.Analyzer.Scan
 import Forensicator.Analyzer.Cause
 import Forensicator.Util.V8Layout
+import Forensicator.Util.V8Obj
 import Forensicator.Util.Unwind
 import Forensicator.Util.Disasm
 import Std.Data.HashSet
@@ -27,48 +28,16 @@ structure V8StackFrame where
   scriptName : Option String
   scriptLine : Option UInt32
 
-private def readU64 (space : AddressSpace) (va : VA) : UInt64 :=
-  (space.read va 8).map (readU64leAt · 0) |>.getD 0
-
-private def readU32o (space : AddressSpace) (va : VA) : Option UInt32 :=
-  (space.read va 4).map (readU32leAt · 0)
-
-private def readU64o (space : AddressSpace) (va : VA) : Option UInt64 :=
-  (space.read va 8).map (readU64leAt · 0)
-
-/-- Wrapping address + signed offset (Rust wrapping_add_signed). -/
-private def wadd (va : VA) (off : Int) : VA :=
-  UInt64.ofNat ((Int.ofNat va.toNat + off).emod (2 ^ 64)).toNat
-
-private def decompress (cage : VA) (compressed : UInt32) : Option VA :=
-  if compressed == 0 || compressed &&& 1 == 0 then none
-  else some (cage + (compressed &&& 0xFFFFFFFE).toUInt64)
-
-private def smi (raw : UInt32) : Option Int :=
-  if raw &&& 1 != 0 then none
-  else some (Int.ofNat (raw >>> 1).toNat)
-
-private def instanceType (space : AddressSpace) (cage heap : VA) : Option UInt16 := do
-  let mapC ← readU32o space heap
-  let map ← decompress cage mapC
-  (space.read (map + 8) 2).map (readU16leAt · 0)
-
-private def readV8String (space : AddressSpace) (va : VA) (itype : UInt16)
-    (layout : V8Layout) : Option String := do
-  let len ← readU32o space (va + layout.stringLength)
-  if len == 0 || len > layout.maxJsNameLen then none
-  else
-    if itype &&& layout.stringOneByteBit != 0 then
-      let bytes ← space.read (va + layout.stringChars) len.toNat
-      if bytes.toList.all (fun b => (b ≥ 0x20 && b ≤ 0x7E) || b ≥ 0x80) then
-        some (fromUTF8Lossy bytes)
-      else none
-    else
-      let bytes ← space.read (va + layout.stringChars) (len.toNat * 2)
-      let units := (List.range len.toNat).map fun k => readU16leAt bytes (2 * k)
-      if units.all (fun u => (u ≥ 0x20 && u ≤ 0x7E) || u ≥ 0x80) then
-        some (utf16Lossy units)
-      else none
+-- Shared cage-walking helpers now live in Util/V8Obj.lean.
+-- These local aliases keep the rest of V8.lean unchanged.
+private def readU64 := @Util.readU64
+private def readU32o := @Util.readU32o
+private def readU64o := @Util.readU64o
+private def wadd := @Util.wadd
+private def decompress := @Util.decompress
+private def smi := @Util.smi
+private def instanceType := @Util.instanceType
+private def readV8String := @Util.readV8String
 
 private def readExternalChars (space : AddressSpace) (ptr : VA) (len : UInt32) (oneByte : Bool) :
     Option String := do

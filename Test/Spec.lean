@@ -668,7 +668,92 @@ def runAll : IO UInt32 := do
            && Json.get f0 "script_name" == some (Json.str "test.js")
        | _ => false)
 
-  -- F6: unwind + CONTEXT decode guards (unwind.rs / arch.rs ports).
+  -- jit type-feedback recovery (synthetic FeedbackVector).
+  -- Extends the v8 synthetic cage with a FeedbackCell + FeedbackVector
+  -- containing three known slots: uninitialized (Smi 0), monomorphic
+  -- (Map ptr), and smi feedback (Smi 42).
+  let fvMap := cage + 0x200    -- Map with itype 0x0083 (FEEDBACK_VECTOR_TYPE)
+  let fvAddr := cage + 0x60000 -- FeedbackVector
+  let fcAddr := cage + 0x50000 -- FeedbackCell
+  let monoMapAddr := cage + 0x70000  -- Map with itype 0x0116 (MAP_TYPE) for monomorphic slot
+  let jsRegionsJit : List Forensicator.Spec.AddressRegion :=
+    [ -- RO space: string Map at cage+0x100 + FeedbackVector Map at cage+0x200
+      { vaStart := cage, size := 0x300
+        data := buildBuf 0x300 [setU32 0x108 0x08, setU32 0x208 0x83]
+        protection := 3, state := .Commit, classification := .Other }
+    , -- JSFunction at cage+0x40000: map=0x101, sfi@16=0x80001, ctx@20=0x180001,
+      -- feedback_cell@24 = compressed to cage+0x50000 = 0x50001
+      mkHeap (cage + 0x40000) [setU32 0 0x101, setU32 16 0x80001, setU32 20 0x180001, setU32 24 0x50001]
+    , -- SFI at cage+0x80000: name_or_scope@12 → string at cage+0xC0000
+      mkHeap (cage + 0x80000) [setU32 0 0x101, setU32 12 0xC0001, setU32 20 0x100001]
+    , -- ScopeInfo at cage+0xC0000: function name "myFunc"
+      mkHeap (cage + 0xC0000) [setU32 0 0x101, setU32 8 6, setBytes 12 [0x6D, 0x79, 0x46, 0x75, 0x6E, 0x63]]
+    , -- Script at cage+0x100000
+      mkHeap (cage + 0x100000) [setU32 0 0x101, setU32 8 0x140001]
+    , -- Script name string at cage+0x140000: "test.js"
+      mkHeap (cage + 0x140000) [setU32 0 0x101, setU32 8 7, setBytes 12 [0x74, 0x65, 0x73, 0x74, 0x2E, 0x6A, 0x73]]
+    , -- Context at cage+0x180000 (for JSFunction context round-trip)
+      mkHeap (cage + 0x180000) [setU32 0 0x101]
+    , -- FeedbackCell at cage+0x50000: map=0x101, value@4 = 0x60001 (cage+0x60000|1)
+      mkHeap fcAddr [setU32 0 0x101, setU32 4 0x60001]
+    , -- FeedbackVector at cage+0x60000:
+      --   map@0 = 0x201 (→ cage+0x200, itype 0x83 = FEEDBACK_VECTOR_TYPE)
+      --   length@4 = int32 3 (raw int32, NOT Smi)
+      --   sfi@16 = 0x80001 (→ cage+0x80000, crosscheck with JSFunction's SFI)
+      --   slots@28: slot0 = Smi 0 (uninitialized), slot1 = 0x70001 (mono Map), slot2 = Smi 42 (raw=84)
+      mkHeap fvAddr [ setU32 0 0x201, setU32 4 3, setU32 16 0x80001
+                    , setU32 28 0, setU32 32 0x70001, setU32 36 84 ]
+    , -- Monomorphic Map at cage+0x70000: itype 0x0116 (MAP_TYPE) at +8
+      mkHeap monoMapAddr [setU32 0 0x201, setBytes 8 [0x16, 0x01]]
+    , -- Stack: one JS frame at fp=0x10000
+      { vaStart := 0xF000, size := 0x2000
+        data := buildBuf 0x2000 [
+          setU64 (0x10000 - 24 - 0xF000) 3,
+          setU64 (0x10000 - 16 - 0xF000) ((cage + 0x40000) ||| 1),
+          setU64 (0x10000 - 8 - 0xF000) ((cage + 0x180000) ||| 1)]
+        protection := 3, state := .Commit, classification := .Stack } ]
+  let jsSpaceJit : AddressSpace :=
+    jsRegionsJit.foldl (fun sp r => match sp.addRegion r with | .ok s => s | .error _ => sp) (.new 64)
+  let jsDumpJit : Model.Dump := {
+    modules := [{ name := "test.dll", baseVa := 0x7FFA0000, size := 0x10000
+                  checksum := 0, provenance := { streamType := 2 } }]
+    threads := [{ id := 1, registers := jsRegs, stackVa := 0xF000, stackSize := 0x2000
+                  tebVa := 0, provenance := {} }]
+    annotations := [("ver", "41.0.0"), ("v8_isolate_address", "0x1001C0000"),
+                    ("v8_ro_space_firstpage_address", "0x100000000")] }
+  let jitOut := (Analyzer.Jit.analyzer).run jsDumpJit jsSpaceJit
+  check ctx "jit frame count (synthetic FeedbackVector)"
+    (match jitOut.custom.find? (·.1 == "jit_frame_count") with
+     | some (_, .int n) => n == 1
+     | _ => false)
+  check ctx "jit feedback vector decode (synthetic)"
+    (match jitOut.custom.find? (·.1 == "jit_frames") with
+     | some (_, .arr (f0 :: _)) =>
+       -- Verify function name, SFI crosscheck, slot count
+       Json.get f0 "function_name" == some (Json.str "myFunc")
+         && Json.get f0 "sfi_crosscheck" == some (Json.bool true)
+         && Json.get f0 "slot_count" == some (Json.int 3)
+     | _ => false)
+  check ctx "jit slot states (synthetic)"
+    (match jitOut.custom.find? (·.1 == "jit_frames") with
+     | some (_, .arr (f0 :: _)) =>
+       match Json.get f0 "feedback_slots" with
+       | some (Json.arr [s0, s1, s2]) =>
+         let getState (j : Json) : Option String :=
+           match j with
+           | Json.obj xs =>
+             match xs.find? (·.1 == "state") with
+             | some (_, .str s) => some s
+             | _ => none
+           | _ => none
+         let s0State := match Json.get s0 "state" with | some st => getState st | none => none
+         let s1State := match Json.get s1 "state" with | some st => getState st | none => none
+         let s2State := match Json.get s2 "state" with | some st => getState st | none => none
+         Json.get s0 "index" == some (Json.int 0) && s0State == some "uninitialized"
+           && Json.get s1 "index" == some (Json.int 1) && s1State == some "monomorphic"
+           && Json.get s2 "index" == some (Json.int 2) && s2State == some "smi"
+       | _ => false
+     | _ => false)
   -- Fake PE with one RUNTIME_FUNCTION in .pdata at RVA 0x3000 and the
   -- UNWIND_INFO blob at RVA 0x4000, plus a stack region at 0x8000.
   let uwBase : UInt64 := 0x1_0000_0000
