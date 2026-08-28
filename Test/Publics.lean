@@ -129,6 +129,8 @@ def runAll : IO UInt32 := do
      | .ok (age, guid) =>
        age == 8 && guid.toList != (Test.MsfFixture.pdbInfo.extract 12 28).toList
      | .error _ => false)
+  check ctx "publics identity: truncated container fails closed"
+    (match Util.pdbIdentity (Test.MsfFixture.container.extract 0 600) with
      | .error _ => true | .ok _ => false)
   IO.FS.removeFile path
 
