@@ -345,6 +345,7 @@ structure PublicRecord where
   off : UInt32
   seg : UInt16
   name : String
+  deriving BEq, Inhabited
 
 /-- Walk the symbol record stream sequentially. Every record is
     [reclen u16][kind u16][payload] with reclen counting kind+payload
