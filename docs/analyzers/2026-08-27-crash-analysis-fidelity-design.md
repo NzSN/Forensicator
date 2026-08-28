@@ -381,3 +381,25 @@ captured page. Consequences:
   The earlier 15-name list came from a spill-slot scan-order artifact
   (ascending window found callers' spilled functions first). The harness pins
   the canonical sequence; `script_name` accepts null-or-valid-lceda-URL.
+
+## 10. Outcome (2026-08-28, relay d59265c) — SHIPPED
+
+All workstreams landed and verified on the nicholas dump + real 3.7 GB PDB:
+
+- **Acceptance 5/5 PASS** (`Case/nicholas/analysis/acceptance.sh`,
+  artifacts `t12-{cause,v8}.json`): verdict `V8TagConfusion/High`;
+  evidence `faulting IP 0x4E85AE4 = Builtins_TypedArrayMergeSort+0x324` +
+  embedded-builtin note + `0xEEC11900` + distance `0xd461190a` past
+  committed; canonical 15-name JS stack (16 named frames vs 3 baseline);
+  script_name honest-null (EPT pages not captured by the instrumented dump);
+  depth-0 native symbol == `Builtins_TypedArrayMergeSort+0x324`.
+- **Gates:** lake build green; guard suite 190/0 (incl. minidump fuzz ×4);
+  conformance gate 228/0.
+- **Golden audit:** exactly 18 goldens regenerated (Addendum-A heap visibility
+  + v8 EPT/attribution fixes; match goldens path-normalization only; ZERO
+  verdict changes). Full delta matrix in the T12 task record.
+- **Team:** AgentTeams crash-fidelity-wsl (4 members on
+  opencode-go/deepseek-v4-flash), captain-verified. Notable save: the T4 PDB
+  parser disproved the captain's manual builtin attribution (FindLastIndex+0x24
+  → MergeSort+0x324; hex→dec slip), triple-verified.
+
