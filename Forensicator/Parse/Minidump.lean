@@ -192,6 +192,40 @@ structure RawMemoryRange where
   data : ByteArray
   provenance : Provenance
 
+/-- Fragments of `[start, stop)` after subtracting each interval of `ivs`
+    (sorted by start). Structural recursion on `ivs`. -/
+def subtractIntervals (start stop : Nat) (ivs : List (Nat × Nat)) : List (Nat × Nat) :=
+  let rec go (cur : Nat) (ivs : List (Nat × Nat)) (acc : List (Nat × Nat)) : List (Nat × Nat) :=
+    match ivs with
+    | [] =>
+      let acc := if cur < stop then (cur, stop) :: acc else acc
+      acc.reverse
+    | (ps, pe) :: rest =>
+      if pe ≤ cur then go cur rest acc
+      else if ps ≥ stop then
+        let acc := if cur < stop then (cur, stop) :: acc else acc
+        acc.reverse
+      else
+        let acc := if ps > cur then (cur, min ps stop) :: acc else acc
+        go (max cur pe) rest acc
+  go start ivs []
+
+/-- Clip `base` ranges against `priority` ranges: priority bytes win inside
+    their intervals (V8HE heap capture outranks MemoryList), and the clipped
+    base fragments keep everything else. Fixes the whole-region drop that
+    `AddressSpace.addRegion`'s overlap rejection caused when a large
+    MemoryList region overlapped any V8HE range (nicholas dump: an 87 MB heap
+    region dropped over 20 small V8HE overlaps, hiding most JS frames'
+    objects). -/
+def clipRanges (base priority : List RawMemoryRange) : List RawMemoryRange :=
+  let ivs := (priority.map fun v => (v.vaStart.toNat, v.vaStart.toNat + v.data.size)).mergeSort
+    fun a b => decide (a.1 ≤ b.1)
+  base.flatMap fun r =>
+    let start := r.vaStart.toNat
+    (subtractIntervals start (start + r.data.size) ivs).map fun (fs, fe) =>
+      { r with vaStart := UInt64.ofNat fs
+               data := r.data.extract (fs - start) (fe - start) }
+
 def decodeMemoryList (fullData data : ByteArray) (prov : Provenance) :
     Except Anomaly (List RawMemoryRange) :=
   if data.size < 4 then .ok []
@@ -581,15 +615,18 @@ def fromBytes (data : ByteArray) : Except Fatal Dump := do
           let prov : Provenance := { streamType := ST_V8HE
                                      fileOffset := UInt64.ofNat start, rva := 0 }
           match decodeV8heap (data.extract start stop) prov with
-          | .ok (v8ranges, ext) => pure (ext, v8ranges ++ mutRanges)
+          | .ok (v8ranges, ext) => pure (ext, v8ranges ++ clipRanges mutRanges v8ranges)
           | .error a => modify (fun anoms => anoms ++ [a]); pure (none, mutRanges)
         else pure (none, mutRanges)
 
     let memInfoEntries ←
       (decodeOptional data dir ST_MEMORY_INFO_LIST decodeMemoryInfoList).map (·.getD [])
 
+    -- containment (not equality) so clipped fragments inherit their parent
+    -- MemoryInfo entry's protection/state (clipRanges, V8HE priority merge)
     let memoryRegions := memoryRanges.map fun mr =>
-      let info := memInfoEntries.find? fun mi => mi.vaStart == mr.vaStart
+      let info := memInfoEntries.find? fun mi =>
+        mi.vaStart ≤ mr.vaStart && mr.vaStart.toNat < mi.vaStart.toNat + mi.size.toNat
       { vaStart := mr.vaStart
         size := UInt64.ofNat mr.data.size
         data := mr.data

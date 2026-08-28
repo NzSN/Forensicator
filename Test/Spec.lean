@@ -594,6 +594,30 @@ def runAll : IO UInt32 := do
              r.vaStart == cageBase + 0x10000000
               && r.data == ByteArray.mk (Array.replicate 8 0xBB)) == some true)
 
+  -- V8HE priority merge: a MemoryList region overlapping V8HE ranges must be
+  -- clipped into fragments, not dropped wholesale (nicholas dump regression:
+  -- an 87MB heap region was dropped over 20 small V8HE overlaps).
+  let mlBody := le32 1 ++ le64 cageBase ++ le32 32 ++ le32 76
+  let v8heBody1 :=
+    le32 0x45483856 ++ le32 1 ++ le64 cageBase ++ le64 0x0000020000000000
+      ++ le32 1 ++ le32 0
+      ++ le64 (cageBase + 16) ++ le64 8 ++ le64 56
+      ++ List.replicate 8 0xBB
+  let clipDump := buildBuf (108 + v8heBody1.length) [
+    (0, le32 0x504D444D), (4, le16 0xA793), (8, le32 2), (12, le32 32),
+    (32, le32 5), (36, le32 (20 + 32)), (40, le32 56),
+    (44, le32 0x45483856), (48, le32 v8heBody1.length), (52, le32 108),
+    (56, mlBody), (76, List.replicate 32 0xCC),
+    (108, v8heBody1)]
+  check ctx "v8he overlap clips MemoryList instead of dropping it"
+    (match Minidump.fromBytes clipDump with
+     | .error _ => false
+     | .ok d =>
+       let space := Forensicator.buildAddressSpace d
+       space.read cageBase 8 |>.map (· == ByteArray.mk (Array.replicate 8 0xCC)) == some true
+        && space.read (cageBase + 16) 4 |>.map (· == ByteArray.mk (Array.replicate 4 0xBB)) == some true
+        && space.read (cageBase + 24) 4 |>.map (· == ByteArray.mk (Array.replicate 4 0xCC)) == some true)
+
   -- disasm (port of disasm.rs tests + the fulldump crash instruction)
   let disasmSpace (code : List UInt8) : Forensicator.Spec.FastSpace :=
     let sp : Forensicator.Spec.AddressSpace := .new 2
