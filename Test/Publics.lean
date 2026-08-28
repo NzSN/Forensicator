@@ -54,9 +54,9 @@ def runAll : IO UInt32 := do
   check ctx "public records walk accepts minimal non-pub record"
     (Util.walkPublicRecords (ByteArray.mk #[2, 0, 0x0E, 0]) == some #[])
   check ctx "public records walk fails closed on unterminated name"
-    (match Util.walkPublicRecords (ByteArray.mk
-        #[17, 0, 0x0E, 0x11, 0, 0, 0, 0, 0x10, 0, 0, 0, 1, 0,
-          0x4E, 0x4F, 0x4E, 0x55, 0x4C]) with
+    (match Util.walkPublicRecords (ByteArray.mk (Test.MsfFixture.symRec 0x110E
+        (Test.MsfFixture.le32 0 ++ Test.MsfFixture.le32 0x10
+          ++ Test.MsfFixture.le16 1 ++ "NONUL".toUTF8.toList)).toArray) with
      | none => true | some _ => false)
 
   let fallback := Util.Publics.ofRecords recs none
@@ -108,8 +108,8 @@ def runAll : IO UInt32 := do
              && symBytes == Test.MsfFixture.pubSymStream)
           match Util.walkPublicRecords symBytes with
           | none => check ctx "publics lazy handle: walk" false
-          | some recs' =>
-            let pubs := Util.Publics.ofRecords recs' none
+          | some recsLazy =>
+            let pubs := Util.Publics.ofRecords recsLazy none
             check ctx "publics lazy handle: nearest"
               (Util.Publics.nearest pubs 0x1004 == some ("alpha", 4))
             check ctx "publics lazy handle: entry count"
