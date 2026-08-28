@@ -1007,6 +1007,12 @@ def runAll : IO UInt32 := do
   -- the line-ends FixedArray. findEptBase must validate BOTH handles from
   -- the isolate-scan (module-resident resource vtable + exactly-len
   -- printable data) and reject isolate-resident false tables.
+  -- Handle field order (captain-verified, string.tq on Electron 41.10.6):
+  --   extern class ExternalString { resource: ExternalPointer;
+  --                                 resource_data: ExternalPointer; }
+  -- i.e. +0xC = resource (C++ object whose first qword is a module-resident
+  -- vtable), +0x10 = resource_data (chars pointer). Cached fixtures below
+  -- follow THAT order (resource handle in the +0xC slot).
   let eptCage : UInt64 := 0x200000000
   let eptBase : UInt64 := 0x300000000
   let isoBase : UInt64 := 0x1C000000
@@ -1050,15 +1056,17 @@ def runAll : IO UInt32 := do
       -- Smi 2 (raw 4), position Smi 6 (raw 12), slot@40 -> external name
       mkHeap (eptCage + 0xC0000) [setU32 0 0x181, setU32 4 0x5000, setU32 12 4,
                                   setU32 16 12, setU32 40 0x140001, setU32 48 0]
-    , -- ExternalString "extFunc" (cached): len 7, chars@12 = EPT data handle
-      -- 0x400 (idx 0x10), resourceData@16 = EPT handle 0x440 (idx 0x11)
-      mkHeap (eptCage + 0x140000) [setU32 0 0x101, setU32 8 7, setU32 12 0x400, setU32 16 0x440]
+    , -- ExternalString "extFunc" (cached): len 7. +0xC = RESOURCE handle
+      -- 0x440 (idx 0x11 -> vtable object 0x30200000), +0x10 = resource_data
+      -- handle 0x400 (idx 0x10 -> printable chars 0x30100000)
+      mkHeap (eptCage + 0x140000) [setU32 0 0x101, setU32 8 7, setU32 12 0x440, setU32 16 0x400]
     , -- Script: name@8 -> URL external string, line_offset@12 = 0,
       -- line_ends@28 -> FixedArray
       mkHeap (eptCage + 0x100000) [setU32 0 0x101, setU32 8 0x180001, setU32 12 0, setU32 28 0x1C0001]
-    , -- ExternalString URL (55 chars, cached): chars@12 = EPT handle 0x800
-      -- (idx 0x20), resourceData@16 = 0x840 (idx 0x21)
-      mkHeap (eptCage + 0x180000) [setU32 0 0x101, setU32 8 55, setU32 12 0x800, setU32 16 0x840]
+    , -- ExternalString URL (55 chars, cached): +0xC = RESOURCE handle 0x840
+      -- (idx 0x21 -> vtable object 0x30210000), +0x10 = resource_data
+      -- handle 0x800 (idx 0x20 -> printable URL chars 0x30110000)
+      mkHeap (eptCage + 0x180000) [setU32 0 0x101, setU32 8 55, setU32 12 0x840, setU32 16 0x800]
     , -- line-ends FixedArray: length Smi 2 (raw 4), ends [5, 12] (Smis 10, 24)
       mkHeap (eptCage + 0x1C0000) [setU32 0 0x101, setU32 4 4, setU32 8 10, setU32 12 24]
     , -- EPT table: 8-byte entries at base + (idx << 6). idx 0x10 -> name
@@ -1095,7 +1103,10 @@ def runAll : IO UInt32 := do
         protection := 3, state := .Commit, classification := .Other }
     , mkHeap (bCage + 0x40000) [setU32 0 0x201, setU32 16 0x80001, setU32 20 0x100001]
     , mkHeap (bCage + 0x80000) [setU32 0 0x281, setU32 12 0xC0001, setU32 20 0x100001]
-    , -- uncached external "legacy": map 0x301 (itype 0x1A), len 6, chars@12 = 0x400
+    , -- uncached external "legacy": map 0x301 (itype 0x1A), len 6.
+      -- +0xC = RESOURCE handle 0x400 (idx 0x10 -> vtable object); UNCACHED
+      -- strings have no resource_data slot, so the chars come from the
+      -- resource object +16 (the legacy fallback)
       mkHeap (bCage + 0xC0000) [setU32 0 0x301, setU32 8 6, setU32 12 0x400]
     , -- Script with internal one-byte name "legacy.js"
       mkHeap (bCage + 0x100000) [setU32 0 0x101, setU32 8 0x180001, setU32 12 0, setU32 28 0]
@@ -1129,9 +1140,10 @@ def runAll : IO UInt32 := do
         protection := 3, state := .Commit, classification := .Other }
     , mkHeap (cCage + 0x40000) [setU32 0 0x201, setU32 16 0x80001, setU32 20 0x100001]
     , mkHeap (cCage + 0x80000) [setU32 0 0x281, setU32 12 0xC0001, setU32 20 0x100001]
-    , -- external name string (would decode via the false table): len 7,
-      -- chars@12 = 0x400 (idx 0x10), resourceData@16 = 0x440 (idx 0x11)
-      mkHeap (cCage + 0xC0000) [setU32 0 0x101, setU32 8 7, setU32 12 0x400, setU32 16 0x440]
+    , -- external name string (would decode via the false table): len 7.
+      -- +0xC = RESOURCE handle 0x440 (idx 0x11 -> entry 0x1C000888),
+      -- +0x10 = resource_data handle 0x400 (idx 0x10 -> entry 0x1C000880)
+      mkHeap (cCage + 0xC0000) [setU32 0 0x101, setU32 8 7, setU32 12 0x440, setU32 16 0x400]
     , -- isolate region holding the false table: candidate base 0x1C000800 is
       -- INSIDE the isolate; its entry pages (0x1C000880 / 0x1C000888) are
       -- readable and would validate (printable chars + module vtable), yet
