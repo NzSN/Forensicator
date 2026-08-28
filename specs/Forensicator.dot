@@ -1,0 +1,154 @@
+// Forensicator.tla — 2-stage workflow (specs/Forensicator.tla).
+// State machine + data-flow diagram: host workflow state | sub-module instances.
+// Render:  dot -Tsvg specs/Forensicator.dot -o specs/Forensicator.svg
+digraph forensicator {
+    graph  [rankdir=TB, splines=true, nodesep=0.35, ranksep=0.5, bgcolor=white,
+            fontname="Helvetica", fontsize=11, label="Forensicator — S1 minidump parse → S2 analyzer pipeline (TLA+)",
+            labelloc=t, labeljust=l, pad=0.4];
+    node   [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+            fillcolor=white, color="#333333", penwidth=1.2];
+    edge   [fontname="Helvetica", fontsize=10, color="#555555"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // State owners — host workflow
+    // ──────────────────────────────────────────────────────────────────
+    subgraph cluster_s1 {
+        label="S1 — parse pipeline state (host)";
+        style="rounded,filled"; color="#c9d6ef"; fillcolor="#eef3fc";
+        s1 [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>p_header_parsed / p_dir_parsed</B> ∈ {0,1} — stage flags</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>p_stream_types</B> : 1..MaxStreams → StreamTypeSet · <B>p_stream_parsed</B> : 1..MaxStreams → {0,1}</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>s1_complete</B> ∈ {0,1} — gates S2 and the symbolizer</TD></TR>
+            <TR><TD ALIGN="LEFT">constants: <B>StreamTypeSet</B> = {1,…,6} · <B>MaxStreams</B> = 4</TD></TR>
+        </TABLE>>];
+    }
+
+    subgraph cluster_s2 {
+        label="S2 — analyzer pipeline state (host)";
+        style="rounded,filled"; color="#b7d7c3"; fillcolor="#eef7f1";
+        s2 [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>pipeline</B> : Seq(Str) — registration order (from <B>AnalyzerPool</B>)</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>completed / failed</B> : Set(Str) — panic isolation: failure ≠ abort</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>catalog_strings … catalog_shapes</B> : Set(Str) — the StructureCatalog, 6 kinds</TD></TR>
+        </TABLE>>];
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // State owners — sub-module instances (WITH substitution into host
+    // variables: Apalache cannot resolve primed instance references)
+    // ──────────────────────────────────────────────────────────────────
+    subgraph cluster_instances {
+        label="Sub-module instances (instance state = explicitly declared host vars, WITH substitution)";
+        style="rounded,filled"; color="#d9c9a3"; fillcolor="#fdf8ec";
+        model [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>M == INSTANCE Model</B> — the Dump</TD></TR>
+            <TR><TD ALIGN="LEFT">m_sysinfo · m_mod_* · m_thr_* · m_mem_* (va/sz/prot/state/type/cls)</TD></TR>
+            <TR><TD ALIGN="LEFT">m_exc_info · m_anomalies · m_ann_key/val</TD></TR>
+            <TR><TD ALIGN="LEFT">every fact carries provenance (prov_sid / prov_off / prov_rva)</TD></TR>
+        </TABLE>>];
+        addr [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>A == INSTANCE AddressSpace</B> WITH MaxAddr ← 255</TD></TR>
+            <TR><TD ALIGN="LEFT">a_reg_va / a_reg_sz / a_reg_cl — sorted, non-overlapping regions</TD></TR>
+            <TR><TD ALIGN="LEFT">class ∈ {Image, Stack, Mapped, Private, Other} · a_anomalies</TD></TR>
+        </TABLE>>];
+        arch [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>R == INSTANCE Arch</B></TD></TR>
+            <TR><TD ALIGN="LEFT">r_regs · r_anomalies</TD></TR>
+            <TR><TD ALIGN="LEFT" COLOR="#777777"><I>initialized only — no host action writes it in this spec</I></TD></TR>
+        </TABLE>>];
+        sym [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>S == INSTANCE Symbolizer</B></TD></TR>
+            <TR><TD ALIGN="LEFT">s_sym_modules (name, base, size) · s_sym_tables (≤ MaxSymbols each)</TD></TR>
+            <TR><TD ALIGN="LEFT">s_sym_anomalies · bridges M!ModuleCount → PDB tables after S1</TD></TR>
+        </TABLE>>];
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Actions
+    // ──────────────────────────────────────────────────────────────────
+    act_parseheader [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>ParseHeader</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: p_header_parsed = 0</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">p_header_parsed&apos; = 1</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_parsedir [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>ParseDirectory</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: header = 1 ∧ dir = 0</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">CHOOSE p_stream_types&apos; ∈ [1..MaxStreams → StreamTypeSet]</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">p_stream_parsed&apos; = all 0 · p_dir_parsed&apos; = 1</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_decode [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>DecodeStream(t)</B>, t ∈ {1,…,6}</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: dir = 1 ∧ ∃ idx: type t, unparsed</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">1→SetSysInfo · 2→AddModule · 3→AddThread</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">4→AddRegion · 5→SetException · 6→AddAnomaly</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">p_stream_parsed&apos;[idx] = 1</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#777777"><I>(7→AddAnnotation branch unreachable: Next quantifies t ∈ 1..6)</I></TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_build [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>BuildAddressSpace</B> — S1 ⇒ S1 complete</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: dir = 1 ∧ <B>all streams parsed</B> ∧ s1_complete = 0</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">A!AddRegion(va, sz, class) — nondet in 0..255</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">s1_complete&apos; = 1</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_loadsym [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>LoadSymbolizer</B> — S1 → Symbolizer bridge</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: s1_complete = 1 ∧ M!ModuleCount &gt; 0 ∧ sym_modules empty</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">S!LoadPdb(name, base_va, size, count ≤ MaxSymbols)</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_register [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>RegisterAnalyzer(name)</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: name ∈ AnalyzerPool ∖ NameSet(pipeline)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">pipeline&apos; = Append(pipeline, name)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#777777"><I>S1-independent — registration may interleave parse</I></TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_run [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>AnalyzerRun</B> — panic isolation</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: s1_complete = 1 ∧ pipeline ≠ ⟨⟩ ∧ ∃ a ∈ registered ∖ completed</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">success: completed&apos; ∪= {a} · catalog_a&apos; ∪= {a} (matching kind only)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">failure: failed&apos; ∪= {a} · catalogs unchanged</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">reads (&amp;Dump, &amp;AddressSpace) — pure, no shared mutable state</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // Effects (solid) and reads/guards (dashed)
+    // ──────────────────────────────────────────────────────────────────
+    act_parseheader -> s1   [style=solid, color="#666666"];
+    act_parsedir   -> s1   [style=solid, color="#666666", label="types + flags"];
+
+    act_decode -> s1       [style=solid, color="#4a7db1", label="mark parsed"];
+    act_decode -> model    [style=solid, color="#4a7db1", label="typed facts + provenance"];
+
+    act_build  -> addr     [style=solid, color="#3d8b5a", label="A!AddRegion"];
+    act_build  -> s1       [style=solid, color="#3d8b5a", label="s1_complete' = 1"];
+
+    act_loadsym -> sym     [style=solid, color="#b08a1e", label="S!LoadPdb"];
+    act_loadsym -> model   [style=dashed, color="#b08a1e", label="reads ModuleCount"];
+    act_loadsym -> s1      [style=dashed, color="#b08a1e", label="guard: s1_complete"];
+
+    act_register -> s2     [style=solid, color="#c96a1e", label="Append"];
+
+    act_run    -> s2       [style=solid, color="#c96a1e", label="completed / failed / catalogs"];
+    act_run    -> model    [style=dashed, color="#c96a1e", label="&amp;Dump (read-only)"];
+    act_run    -> addr     [style=dashed, color="#c96a1e", label="&amp;AddressSpace (read-only)"];
+    act_run    -> s1       [style=dashed, color="#c96a1e", label="guard: s1_complete = 1"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // Invariants
+    // ──────────────────────────────────────────────────────────────────
+    inv [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+        <TR><TD ALIGN="LEFT"><B>ForensicatorInvariant</B> = M!ModelInvariant ∧ A!TypeInvariant ∧ R!ArchInvariant ∧ S!SymbolizerInvariant</TD></TR>
+        <TR><TD ALIGN="LEFT">&nbsp;&nbsp;∧ S1ParseSequence ∧ S2PipelineInvariant ∧ CatalogInvariant</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>S1ParseSequence</B>: dir ⇒ header · s1_complete ⇒ dir</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>S2PipelineInvariant</B>: completed ⊆ NameSet(pipeline) · failed ⊆ completed · catalog_* ⊆ completed</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>CatalogInvariant</B> = NoFailedProduces (catalog_* ∩ failed = {}) ∧ PipelineOrdered (|completed| ≤ Len(pipeline))</TD></TR>
+    </TABLE>>, style="rounded,dashed,filled", fillcolor="#fdf3f3", color="#cc6666"];
+
+    s2 -> inv [style=dotted, color="#888888"];
+}

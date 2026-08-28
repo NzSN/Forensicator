@@ -1,6 +1,7 @@
 /- Test.Spec — guard runner for foundations. Each `check` prints ok/FAIL;
    `runAll` returns the failure count as exit code. -/
 import Forensicator
+import Test.MsfFixture
 
 namespace Test.Spec
 
@@ -607,20 +608,63 @@ def runAll : IO UInt32 := do
   check ctx "disasm int3" ((decode1 [0xCC, 0x90]).map (·.kind) == some .int3)
   check ctx "disasm ud2" ((decode1 [0x0F, 0x0B]).map (·.kind) == some .ud2)
   check ctx "disasm mem read with disp"
-    ((decode1 [0x48, 0x8B, 0x41, 0x1B]).map (·.kind) == some (Util.InstrKind.memRead (some 2) 0x1B))
+    ((decode1 [0x48, 0x8B, 0x41, 0x1B]).map (·.kind) == some (Util.InstrKind.memRead (some 2) none 1 0x1B))
   check ctx "disasm mem write"
-    ((decode1 [0x48, 0x89, 0x42, 0x10]).map (·.kind) == some (Util.InstrKind.memWrite (some 3) 0x10))
+    ((decode1 [0x48, 0x89, 0x42, 0x10]).map (·.kind) == some (Util.InstrKind.memWrite (some 3) none 1 0x10))
   check ctx "disasm cmp op0 mem is read"
     (match (decode1 [0x48, 0x39, 0x01]).map (·.kind) with
-     | some (Util.InstrKind.memRead _ _) => true | _ => false)
+     | some (Util.InstrKind.memRead _ _ _ _) => true | _ => false)
   check ctx "disasm call register indirect"
     ((decode1 [0xFF, 0xD0]).map (·.kind) == some .indirectCall)
   check ctx "disasm rip-relative has absolute disp"
     ((decode1 [0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00]).map (·.kind)
-      == some (Util.InstrKind.memRead none 0x1017))
+      == some (Util.InstrKind.memRead none none 1 0x1017))
   check ctx "disasm fulldump crash instruction text"
     ((decode1 [0x80, 0x7E, 0x08, 0x00]).map (fun i => (i.kind, i.text))
-      == some ((Util.InstrKind.memRead (some 4) 8), "cmp byte ptr [rsi+8],0"))
+      == some ((Util.InstrKind.memRead (some 4) none 1 8), "cmp byte ptr [rsi+8],0"))
+
+  -- W1.1 SIB golden vectors — byte-pinned, design 2026-08-27 §W1.1. The
+  -- first two are the nicholas crash instructions verbatim:
+  --   44 8b 60 ff        mov r12d,[rax-1]
+  --   47 0f b6 64 26 0a  movzx r12d,byte ptr [r14+r12+0Ah]
+  check ctx "sib nicholas mov r12d,[rax-1] (44 8b 60 ff)"
+    ((decode1 [0x44, 0x8B, 0x60, 0xFF]).map (fun i => (i.kind, i.text, i.len))
+      == some ((Util.InstrKind.memRead (some Model.X64.RAX) none 1 (-1)), "mov r12d,[rax-1]", 4))
+  check ctx "sib nicholas movzx r12d,byte ptr [r14+r12+0Ah] (47 0f b6 64 26 0a)"
+    ((decode1 [0x47, 0x0F, 0xB6, 0x64, 0x26, 0x0A]).map (fun i => (i.kind, i.text, i.len))
+      == some ((Util.InstrKind.memRead (some Model.X64.R14) (some Model.X64.R12) 1 10),
+        "movzx r12d,byte ptr [r14+r12+0Ah]", 6))
+  check ctx "sib scale 4 no-base disp32 (48 8b 04 8d 00 10 00 00)"
+    ((decode1 [0x48, 0x8B, 0x04, 0x8D, 0x00, 0x10, 0x00, 0x00]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memRead none (some Model.X64.RCX) 4 0x1000), "mov rax,[rcx*4+1000h]"))
+  check ctx "sib scale 8 disp8 (48 8b 4c c8 f0)"
+    ((decode1 [0x48, 0x8B, 0x4C, 0xC8, 0xF0]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memRead (some Model.X64.RAX) (some Model.X64.RCX) 8 (-16)),
+        "mov rcx,[rax+rcx*8-10h]"))
+  check ctx "sib write form (48 89 44 8c 04)"
+    ((decode1 [0x48, 0x89, 0x44, 0x8C, 0x04]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memWrite (some Model.X64.RSP) (some Model.X64.RCX) 4 4),
+        "mov [rsp+rcx*4+4],rax"))
+  check ctx "sib cmp op0 mem read (44 39 44 8c 04)"
+    ((decode1 [0x44, 0x39, 0x44, 0x8C, 0x04]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memRead (some Model.X64.RSP) (some Model.X64.RCX) 4 4),
+        "cmp [rsp+rcx*4+4],r8d"))
+  check ctx "sib test op0 mem read (85 44 a8 10)"
+    ((decode1 [0x85, 0x44, 0xA8, 0x10]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memRead (some Model.X64.RAX) (some Model.X64.RBP) 4 16),
+        "test [rax+rbp*4+10h],eax"))
+  check ctx "sib rsp index slot is no index (48 8b 04 24)"
+    ((decode1 [0x48, 0x8B, 0x04, 0x24]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memRead (some Model.X64.RSP) none 1 0), "mov rax,[rsp]"))
+  check ctx "sib rex.x index 4 is r12 (4b 8b 44 24 20)"
+    ((decode1 [0x4B, 0x8B, 0x44, 0x24, 0x20]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memRead (some Model.X64.R12) (some Model.X64.R12) 1 0x20),
+        "mov rax,[r12+r12+20h]"))
+  check ctx "sib scale 2 no-base (8b 04 75 20 00 00 00)"
+    ((decode1 [0x8B, 0x04, 0x75, 0x20, 0x00, 0x00, 0x00]).map (fun i => (i.kind, i.text))
+      == some ((Util.InstrKind.memRead none (some Model.X64.RSI) 2 0x20), "mov eax,[rsi*2+20h]"))
+  check ctx "sib truncated modrm fails closed (48 8b 04)"
+    ((decode1 [0x48, 0x8B, 0x04]).map (·.kind) == some .other)
 
   -- v8 JS-frame resolution (port of v8.rs decodes_js_frame_from_captured_heap)
   let setU32 := fun (o : Nat) (v : UInt32) => (o, (List.range 4).map fun i => ((v.toUInt64 >>> (8 * UInt64.ofNat i)).toUInt8))
@@ -840,6 +884,77 @@ def runAll : IO UInt32 := do
         (buildBuf 256 [(0x48, le64 0x7FFA0000), (0x70, le64 0x400)]) with
      | .ok rs => rs.get Model.X64.DR0 == 0x7FFA0000 && rs.get Model.X64.DR7 == 0x400
      | .error _ => false)
+
+  -- W2: lazy MSF reader (design §4). The synthetic fixture exercises the
+  -- eager MsfFile and the lazy MsfHandle on the same container: empty
+  -- stream (0), PdbInfo stream 1, absent stream (2, 0xFFFFFFFF — consumes
+  -- no block-list entries), multi-page stream 3 with a partial final page.
+  let msfSynth := Test.MsfFixture.container
+  let synthS1 := Test.MsfFixture.pdbInfo
+  let synthS3 := Test.MsfFixture.stream3
+  check ctx "msf eager: open + all streams"
+    (match Util.MsfFile.open msfSynth with
+     | .ok msf =>
+       Util.MsfFile.stream msf 0 == some ByteArray.empty
+         && Util.MsfFile.stream msf 1 == some synthS1
+         && Util.MsfFile.stream msf 2 == some ByteArray.empty
+         && Util.MsfFile.stream msf 3 == some synthS3
+         && Util.MsfFile.stream msf 4 == none
+     | .error _ => false)
+  check ctx "msf eager: pdb identity from stream 1"
+    (match Util.pdbIdentity msfSynth with
+     | .ok (age, guid) =>
+       age == 7 && beqBytes guid (ByteArray.mk (le64 0xDEADBEEF00112233 ++ le64 0x445566778899AABB).toArray)
+     | .error _ => false)
+  check ctx "msf eager: rejects bad magic"
+    (match Util.MsfFile.open (msfSynth.set! 0 0xFF) with
+     | .error _ => true | .ok _ => false)
+  -- Lazy handle reader against a real file (tmp/ is gitignored).
+  let synthPath := "tmp/msf-handle-test.synth.pdb"
+  let badPath := "tmp/msf-handle-test.bad.pdb"
+  IO.FS.writeBinFile synthPath msfSynth
+  match ← Util.MsfHandle.open synthPath with
+  | .error _ => check ctx "msf handle: open" false
+  | .ok msf =>
+    check ctx "msf handle: open" true
+    match ← Util.MsfHandle.stream msf 0 with
+    | .ok b => check ctx "msf handle: empty stream" b.isEmpty
+    | .error _ => check ctx "msf handle: empty stream" false
+    match ← Util.MsfHandle.stream msf 1 with
+    | .ok b => check ctx "msf handle: stream 1 (pdbinfo)" (beqBytes b synthS1)
+    | .error _ => check ctx "msf handle: stream 1 (pdbinfo)" false
+    match ← Util.MsfHandle.stream msf 2 with
+    | .ok b => check ctx "msf handle: absent stream" b.isEmpty
+    | .error _ => check ctx "msf handle: absent stream" false
+    match ← Util.MsfHandle.stream msf 3 with
+    | .ok b => check ctx "msf handle: multi-page stream 3" (beqBytes b synthS3)
+    | .error _ => check ctx "msf handle: multi-page stream 3" false
+    match ← Util.MsfHandle.stream msf 4 with
+    | .error _ => check ctx "msf handle: out-of-range stream errors" true
+    | .ok _ => check ctx "msf handle: out-of-range stream errors" false
+    match ← Util.MsfHandle.stream msf 3 with
+    | .ok b => check ctx "msf handle: re-read is repeatable" (beqBytes b synthS3)
+    | .error _ => check ctx "msf handle: re-read is repeatable" false
+    -- eager == lazy on every stream of the fixture
+    match Util.MsfFile.open msfSynth with
+    | .error _ => check ctx "msf handle: eager == lazy" false
+    | .ok mf =>
+      let mut agree := true
+      for idx in [0, 1, 2, 3] do
+        let eager := Util.MsfFile.stream mf idx
+        match ← Util.MsfHandle.stream msf idx with
+        | .ok lazy => if eager != some lazy then agree := false
+        | .error _ => agree := false
+      check ctx "msf handle: eager == lazy" agree
+  IO.FS.writeBinFile badPath (msfSynth.set! 0 0xFF)
+  match ← Util.MsfHandle.open badPath with
+  | .error _ => check ctx "msf handle: rejects bad magic" true
+  | .ok _ => check ctx "msf handle: rejects bad magic" false
+  match ← Util.MsfHandle.open "tmp/msf-handle-test.missing.pdb" with
+  | .error _ => check ctx "msf handle: missing file errors" true
+  | .ok _ => check ctx "msf handle: missing file errors" false
+  IO.FS.removeFile synthPath
+  IO.FS.removeFile badPath
 
   let n ← ctx.failures.get
   IO.println (if n == 0 then "== ALL GUARDS PASSED ==" else s!"== {n} FAILURE(S) ==")

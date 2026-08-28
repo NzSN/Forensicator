@@ -3,7 +3,7 @@
    GATE DECISION (Task 8 step 1): native Lean decoder, no iced-x86 FFI.
    Covers exactly what the crash-cause rules consume:
      - Int3 (CC), Ud2 (0F 0B)                         — rule 2
-     - MemRead/MemWrite { base, disp } classification — rules 5/6
+     - MemRead/MemWrite { base, index, scale, disp } classification (SIB) — rules 5/6
      - IndirectCall/IndirectJump (FF /2 /4)           — classification parity
      - Intel text for the covered integer mem-op forms (rule-5 evidence;
        iced-x86 default-options number formatting: ≤ 9 decimal, uppercase
@@ -18,10 +18,14 @@ namespace Forensicator.Util
 
 open Forensicator.Spec
 
+/-- An x86-64 register, as an index into the x64 CONTEXT register file
+    (Model.X64.*); memory-operand bases and SIB indices are CONTEXT indices. -/
+abbrev Reg := Nat
+
 inductive InstrKind where
   | int3 | ud2
-  | memRead (base : Option Nat) (disp : Int)
-  | memWrite (base : Option Nat) (disp : Int)
+  | memRead (base : Option Reg) (index : Option Reg) (scale : UInt8) (disp : Int)
+  | memWrite (base : Option Reg) (index : Option Reg) (scale : UInt8) (disp : Int)
   | indirectCall | indirectJump
   | other
   deriving Repr, DecidableEq, BEq, Inhabited
@@ -30,8 +34,8 @@ inductive InstrKind where
 def InstrKind.debug : InstrKind → String
   | .int3 => "Int3"
   | .ud2 => "Ud2"
-  | .memRead _ _ => "MemRead { .. }"
-  | .memWrite _ _ => "MemWrite { .. }"
+  | .memRead _ _ _ _ => "MemRead { .. }"
+  | .memWrite _ _ _ _ => "MemWrite { .. }"
   | .indirectCall => "IndirectCall"
   | .indirectJump => "IndirectJump"
   | .other => "Other"
@@ -91,15 +95,25 @@ private def sext32 (v : UInt32) : Int :=
 
 /-- A decoded memory operand (pre-relocation). -/
 structure MemOp where
-  baseX64 : Option Nat  -- x64 CONTEXT index; none = RIP-relative or absolute
+  baseX64 : Option Reg  -- x64 CONTEXT index; none = RIP-rel/absolute/SIB no-base
+  indexX64 : Option Reg -- SIB index (CONTEXT index); none = no index
+  scale : UInt8         -- SIB scale multiplier (1/2/4/8)
   ripRel : Bool         -- disp is the raw disp32; absolute target = ip+len+disp
   disp : Int
   bytes : Nat           -- modrm+sib+disp byte count
 
+/-- MemRead with the operand's base/index/scale fields. -/
+private def readKind (mo : MemOp) (disp : Int) : InstrKind :=
+  InstrKind.memRead mo.baseX64 mo.indexX64 mo.scale disp
+
+/-- MemWrite with the operand's base/index/scale fields. -/
+private def writeKind (mo : MemOp) (disp : Int) : InstrKind :=
+  InstrKind.memWrite mo.baseX64 mo.indexX64 mo.scale disp
+
 /-- Decode ModRM/SIB/displacement at `pos`. Returns
     (regField, rmField, memOp?, bytes); `none` memOp = register-direct. -/
 private def decodeModRM (bytes : ByteArray) (pos : Nat)
-    (rexR _rexX rexB : Bool) : Option (Nat × Nat × Option MemOp × Nat) :=
+    (rexR rexX rexB : Bool) : Option (Nat × Nat × Option MemOp × Nat) :=
   if pos ≥ bytes.size then none
   else
     let modrm := bytes.get! pos
@@ -112,9 +126,16 @@ private def decodeModRM (bytes : ByteArray) (pos : Nat)
       if pos + 1 ≥ bytes.size then none
       else
         let sib := bytes.get! (pos + 1)
+        let scaleField := sib.toNat / 64
+        let indexField := (sib.toNat / 8) % 8
         let baseField := sib.toNat % 8
         let base := regToX64 (baseField + (if rexB then 8 else 0))
         let noBase := baseField == 5 && m == 0
+        -- RSP in the index slot encodes "no index"; REX.X turns it into r12.
+        let index : Option Reg :=
+          if indexField == 4 && !rexX then none
+          else some (regToX64 (indexField + (if rexX then 8 else 0)))
+        let scale : UInt8 := [1, 2, 4, 8].getD scaleField 1
         let dispLen := if noBase || m == 2 then 4 else m
         if pos + 2 + dispLen ≤ bytes.size then
           let disp : Int :=
@@ -123,6 +144,7 @@ private def decodeModRM (bytes : ByteArray) (pos : Nat)
             else sext32 (readU32leAt bytes (pos + 2))
           let mo : MemOp :=
             { baseX64 := if noBase then none else some base
+              indexX64 := index, scale := scale
               ripRel := false, disp := disp, bytes := 2 + dispLen }
           some (reg, 0, some mo, 2 + dispLen)
         else none
@@ -130,7 +152,7 @@ private def decodeModRM (bytes : ByteArray) (pos : Nat)
       -- RIP-relative
       if pos + 5 ≤ bytes.size then
         let mo : MemOp :=
-          { baseX64 := none, ripRel := true
+          { baseX64 := none, indexX64 := none, scale := 1, ripRel := true
             disp := sext32 (readU32leAt bytes (pos + 1)), bytes := 5 }
         some (reg, 0, some mo, 5)
       else none
@@ -143,7 +165,7 @@ private def decodeModRM (bytes : ByteArray) (pos : Nat)
           else if dispLen == 1 then sext8 (bytes.get! (pos + 1))
           else sext32 (readU32leAt bytes (pos + 1))
         let mo : MemOp :=
-          { baseX64 := some base, ripRel := false
+          { baseX64 := some base, indexX64 := none, scale := 1, ripRel := false
             disp := disp, bytes := 1 + dispLen }
         some (reg, rm + (if rexB then 8 else 0), some mo, 1 + dispLen)
       else none
@@ -153,13 +175,22 @@ private def dispText (d : Int) : String :=
   else if d > 0 then "+" ++ fmtNum (UInt64.ofNat d.toNat)
   else "-" ++ fmtNum (UInt64.ofNat (-d).toNat)
 
-/-- Memory operand text: "[base±disp]" / "[rip±disp]" / "[absolute]". -/
+/-- Memory operand text: "[base±disp]" / "[base+index*scale±disp]" /
+    "[index*scale±disp]" / "[rip±disp]" / "[absolute]". -/
 private def memText (mo : MemOp) (_ip : VA) (_totalLen : Nat) : String :=
+  let idxPart : String :=
+    match mo.indexX64 with
+    | none => ""
+    | some ix =>
+      let scaled := if mo.scale > 1 then s!"{regNameX64 ix}*{mo.scale.toNat}" else regNameX64 ix
+      if mo.baseX64.isSome then "+" ++ scaled else scaled
   match mo.baseX64 with
-  | some b => "[" ++ regNameX64 b ++ dispText mo.disp ++ "]"
+  | some b => "[" ++ regNameX64 b ++ idxPart ++ dispText mo.disp ++ "]"
   | none =>
     if mo.ripRel then
       "[rip" ++ dispText mo.disp ++ "]"
+    else if mo.indexX64.isSome then
+      "[" ++ idxPart ++ dispText mo.disp ++ "]"
     else
       let a := if mo.disp ≥ 0 then UInt64.ofNat mo.disp.toNat
                else UInt64.ofNat ((-mo.disp).toNat % (2^64))
@@ -247,7 +278,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       | none => { kind := .other
                   text := s!"xor {regNameOf size rm},{regNameOf size reg}", len := total }
       | some mo =>
-        { kind := .memWrite mo.baseX64 (finalDisp mo ip total)
+        { kind := writeKind mo (finalDisp mo ip total)
           text := s!"xor {ptrSize size} {memText mo ip total},{regNameOf size reg}"
           len := total }
   | 0x32 | 0x33 =>  -- xor reg, r/m (op1 mem read)
@@ -256,7 +287,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       | none => { kind := .other
                   text := s!"xor {regNameOf size reg},{regNameOf size rm}", len := total }
       | some mo =>
-        { kind := .memRead mo.baseX64 (finalDisp mo ip total)
+        { kind := readKind mo (finalDisp mo ip total)
           text := s!"xor {regNameOf size reg},{memText mo ip total}"
           len := total }
   | 0x38 | 0x39 =>  -- cmp r/m, reg (op0 mem read-only)
@@ -265,7 +296,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       | none => { kind := .other
                   text := s!"cmp {regNameOf size rm},{regNameOf size reg}", len := total }
       | some mo =>
-        { kind := .memRead mo.baseX64 (finalDisp mo ip total)
+        { kind := readKind mo (finalDisp mo ip total)
           text := s!"cmp {memText mo ip total},{regNameOf size reg}"
           len := total }
   | 0x84 | 0x85 =>  -- test r/m, reg  (op0 mem read-only)
@@ -274,7 +305,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       | none => { kind := .other
                   text := s!"test {regNameOf size rm},{regNameOf size reg}", len := total }
       | some mo =>
-        { kind := .memRead mo.baseX64 (finalDisp mo ip total)
+        { kind := readKind mo (finalDisp mo ip total)
           text := s!"test {memText mo ip total},{regNameOf size reg}"
           len := total }
   | 0x86 | 0x87 =>  -- xchg r/m, reg (op0 mem write)
@@ -283,7 +314,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       | none => { kind := .other
                   text := s!"xchg {regNameOf size rm},{regNameOf size reg}", len := total }
       | some mo =>
-        { kind := .memWrite mo.baseX64 (finalDisp mo ip total)
+        { kind := writeKind mo (finalDisp mo ip total)
           text := s!"xchg {memText mo ip total},{regNameOf size reg}"
           len := total }
   | 0x88 | 0x89 =>  -- mov r/m, reg (write)
@@ -292,7 +323,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       | none => { kind := .other
                   text := s!"mov {regNameOf size rm},{regNameOf size reg}", len := total }
       | some mo =>
-        { kind := .memWrite mo.baseX64 (finalDisp mo ip total)
+        { kind := writeKind mo (finalDisp mo ip total)
           text := s!"mov {memText mo ip total},{regNameOf size reg}"
           len := total }
   | 0x8A | 0x8B =>  -- mov reg, r/m (read)
@@ -301,7 +332,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       | none => { kind := .other
                   text := s!"mov {regNameOf size reg},{regNameOf size rm}", len := total }
       | some mo =>
-        { kind := .memRead mo.baseX64 (finalDisp mo ip total)
+        { kind := readKind mo (finalDisp mo ip total)
           text := s!"mov {regNameOf size reg},{memText mo ip total}"
           len := total }
   | 0x8D =>  -- lea: Other (memory operand but no access)
@@ -323,8 +354,8 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
         let imm := bytes.get! (total - 1)
         let mne := grp1Name reg
         let kind :=
-          if reg == 7 then InstrKind.memRead mo.baseX64 (finalDisp mo ip total)
-          else InstrKind.memWrite mo.baseX64 (finalDisp mo ip total)
+          if reg == 7 then readKind mo (finalDisp mo ip total)
+          else writeKind mo (finalDisp mo ip total)
         { kind := kind
           text := s!"{mne} {ptrSize size} {memText mo ip total},{fmtNum imm.toUInt64}"
           len := total }
@@ -339,8 +370,8 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
         let imm := readU32leAt bytes (total - 4)
         let mne := grp1Name reg
         let kind :=
-          if reg == 7 then InstrKind.memRead mo.baseX64 (finalDisp mo ip total)
-          else InstrKind.memWrite mo.baseX64 (finalDisp mo ip total)
+          if reg == 7 then readKind mo (finalDisp mo ip total)
+          else writeKind mo (finalDisp mo ip total)
         { kind := kind
           text := s!"{mne} {ptrSize size} {memText mo ip total},{fmtNum imm.toUInt64}"
           len := total }
@@ -352,7 +383,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
         let imm :=
           if op == 0xC6 then (bytes.get! (total - 1)).toUInt64
           else (readU32leAt bytes (total - 4)).toUInt64
-        { kind := .memWrite mo.baseX64 (finalDisp mo ip total)
+        { kind := writeKind mo (finalDisp mo ip total)
           text := s!"mov {ptrSize size} {memText mo ip total},{fmtNum imm}"
           len := total }
   | 0xF6 | 0xF7 =>  -- grp3
@@ -364,8 +395,8 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
         let mne := grp3Name reg
         let isTest := reg == 0 || reg == 1
         let kind :=
-          if isTest then InstrKind.memRead mo.baseX64 (finalDisp mo ip total)
-          else InstrKind.memWrite mo.baseX64 (finalDisp mo ip total)
+          if isTest then readKind mo (finalDisp mo ip total)
+          else writeKind mo (finalDisp mo ip total)
         let suffix :=
           if isTest then
             "," ++ fmtNum (if op == 0xF6 then (bytes.get! (total - 1)).toUInt64
@@ -379,7 +410,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
       match mo with
       | none => other 1 "db"
       | some mo =>
-        { kind := .memWrite mo.baseX64 (finalDisp mo ip total)
+        { kind := writeKind mo (finalDisp mo ip total)
           text := s!"{if reg == 0 then "inc" else "dec"} byte ptr {memText mo ip total}"
           len := total }
   | 0xFF =>
@@ -395,14 +426,14 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
         match toMemKind with
         | none => other 1 "db"
         | some (mo, d) =>
-          { kind := .memWrite mo.baseX64 d
+          { kind := writeKind mo d
             text := s!"{if reg == 0 then "inc" else "dec"} qword ptr {memText mo ip total}"
             len := total }
       | 6 =>
         match toMemKind with
         | none => other 1 "db"
         | some (mo, d) =>
-          { kind := .memWrite mo.baseX64 d
+          { kind := writeKind mo d
             text := s!"push qword ptr {memText mo ip total}"
             len := total }
       | _ => other 1 "db"
@@ -410,7 +441,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
     if plen + 9 ≤ bytes.size then
       let a := readU64leAt bytes (plen + 1)
       let sz := if op == 0xA0 then 1 else 8
-      { kind := .memRead none (Int.ofNat a.toNat)
+      { kind := .memRead none none 1 (Int.ofNat a.toNat)
         text := s!"mov {if sz == 1 then "al" else "rax"},{ptrSize sz} [{fmtNum a}]"
         len := plen + 9 }
     else other 1 "db"
@@ -418,7 +449,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
     if plen + 9 ≤ bytes.size then
       let a := readU64leAt bytes (plen + 1)
       let sz := if op == 0xA2 then 1 else 8
-      { kind := .memWrite none (Int.ofNat a.toNat)
+      { kind := .memWrite none none 1 (Int.ofNat a.toNat)
         text := s!"mov {ptrSize sz} [{fmtNum a}],{if sz == 1 then "al" else "rax"}"
         len := plen + 9 }
     else other 1 "db"
@@ -435,8 +466,8 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
           | none => other 2 "db"
           | some mo =>
             let mne := if op2 == 0xB6 then "movzx" else "movsx"
-            { kind := .memRead mo.baseX64 (finalDisp mo ip total)
-              text := s!"{mne} {regName64 reg},{memText mo ip total}"
+            { kind := readKind mo (finalDisp mo ip total)
+              text := s!"{mne} {regNameOf (if rexW then 8 else 4) reg},byte ptr {memText mo ip total}"
               len := total }
       | 0xB7 | 0xBF =>  -- movzx/movsx r, r/m16
         withModRM2 (plen + 2) fun reg mo total =>
@@ -444,8 +475,8 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
           | none => other 2 "db"
           | some mo =>
             let mne := if op2 == 0xB7 then "movzx" else "movsx"
-            { kind := .memRead mo.baseX64 (finalDisp mo ip total)
-              text := s!"{mne} {regName64 reg},{memText mo ip total}"
+            { kind := readKind mo (finalDisp mo ip total)
+              text := s!"{mne} {regNameOf (if rexW then 8 else 4) reg},word ptr {memText mo ip total}"
               len := total }
       | 0x84 =>  -- je rel32
         if plen + 6 ≤ bytes.size then
@@ -468,7 +499,7 @@ private def decodeOpcode (bytes : ByteArray) (plen : Nat) (ip : VA)
           match mo with
           | none => other 2 "db"
           | some mo =>
-            { kind := .memRead mo.baseX64 (finalDisp mo ip total)
+            { kind := readKind mo (finalDisp mo ip total)
               text := s!"imul {regName64 reg},{memText mo ip total}"
               len := total }
       | _ => other 2 "db"

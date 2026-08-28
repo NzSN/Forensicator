@@ -1,0 +1,170 @@
+// ReplayApi.tla — the public TTD Replay API as a formal engine surface
+// (specs/ReplayApi.tla; pinned to the v0.9.5 NuGet header IReplayEngine.h).
+// State machine + data-flow diagram: Timeline truth | commit truth | API state.
+// Render:  dot -Tsvg specs/ReplayApi.dot -o specs/ReplayApi.svg
+digraph replayapi {
+    graph  [rankdir=TB, splines=true, nodesep=0.35, ranksep=0.5, bgcolor=white,
+            fontname="Helvetica", fontsize=11, label="ReplayApi — public TTD Replay API surface over Timeline (TLA+, pinned to v0.9.5 IReplayEngine.h)",
+            labelloc=t, labeljust=l, pad=0.4];
+    node   [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+            fillcolor=white, color="#333333", penwidth=1.2];
+    edge   [fontname="Helvetica", fontsize=10, color="#555555"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // State owners
+    // ──────────────────────────────────────────────────────────────────
+    subgraph cluster_timeline {
+        label="Timeline state (Timeline.tla — the recorded trace)";
+        style="rounded,filled"; color="#c9d6ef"; fillcolor="#eef3fc";
+        timeline [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>init_mem</B> · contents at position 0</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>wr_pos / wr_addr / wr_val</B> · append-only write log</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>ev_pos / ev_kind</B> · event log (exceptions only here)</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>frontier</B> · record head · cursor · threads · calls</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>EngineValueAt(a,t)</B> = ValueAt(a, t−1) — pre-instruction positions:</TD></TR>
+            <TR><TD ALIGN="LEFT">a write at p is visible at engine position p+1</TD></TR>
+        </TABLE>>];
+    }
+
+    subgraph cluster_commit {
+        label="Commit truth (engine side — no region enumeration; queries FAIL on uncommitted cells)";
+        style="rounded,filled"; color="#b7d7c3"; fillcolor="#eef7f1";
+        commit [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>init_committed</B> · committed at position 0 (chosen in RInit)</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>cm_pos / cm_page / cm_on</B> · append-only commit-change log</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>CmAt(p,t)</B> · committed? · <B>LastCommitOnPos(p,t)</B> · last commit-ON ≤ t</TD></TR>
+        </TABLE>>];
+    }
+
+    subgraph cluster_api {
+        label="API surface state (ICursorView + watchpoints + last query)";
+        style="rounded,filled"; color="#d9c9a3"; fillcolor="#fdf8ec";
+        cursors [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>Cursors</B> (ICursorView) — independent objects: many cursors</TD></TR>
+            <TR><TD ALIGN="LEFT">per engine (P0′; vs dbgeng&apos;s one global !tt position)</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>cur_on / cur_pos / cur_prev</B> · created, position, previous</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>cur_stop</B> · last stop reason ∈ StopReasons</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>cur_mask</B> ⊆ <B>Maskable</B> = {MEMORY_WATCHPOINT, POSITION_WATCHPOINT,</TD></TR>
+            <TR><TD ALIGN="LEFT">EXCEPTION} — the v0.9.5 EventMask genuinely gates stops</TD></TR>
+        </TABLE>>];
+        watchpoints [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>Memory watchpoints</B> · wp_on / wp_addr (one cell per slot)</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>Position watchpoints</B> · pwp_on / pwp_lo / pwp_hi (armed range)</TD></TR>
+            <TR><TD ALIGN="LEFT">access masks R/W/E/C collapse to W (Timeline records writes only)</TD></TR>
+        </TABLE>>];
+        query [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+            <TR><TD ALIGN="LEFT"><B>Last memory query</B> · q_ok / q_addr / q_val / q_pol</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>q_pos</B> · returned provenance position · <B>q_cursor</B> · issue position</TD></TR>
+            <TR><TD ALIGN="LEFT">Policies v0.9.5: DEFAULT · THREAD_LOCAL · CONSERVATIVE ·</TD></TR>
+            <TR><TD ALIGN="LEFT">AGGRESSIVE · IN_FRAGMENT (+&quot;RANGE&quot; for QueryMemoryRange)</TD></TR>
+        </TABLE>>];
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Actions
+    // ──────────────────────────────────────────────────────────────────
+    act_record [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>RecordOrNav</B> — Timeline&apos;s Next, engine-gated</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">PIN 1: a write is recorded only on a cell</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">committed at the pre-state (no store on</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">an uncommitted page) · API vars untouched</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_commit [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>CommitStep</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">guard: frontier &lt; MaxPos</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">append (frontier+1, cell, on) to commit log</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_lifecycle [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>CreateCursor · SetPos · SetMask</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">CreateCursor: on, pos 0, stop NONE, mask {}</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">SetPos: direct jump ≤ frontier</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">SetMask: m ⊆ Maskable (v0.9.5 SetEventMask)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">all three reset stop → NONE</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_wp [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>AddMem/RemoveMem · AddPos/RemovePos Watchpoint</B></TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">arm/disarm slots (MaxWatch = 2)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">stops reset → NONE (reasons are meaningful</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">only against a fixed watchpoint set)</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_qexact [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>QueryExact</B> — GloballyConservative</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">exact at the cursor; FAILS iff uncommitted</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">q_val = EngineValueAt(a, cur_pos) · q_pos = cur_pos</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_qsearch [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>QuerySearch</B> — Default/ThreadLocal/Aggressive/InFragment</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">engine may answer from ANOTHER position</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">honest provenance: value = engine truth at the</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">returned committed position (thread scope unmodeled)</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_qrange [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>QueryRangeMem</B> — QueryMemoryRange</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">exact at cursor + recording-Sequence provenance</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">PIN 2: RecordedAtE = max(last write + 1, last commit-ON)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">— the jigsaw-validity hook (D2 intervals refine on it)</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    act_replay [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2">
+        <TR><TD><B>ReplayFwd / ReplayBwd(dest)</B> — replay scans</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">stop at the FIRST/LAST masked hit in the scan range:</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">watched write · position-range entry · exception</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">hit sets gated on cur_mask (EventMask, v0.9.5)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">reason by <B>set membership</B> (target ∈ hits — the 2026-08-18</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#555555">sentinel fix) · else dest: POSITION, or PROCESS at frontier/0</TD></TR>
+    </TABLE>>, fillcolor="#e8e8e8"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // Effects (solid) and reads/guards (dashed)
+    // ──────────────────────────────────────────────────────────────────
+    act_record -> timeline [style=solid, color="#666666", label="records"];
+    act_record -> commit   [style=dashed, color="#666666", label="guard: CmAt(write)"];
+
+    act_commit -> commit   [style=solid, color="#3d8b5a", label="cm log append"];
+
+    act_lifecycle -> cursors [style=solid, color="#b08a1e"];
+    act_lifecycle -> timeline [style=dashed, color="#b08a1e", label="SetPos reads frontier"];
+
+    act_wp -> watchpoints [style=solid, color="#c96a1e"];
+    act_wp -> cursors     [style=solid, color="#c96a1e", label="stops → NONE"];
+
+    act_qexact -> query    [style=solid, color="#4a7db1"];
+    act_qexact -> commit   [style=dashed, color="#4a7db1", label="CmAt at cursor"];
+    act_qexact -> timeline [style=dashed, color="#4a7db1", label="EngineValueAt"];
+
+    act_qsearch -> query    [style=solid, color="#4a7db1"];
+    act_qsearch -> commit   [style=dashed, color="#4a7db1", label="search committed positions"];
+    act_qsearch -> timeline [style=dashed, color="#4a7db1", label="engine truth"];
+
+    act_qrange -> query    [style=solid, color="#4a7db1", label="val + Sequence"];
+    act_qrange -> commit   [style=dashed, color="#4a7db1", label="last commit-ON"];
+    act_qrange -> timeline [style=dashed, color="#4a7db1", label="last write ≤ t−1"];
+
+    act_replay -> cursors    [style=solid, color="#a34fa3", label="pos / prev / stop"];
+    act_replay -> watchpoints [style=dashed, color="#a34fa3", label="armed sets"];
+    act_replay -> timeline   [style=dashed, color="#a34fa3", label="write log + events"];
+
+    // ──────────────────────────────────────────────────────────────────
+    // Invariants
+    // ──────────────────────────────────────────────────────────────────
+    inv [label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="3">
+        <TR><TD ALIGN="LEFT"><B>cfg checks: TimelineInvariant ∧ ReplayApiInvariant</B></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>ReplayApiInvariant</B> = ReplayTypes ∧ ReplayCursorBounded ∧ QueryHonest</TD></TR>
+        <TR><TD ALIGN="LEFT">&nbsp;&nbsp;∧ ExactAtCursor ∧ RangeFresh ∧ WatchStopsFirst ∧ EventStopsFirst ∧ PwpStopsFirst</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>QueryHonest</B> (money property): q_ok ⇒ value = engine truth at q_pos, committed there</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>*StopsFirst</B>: stop ⇒ mask bit set ∧ genuine hit AT the stop position ∧ none strictly</TD></TR>
+        <TR><TD ALIGN="LEFT">between prev and it (mask-membership conjuncts — the v0.9.5 EventMask re-pin)</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#a33"><B>2026-08-18</B>: length-6 run caught MaxPosOf({}) = 0 (empty-set sentinel) colliding with</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#a33">real position 0 — bogus MEMORY_WATCHPOINT reason on a genuine POSITION_WATCHPOINT hit;</TD></TR>
+        <TR><TD ALIGN="LEFT" COLOR="#a33">reason selection is now by set membership (target ∈ hits). Re-verification in flight.</TD></TR>
+    </TABLE>>, style="rounded,dashed,filled", fillcolor="#fdf3f3", color="#cc6666"];
+
+    cursors -> inv [style=dotted, color="#888888"];
+    query -> inv    [style=dotted, color="#888888"];
+}

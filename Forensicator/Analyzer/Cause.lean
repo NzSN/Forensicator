@@ -197,17 +197,19 @@ private def ruleSmiConfusion (c : Ctx) : Option Hit := do
   let fault ← c.faultVa
   let exc ← c.dump.exception
   let regs ← exc.context
-  let (base, disp) ← match c.disasm.map (·.kind) with
-    | some (Util.InstrKind.memRead b d) | some (Util.InstrKind.memWrite b d) => some (b, d)
+  let (base, index, _scale, disp) ← match c.disasm.map (·.kind) with
+    | some (Util.InstrKind.memRead b i s d) | some (Util.InstrKind.memWrite b i s d) => some (b, i, s, d)
     | _ => none
-  let baseIdx ← base
-  let baseVal := regs.get baseIdx
-  if baseVal == 0 || baseVal ≥ ((1 : UInt64) <<< 32) || baseVal &&& 1 != 0 then none
+  if index.isSome then none  -- SIB operand: index algebra lands with the cage rule (T2)
   else
-    let effective := (Int.ofNat baseVal.toNat + disp).toNat % (2 ^ 64)
-    if fault.toNat != effective then none
-    else some { rule := 5, verdict := .smiTypeConfusion, confidence := .high
-                evidence := [s!"base register holds compressed Smi (value {(Int.ofNat baseVal.toNat) / 2}), dereferenced as pointer: {c.disasm.get!.text}"] }
+    let baseIdx ← base
+    let baseVal := regs.get baseIdx
+    if baseVal == 0 || baseVal ≥ ((1 : UInt64) <<< 32) || baseVal &&& 1 != 0 then none
+    else
+      let effective := (Int.ofNat baseVal.toNat + disp).toNat % (2 ^ 64)
+      if fault.toNat != effective then none
+      else some { rule := 5, verdict := .smiTypeConfusion, confidence := .high
+                  evidence := [s!"base register holds compressed Smi (value {(Int.ofNat baseVal.toNat) / 2}), dereferenced as pointer: {c.disasm.get!.text}"] }
 
 private def ruleObjectAccess (c : Ctx) : Option Hit := do
   let fault ← c.faultVa
@@ -216,21 +218,23 @@ private def ruleObjectAccess (c : Ctx) : Option Hit := do
   else
     let exc ← c.dump.exception
     let regs ← exc.context
-    let (base, disp) ← match c.disasm.map (·.kind) with
-      | some (Util.InstrKind.memRead (some b) d) | some (Util.InstrKind.memWrite (some b) d) => some (b, d)
+    let (base, index, _scale, disp) ← match c.disasm.map (·.kind) with
+      | some (Util.InstrKind.memRead (some b) i s d) | some (Util.InstrKind.memWrite (some b) i s d) => some (b, i, s, d)
       | _ => none
-    let tagged := regs.get base
-    if tagged &&& 1 != 1 then none
+    if index.isSome then none  -- SIB operand: index algebra lands with the cage rule (T2)
     else
-      let heap := tagged &&& (0xFFFFFFFFFFFFFFFF - 1)
-      if heap < cage || heap ≥ cage + ((1 : UInt64) <<< 32) then none
+      let tagged := regs.get base
+      if tagged &&& 1 != 1 then none
       else
-        let effective := (Int.ofNat tagged.toNat + disp).toNat % (2 ^ 64)
-        if fault.toNat != effective then none
+        let heap := tagged &&& (0xFFFFFFFFFFFFFFFF - 1)
+        if heap < cage || heap ≥ cage + ((1 : UInt64) <<< 32) then none
         else
-          let itype ← v8InstanceType c.space cage heap
-          some { rule := 6, verdict := .v8ObjectAccess itype, confidence := .medium
-                 evidence := [s!"fault VA {hexUpper fault} = object {hexUpper heap} {dispTextRust disp}; instance type 0x{hexPadUpper itype.toUInt64 4} (layout {layoutName c.dump})"] }
+          let effective := (Int.ofNat tagged.toNat + disp).toNat % (2 ^ 64)
+          if fault.toNat != effective then none
+          else
+            let itype ← v8InstanceType c.space cage heap
+            some { rule := 6, verdict := .v8ObjectAccess itype, confidence := .medium
+                   evidence := [s!"fault VA {hexUpper fault} = object {hexUpper heap} {dispTextRust disp}; instance type 0x{hexPadUpper itype.toUInt64 4} (layout {layoutName c.dump})"] }
 where
   dispTextRust (d : Int) : String :=
     -- Rust {disp:+#x}: lowercase hex with 0x and explicit sign

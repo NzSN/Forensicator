@@ -42,6 +42,7 @@ structure V8Layout where
   scriptLineEnds : UInt64
   stringLength : UInt64
   stringChars : UInt64
+  externalStringResourceData : UInt64
   stringItypeMax : UInt16
   stringOneByteBit : UInt16
   stringExternalBit : UInt16
@@ -73,6 +74,10 @@ structure V8Layout where
   itypeMap : UInt16
   itypeFeedbackCell : UInt16
   itypeClosureFeedbackCellArray : UInt16
+  itypeJsFunctionFirst : UInt16
+  itypeJsFunctionLast : UInt16
+  itypeSharedFunctionInfo : UInt16
+  itypeScopeInfo : UInt16
   weakArrayListLength : UInt64
   weakArrayListData : UInt64
   deriving Inhabited
@@ -105,6 +110,18 @@ def V8Layout.v14_6 : V8Layout where
   scriptLineEnds := 28
   stringLength := 8
   stringChars := 12
+  -- ExternalString.resource_data @ +0x10 (in-object EPT handle, 4-byte slot):
+  --   v8/src/objects/string.tq:85-88 (resource @ sizeof(String) = 12,
+  --   resource_data @ kResourceOffset + kExternalPointerSlotSize = 16;
+  --   slot size = sizeof(ExternalPointer_t) = 4 with sandbox —
+  --   v8/src/common/globals.h:644 kExternalPointerSlotSize,
+  --   v8/include/v8-internal.h:356 ExternalPointerHandle = uint32_t,
+  --   l.362 ExternalPointer_t = ExternalPointerHandle under V8_ENABLE_SANDBOX).
+  --   Confirmed on the nicholas dump: EPT handles 0x000b8f80 @ +0xC (resource)
+  --   and 0x000b8fc0 @ +0x10 (resource_data). String.tq:87 warns the field is
+  --   MISSING for UNCACHED_EXTERNAL_* strings (fail closed when reading;
+  --   uncached GetChars falls back to the resource, string.tq:108-114).
+  externalStringResourceData := 16
   stringItypeMax := 0x40
   stringOneByteBit := 0x08
   stringExternalBit := 0x02
@@ -122,9 +139,20 @@ def V8Layout.v14_6 : V8Layout where
   scopeMaxInlinedLocalNames := 512
   fixedArrayLength := 4
   fixedArrayData := 8
-  eptEntrySize := 16
+  -- External pointer table (sandbox); pinned from the Electron 41.10.6
+  -- build checkout (V8 14.6.202.33-23-g3c5759b05fe), v8/include/v8-internal.h:
+  --   l.324 kExternalPointerTableEntrySize = 8 (was 16 — wrong stride)
+  eptEntrySize := 8
+  --   l.320 kExternalPointerIndexShift = 6 (default 512 MB reservation;
+  --   Android 7 @ l.310, iOS 8 @ l.317 — Windows/Linux default assumed,
+  --   design Open Question 2)
   eptIndexShift := 6
-  eptPayloadMask := 0x0000FFFFFFFFFFFF
+  --   l.347 kExternalPointerPayloadMask: clears tag+mark bits 48..55
+  --   (kExternalPointerMarkBit @ l.339, kExternalPointerTagMask @ l.341),
+  --   keeps the 48-bit payload (bits 0..47) and bits 56..63 (unused for
+  --   valid entries). Was 0x0000FFFFFFFFFFFF — wrong value, broke every
+  --   EPT resolution in findEptBase/externalStringViaEpt
+  eptPayloadMask := 0xff00ffffffffffff
   -- Phase 1: FeedbackVector / FeedbackCell (V8 14.6, compressed pointers)
   -- JSFunction.feedback_cell @ +24 (after dispatch_handle@12, sfi@16, context@20)
   jsfunctionFeedbackCell := 24
@@ -144,6 +172,19 @@ def V8Layout.v14_6 : V8Layout where
   itypeMap := 0x0116
   itypeFeedbackCell := 0x009c
   itypeClosureFeedbackCellArray := 0x010f
+  -- Instance type range/values pinned from the torque-generated header of
+  -- the nicholas build (out/Release_S_41_10_6/gen/v8/torque-generated/
+  -- instance-types.h, V8 14.6.202.33-23-g3c5759b05fe):
+  --   l.282 FIRST_JS_FUNCTION_TYPE = 2066 = 0x0812 (JS_FUNCTION_TYPE,
+  --   v8/src/objects/js-function.tq:30)
+  itypeJsFunctionFirst := 0x0812
+  --   l.302 LAST_JS_FUNCTION_TYPE = 2082 = 0x0822 (JS_CLASS_CONSTRUCTOR_TYPE,
+  --   js-function.tq:44)
+  itypeJsFunctionLast := 0x0822
+  --   l.228 SHARED_FUNCTION_INFO_TYPE = 288 = 0x0120 (shared-function-info.tq:62)
+  itypeSharedFunctionInfo := 0x0120
+  --   l.226 SCOPE_INFO_TYPE = 286 = 0x011E (scope-info.tq:119)
+  itypeScopeInfo := 0x011E
   -- WeakArrayList: map(4) + capacity(4 Smi) + elements[]@8
   weakArrayListLength := 4
   weakArrayListData := 8
