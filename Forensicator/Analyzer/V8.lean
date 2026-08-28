@@ -215,6 +215,37 @@ private structure JsFrameInfo where
   scriptName : Option String
   scriptLine : Option UInt32
 
+/-- A slot value that passed the scored JSFunction validation (design
+    2026-08-27 §W3.2): candidate heap address + resolved cage base. -/
+private structure JsCandidate where
+  heap : VA
+  cage : VA
+
+/-- Validate the tagged u64 at fp + slot as a JSFunction candidate
+    (design §W3.2 checks 1-2): tagged, in-cage, aligned, map instance
+    type in [itypeJsFunctionFirst, itypeJsFunctionLast]. none on any
+    failure (fail closed; try next candidate, then none). -/
+private def jsCandidateAt (space : AddressSpace) (fp : VA) (slot : Int)
+    (cageHint : Option VA) (layout : V8Layout) : Option JsCandidate := do
+  let tagged := readU64 space (wadd fp slot)
+  if tagged &&& 1 != 1 then none
+  else
+    let heap := tagged &&& 0xFFFFFFFFFFFFFFFE
+    -- kObjectAlignment = kTaggedSize = 4 under V8_ENABLE_COMPRESS_POINTERS
+    -- (v8/src/common/globals.h; Electron 41 is a compressed-cage build):
+    -- design §W3.2 check 1 "aligned".
+    if heap &&& 3 != 0 then none
+    else
+      let derived := tagged &&& 0xFFFFFFFF00000000
+      let cage := match cageHint with
+        | some h => if heap ≥ h && heap < h + ((1 : UInt64) <<< 32) then h else derived
+        | none => derived
+      if heap < cage || heap ≥ cage + ((1 : UInt64) <<< 32) then none
+      else
+        let itype ← instanceType space cage heap
+        if itype < layout.itypeJsFunctionFirst || itype > layout.itypeJsFunctionLast then none
+        else some (heap, cage)
+
 /-- Resolve JS frame info at `fp` (v8.rs decode_js_frame). `eptBase` is
     threaded in/out (the Rust version shares a Cell across frames). -/
 private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA)
@@ -264,21 +295,9 @@ private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA
     match slots with
     | [] => none
     | slot :: rest =>
-      let tagged := readU64 space (wadd fp slot)
-      if tagged &&& 1 != 1 then trySlot rest
-      else
-        let heap := tagged &&& 0xFFFFFFFFFFFFFFFE
-        let derived := tagged &&& 0xFFFFFFFF00000000
-        let cage := match cageHint with
-          | some h => if heap ≥ h && heap < h + ((1 : UInt64) <<< 32) then h else derived
-          | none => derived
-        let frameContext := readU64 space (wadd fp layout.kContextOffset)
-        let fnContext :=
-          match readU32o space (heap + layout.jsfunctionContext) with
-          | none => none
-          | some c => (decompress cage c).map (· ||| 1)
-        if fnContext != some frameContext then trySlot rest
-        else decodeAt heap cage
+      match jsCandidateAt space fp slot cageHint layout with
+      | none => trySlot rest
+      | some c => decodeAt c.heap c.cage
   trySlot [layout.kFunctionOffset, layout.kFunctionOffsetLegacy]
 
 /-- Classify a frame (v8.rs classify_frame). -/
