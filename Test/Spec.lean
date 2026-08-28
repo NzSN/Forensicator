@@ -614,9 +614,11 @@ def runAll : IO UInt32 := do
      | .error _ => false
      | .ok d =>
        let space := Forensicator.buildAddressSpace d
-       space.read cageBase 8 |>.map (· == ByteArray.mk (Array.replicate 8 0xCC)) == some true
-        && space.read (cageBase + 16) 4 |>.map (· == ByteArray.mk (Array.replicate 4 0xBB)) == some true
-        && space.read (cageBase + 24) 4 |>.map (· == ByteArray.mk (Array.replicate 4 0xCC)) == some true)
+       let reads (va : UInt64) (n : Nat) (b : UInt8) : Bool :=
+         match space.read va n with
+         | some v => v == ByteArray.mk (Array.replicate n b)
+         | none => false
+       reads cageBase 8 0xCC && reads (cageBase + 16) 4 0xBB && reads (cageBase + 24) 4 0xCC)
 
   -- disasm (port of disasm.rs tests + the fulldump crash instruction)
   let disasmSpace (code : List UInt8) : Forensicator.Spec.FastSpace :=
