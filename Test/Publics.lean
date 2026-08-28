@@ -132,11 +132,6 @@ def runAll : IO UInt32 := do
   check ctx "publics identity: truncated container fails closed"
     (match Util.pdbIdentity (Test.MsfFixture.container.extract 0 600) with
      | .error _ => true | .ok _ => false)
-  IO.FS.removeFile path
 
   let n ← ctx.failures.get
-  IO.println (if n == 0 then "== ALL PUBLICS GUARDS PASSED =="
-    else s!"== {n} PUBLICS FAILURE(S) ==")
-  pure n.toUInt32
-
 end Test.Publics
