@@ -383,10 +383,6 @@ private def ruleWildAccess (c : Ctx) : Option Hit := do
                 | some f => s!"access violation at fault VA {hexUpper f}, no V8 correlation"
                 | none => "access violation, fault VA not recorded"] }
 
-/-- Diagnose the dump's exception into a ranked verdict (cause.rs diagnose). -/
-def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
-  diagnoseWith none dump space
-
 /-- Diagnose with an optional publics table (design §W1.4): the cage rule
     enriches its evidence with crash-IP symbolization when symbols are
     available; none behaves exactly as diagnose. -/
@@ -415,7 +411,8 @@ def diagnoseWith (publics : Option Util.Publics) (dump : Dump)
         fast := FastSpace.ofSpace space
         faultVa := faultVa
         disasm := decodeFirst (FastSpace.ofSpace space) exc.address
-        cageBase := annotationHex dump "v8_ro_space_firstpage_address" }
+        cageBase := annotationHex dump "v8_ro_space_firstpage_address"
+        publics := publics }
     let rules : List (Ctx → Option Hit) :=
       [ruleFatalMessage, ruleBreakpoint, ruleStackOverflow, ruleWasmGuard,
        ruleSmiConfusion, ruleObjectAccess, ruleCageDecompression, ruleOomState, ruleCorruptedCodePointer,
@@ -435,6 +432,10 @@ def diagnoseWith (publics : Option Util.Publics) (dump : Dump)
         evidence := head.evidence
         faultVa := faultVa, access := access, fatalMessage := fatal
         alternatives := rest.map fun h => (h.verdict, h.confidence) }
+
+/-- Diagnose the dump's exception into a ranked verdict (cause.rs diagnose). -/
+def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
+  diagnoseWith none dump space
 
 /-- Append crash-IP symbolization to the evidence when a publics table is
     present (design §W1.4), but only when the verdict's own rule has not
