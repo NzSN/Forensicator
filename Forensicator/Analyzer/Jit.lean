@@ -516,7 +516,7 @@ private def frameInfoJson (info : JitFrameInfo) : Json :=
 def analyzer : Forensicator.Analyzer where
   name := "jit"
   description := "Recovers V8 type feedback and Code resolution for JIT-compiled frames"
-  run dump space :=
+  run _ctx dump space :=
     let layout := V8Layout.detect dump
     let cage := Cause.annotationHex dump "v8_ro_space_firstpage_address"
     -- Reuse the V8 analyzer's stack walk to get all frames

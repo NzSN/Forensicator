@@ -7,6 +7,7 @@ import Forensicator.Model.Structs
 import Forensicator.Spec.AddressSpace
 import Forensicator.Model.Dump
 import Forensicator.Util.Json
+import Forensicator.Util.Pdb
 
 namespace Forensicator
 
@@ -30,10 +31,19 @@ def AnalyzerOutput.count (o : AnalyzerOutput) : Nat :=
   o.strings.length + o.vtables.length + o.linkedLists.length
     + o.arrays.length + o.chunks.length + o.shapeClusters.length
 
+/-- Symbol context threaded through the pipeline (design §W2.3): a
+    loaded publics table when `analyze --symbols <dir>` matched and
+    verified the module's PDB; `none` otherwise — analyzers degrade
+    exactly as before (fail closed). `Analyzer.run` stays pure; the IO
+    loading lives in Main/Session. -/
+structure SymbolsCtx where
+  publics : Option Util.Publics := none
+  deriving Inhabited
+
 structure Analyzer where
   name : String
   description : String := "no description"
-  run : Dump → AddressSpace → AnalyzerOutput
+  run : SymbolsCtx → Dump → AddressSpace → AnalyzerOutput
 
 structure StructureCatalog where
   outputs : List AnalyzerOutput
@@ -55,11 +65,11 @@ def allShapeClusters (c : StructureCatalog) : List ShapeGroup :=
   c.outputs.flatMap (·.shapeClusters)
 end StructureCatalog
 
-def runPipeline (analyzers : List Analyzer) (dump : Dump) (space : AddressSpace)
-    (filter : List String) : StructureCatalog :=
+def runPipeline (ctx : SymbolsCtx) (analyzers : List Analyzer) (dump : Dump)
+    (space : AddressSpace) (filter : List String) : StructureCatalog :=
   let selected :=
     if filter.isEmpty then analyzers
     else analyzers.filter fun a => filter.contains a.name
-  ⟨selected.map fun a => a.run dump space⟩
+  ⟨selected.map fun a => a.run ctx dump space⟩
 
 end Forensicator

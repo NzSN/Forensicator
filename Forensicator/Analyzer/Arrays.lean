@@ -70,7 +70,7 @@ private def detect (cfg : Config) (space : FastSpace) (candidates : List Candida
 def analyzer (cfg : Config := {}) : Analyzer where
   name := "arrays"
   description := "Groups pointer targets with regular stride into arrays"
-  run dump space :=
+  run _ctx dump space :=
     let fs := FastSpace.ofSpace space
     { AnalyzerOutput.new "arrays" with
       arrays := detect cfg fs (pointerScan space dump [PointerPattern.heapReferences]) }

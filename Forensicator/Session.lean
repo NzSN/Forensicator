@@ -12,6 +12,8 @@ import Forensicator.Parse.Minidump
 import Forensicator.Pipeline
 import Forensicator.Util.Image
 import Forensicator.Util.Bytes
+import Forensicator.Util.Pdb
+import Forensicator.Analyzer.Analyzer
 import Forensicator.Trace.Client
 import Std.Data.HashSet
 
@@ -145,5 +147,88 @@ def Session.tokenize (line : String) : List String :=
         else go rest [] inQ (acc ++ [String.ofList cur.reverse])
       else go rest (c :: cur) inQ acc
   go line.toList [] false []
+
+-- ── symbol context (design §W2.3) ─────────────────────────────────────
+
+/-- The module owning the exception address (the crashed module); the
+    first loaded module when no exception is recorded. -/
+def Session.crashModule (dump : Dump) : Option Module :=
+  match dump.exception with
+  | some exc => dump.modules.find? fun m =>
+      exc.address ≥ m.baseVa && exc.address < m.baseVa + m.size
+  | none => dump.modules.head?
+
+/-- Candidate PDB paths in `dir` for a module: the module's own
+    pdb_name basename first, then its image basename with the `.exe`
+    extension swapped for `.pdb`. -/
+private def pdbCandidates (dir : String) (m : Module) : List String :=
+  (match m.pdbName with
+   | some p => [dir ++ "/" ++ Session.baseName p]
+   | none => []) ++
+  [dir ++ "/" ++ (let n := Session.baseName m.name
+                   let stem := if n.endsWith ".exe" then
+                     n.toList.reverse.drop 4 |>.reverse |>.asString else n
+                   stem ++ ".pdb")]
+
+/-- The raw S_PUB32 walk of a PDB (stream 3 DBI → symbol record stream),
+    shared by the publics CLI probe and the symbol context loader. IO
+    lives in Main/Session; Analyzer stays pure. -/
+def Session.publicRecordsFromPdb (pdb : String)
+    : IO (Except String (Array Util.PublicRecord)) := do
+  match ← Util.MsfHandle.open pdb with
+  | .error e => pure (.error e)
+  | .ok msf =>
+    match ← Util.MsfHandle.stream msf 3 with
+    | .error e => pure (.error e)
+    | .ok dbiBytes =>
+      match Util.parseDbiHeader dbiBytes with
+      | none => pure (.error "PDB: stream 3 is not a DBI stream")
+      | some dbi =>
+        match ← Util.MsfHandle.stream msf dbi.symRecordStream.toNat with
+        | .error e => pure (.error e)
+        | .ok symBytes =>
+          match Util.walkPublicRecords symBytes with
+          | none => pure (.error "PDB: malformed symbol record stream")
+          | some recs => pure (.ok recs)
+
+/-- Load the publics table (segment-1 fallback mapping, design §W2.2) for
+    a PDB path. -/
+def Session.loadPublicsFromPdb (pdb : String) : IO (Except String Util.Publics) := do
+  match ← Session.publicRecordsFromPdb pdb with
+  | .error e => pure (.error e)
+  | .ok recs => pure (.ok (Util.Publics.ofRecords recs none))
+
+/-- Build the symbol context for a dump (design §W2.3): with
+    `--symbols <dir>`, pick the crashed module's PDB — its pdb_name
+    basename, else its image basename with the extension swapped to `.pdb`
+    — that exists in `dir`, verify the identity (age + GUID via
+    pdbIdentity against the module's CodeView record), and load Publics
+    once. Any failure — no dir, no module, no candidate, identity
+    mismatch, malformed PDB, I/O error — yields `{ publics := none }` and
+    analyzers behave exactly as today (fail closed). -/
+def Session.loadSymbolsCtxFor (dump : Dump) (dir : Option String) : IO SymbolsCtx := do
+  match dir with
+  | none => pure { publics := none }
+  | some dir =>
+    match Session.crashModule dump with
+    | none => pure { publics := none }
+    | some m =>
+      let mut out : Option Util.Publics := none
+      for cand in pdbCandidates dir m do
+        if out.isSome then break
+        if ← System.FilePath.pathExists cand then
+          try do
+            let bytes ← IO.FS.readBinFile cand
+            match Util.pdbIdentity bytes with
+            | .ok (age, guid) =>
+              let ageOk := (m.codeviewAge.map fun a => a == age).getD false
+              let guidOk := (m.codeviewGuid.map fun g => g.data == guid.data).getD false
+              if ageOk && guidOk then
+                match ← Session.loadPublicsFromPdb cand with
+                | .ok pubs => out := some pubs
+                | .error _ => pure ()
+            | .error _ => pure ()
+          catch _ => pure ()
+      pure { publics := out }
 
 end Forensicator

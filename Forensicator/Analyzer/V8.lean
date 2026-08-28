@@ -553,7 +553,7 @@ def disassembleException (dump : Dump) (space : AddressSpace) : Option Json := d
 def analyzer : Forensicator.Analyzer where
   name := "v8"
   description := "Recovers JS stack traces by walking native stacks and classifying V8 frames"
-  run dump space := analyzerOk dump space (walkThreadStacks dump space)
+  run _ctx dump space := analyzerOk dump space (walkThreadStacks dump space)
 where
   analyzerOk (dump : Dump) (space : AddressSpace) (frames : List V8StackFrame) :
       Forensicator.AnalyzerOutput :=

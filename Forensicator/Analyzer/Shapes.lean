@@ -50,7 +50,7 @@ private def detect (candidates : List CandidatePointer) : List ShapeGroup :=
 def analyzer : Analyzer where
   name := "shapes"
   description := "Clusters heap nodes by structural signature (offset→target_class edges)"
-  run dump space :=
+  run _ctx dump space :=
     { AnalyzerOutput.new "shapes" with
       shapeClusters := detect (pointerScan space dump [PointerPattern.heapReferences]) }
 

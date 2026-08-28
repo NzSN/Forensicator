@@ -168,11 +168,11 @@ private def supplementImages (space : Spec.AddressSpace) (dump : Dump) (path : S
   pure (space, images.images.length)
 
 private def analyzePrint (dump : Dump) (space : Spec.AddressSpace)
-    (plugin : Option String) (json : Bool) : IO Unit := do
+    (plugin : Option String) (json : Bool) (ctx : SymbolsCtx) : IO Unit := do
     let filter := match plugin with
       | none => []
       | some p => (p.splitOn ",").map (String.trimAscii · |>.toString)
-    let catalog := runPipeline defaultPipeline dump space filter
+    let catalog := runPipeline ctx defaultPipeline dump space filter
     if json then
       IO.println (Json.render (analyzeJson catalog.outputs))
     else
@@ -193,17 +193,18 @@ private def analyzePrint (dump : Dump) (space : Spec.AddressSpace)
     pure ()
 
 private def cmdAnalyze (path : String) (plugin : Option String) (json : Bool)
-    (_symbols : Option String) : IO UInt32 := do
+    (symbols : Option String) : IO UInt32 := do
   let data ← IO.FS.readBinFile path
   match Minidump.fromBytes data with
   | .error f => IO.eprintln f.render; pure 1
   | .ok dump =>
+    let ctx ← Session.loadSymbolsCtxFor dump symbols
     let (space, imageCount) ← supplementImages (buildAddressSpace dump) dump path
     if !json then
       let kind := match classifyDump dump with
         | .FullMemory => "full-memory" | .StackOnly => "stack-only"
       IO.eprintln s!"dump: {kind}, {imageCount} image(s) supplemented"
-    analyzePrint dump space plugin json
+    analyzePrint dump space plugin json ctx
     pure 0
 
 
@@ -387,7 +388,8 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
         | .trace t cursor =>
           IO.eprintln s!"position {hexUpper cursor} / frontier {hexUpper t.frontier}, dump: stack-only"
         | _ => pure ()
-      analyzePrint dump space plugin json
+      let ctx ← Session.loadSymbolsCtxFor dump s.symbols
+      analyzePrint dump space plugin json ctx
     pure (s, true)
   | "match" :: rest =>
     match (← s.currentIO) with
@@ -574,42 +576,29 @@ private def parseU32Arg (s : String) : Option UInt32 :=
     | some n => if n ≤ 0xFFFFFFFF then some (UInt32.ofNat n) else none
     | none => none
 
-/-- Load the publics table: PDB stream 3 (DBI) → symbol record stream →
-    S_PUB32 walk → sorted Publics. With `--exe`, section VAs from the PE
-    drive the RVA mapping (rva = sectionVA(seg) + off); without one the
-    segment-1 fallback applies (off is already the RVA on MSVC PE PDBs —
-    verified exact on the nicholas PDB). IO lives here, Analyzer stays
-    pure. -/
+/-- Load the publics table: the shared S_PUB32 walk (Session) + the
+    RVA mapping. With `--exe`, section VAs from the PE drive the mapping
+    (rva = sectionVA(seg) + off); without one the segment-1 fallback
+    applies (off is already the RVA on MSVC PE PDBs — verified exact on
+    the nicholas PDB). IO lives here, Analyzer stays pure. -/
 private def loadPublics (pdb : String) (exe : Option String)
     : IO (Except String Util.Publics) := do
-  match ← Util.MsfHandle.open pdb with
-  | .error e => pure (.error e)
-  | .ok msf =>
-    match ← Util.MsfHandle.stream msf 3 with
-    | .error e => pure (.error e)
-    | .ok dbiBytes =>
-      match Util.parseDbiHeader dbiBytes with
-      | none => pure (.error "PDB: stream 3 is not a DBI stream")
-      | some dbi =>
-        match ← Util.MsfHandle.stream msf dbi.symRecordStream.toNat with
+  match exe with
+  | none => Session.loadPublicsFromPdb pdb
+  | some ep =>
+    let msecVas ←
+      try do
+        let bytes ← IO.FS.readBinFile ep
+        match Util.ImageFile.fromBytes bytes 0 with
+        | .ok img => pure (.ok (img.sections.map (·.vaStart) |>.toArray))
         | .error e => pure (.error e)
-        | .ok symBytes =>
-          match Util.walkPublicRecords symBytes with
-          | none => pure (.error "PDB: malformed symbol record stream")
-          | some recs =>
-            let secVas : Except String (Option (Array UInt32)) ← match exe with
-              | none => pure (.ok none)
-              | some ep =>
-                try do
-                  let bytes ← IO.FS.readBinFile ep
-                  match Util.ImageFile.fromBytes bytes 0 with
-                  | .ok img => pure (.ok (some (img.sections.map (·.vaStart) |>.toArray)))
-                  | .error e => pure (.error e)
-                catch _ => pure (.error "publics: cannot read exe")
-            match secVas with
-            | .error e => pure (.error e)
-            | .ok vas =>
-              pure (.ok (Util.Publics.ofRecords recs vas))
+      catch _ => pure (.error "publics: cannot read exe")
+    match msecVas with
+    | .error e => pure (.error e)
+    | .ok vas =>
+      match ← Session.publicRecordsFromPdb pdb with
+      | .error e => pure (.error e)
+      | .ok recs => pure (.ok (Util.Publics.ofRecords recs (some vas)))
 
 /-- Probe command: prints the entry count and nearest-below for each
     query RVA as NAME+0xHEX (no space), e.g.

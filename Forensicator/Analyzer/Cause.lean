@@ -407,7 +407,7 @@ def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
 def analyzer : Analyzer where
   name := "cause"
   description := "Diagnoses why the process crashed: exception semantics, disassembly, cage fault analysis"
-  run dump space :=
+  run _ctx dump space :=
     let d := diagnose dump space
     { AnalyzerOutput.new "cause" with
       custom := [("crash_diagnosis", .obj [

@@ -66,7 +66,7 @@ private def detect (cfg : Config) (candidates : List CandidatePointer) : List St
 def analyzer (cfg : Config := {}) : Analyzer where
   name := "lists"
   description := "Chases pointer chains to find linked lists in heap memory"
-  run dump space :=
+  run _ctx dump space :=
     { AnalyzerOutput.new "lists" with
       linkedLists := detect cfg
         (pointerScan space dump [PointerPattern.heapReferences]) }

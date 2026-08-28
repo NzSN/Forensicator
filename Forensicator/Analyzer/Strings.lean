@@ -99,7 +99,7 @@ private def detectGo (cfg : Config) (region : AddressRegion) (fuel i : Nat)
 def analyzer (cfg : Config := {}) : Analyzer where
   name := "strings"
   description := "Scans committed memory for null-terminated strings (ASCII, UTF-16LE)"
-  run _dump space :=
+  run _ctx _dump space :=
     { AnalyzerOutput.new "strings" with
       strings := space.regions.foldl (init := []) fun acc region =>
         if region.classification == .Other then acc
