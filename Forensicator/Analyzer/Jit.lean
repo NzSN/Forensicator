@@ -516,11 +516,12 @@ private def frameInfoJson (info : JitFrameInfo) : Json :=
 def analyzer : Forensicator.Analyzer where
   name := "jit"
   description := "Recovers V8 type feedback and Code resolution for JIT-compiled frames"
-  run _ctx dump space :=
+  run ctx dump space :=
     let layout := V8Layout.detect dump
     let cage := Cause.annotationHex dump "v8_ro_space_firstpage_address"
-    -- Reuse the V8 analyzer's stack walk to get all frames
-    let frames := V8.walkThreadStacks dump space
+    -- Reuse the V8 analyzer's stack walk to get all frames (symbols are
+    -- only cosmetic here; the publics table is threaded for uniformity)
+    let frames := V8.walkThreadStacks ctx.publics dump space
     -- Phase 2: Discover CodeRange and JSDT segments
     let codeRange := discoverCodeRange frames
     let jsdtSegments : List JSDTSegment :=
