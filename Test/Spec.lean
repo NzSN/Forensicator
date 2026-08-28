@@ -1040,7 +1040,8 @@ def runAll : IO UInt32 := do
   let eptSpace := mkEptDump eptRegions
   let eptDump := mkEptDumpDoc "0x200000000"
   let eptOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) eptDump eptSpace
-  IO.println s!"T9DBG W3-A frames: {repr (v8Frames eptOut).take 2}"
+  let dbgFrames := (v8Frames eptOut).take 2
+  IO.println s!"T9DBG W3-A frames: {repr dbgFrames}"
   check ctx "v8 ept: external name + script url + script line (synthetic EPT)"
     (match v8Frames eptOut with
      | f0 :: _ =>

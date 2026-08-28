@@ -134,4 +134,8 @@ def runAll : IO UInt32 := do
      | .error _ => true | .ok _ => false)
 
   let n ← ctx.failures.get
+  IO.println (if n == 0 then "== ALL PUBLICS GUARDS PASSED =="
+    else s!"== {n} PUBLICS FAILURE(S) ==")
+  pure n.toUInt32
+
 end Test.Publics
