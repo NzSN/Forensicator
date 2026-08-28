@@ -753,7 +753,7 @@ def runAll : IO UInt32 := do
   let dgWSym := Analyzer.Cause.diagnoseWith (some pubs) { dWSym0 with modules := [mod] } sWSym
   check ctx "cause cage: weak form carries faulting-IP symbol too (W1.4)"
     (dgWSym.verdict == .decompressedGarbagePointer
-      && dgWSym.evidence.any (· == "faulting IP 0x1030 = Builtins_TypedArrayPrototypeFindLastIndex+0xC"))
+      && dgWSym.evidence.any (· == "faulting IP 0x1030 = Builtins_TypedArrayPrototypeFindLastIndex+0xc"))
   let dgNoPubs := Analyzer.Cause.diagnoseWith none dSym sSym
   check ctx "cause cage: no publics means no symbol lines (W1.4)"
     (!dgNoPubs.evidence.any (·.startsWith "faulting IP"))
