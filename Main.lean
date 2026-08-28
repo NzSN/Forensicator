@@ -615,7 +615,7 @@ private def loadPublics (pdb : String) (exe : Option String)
     query RVA as NAME+0xHEX (no space), e.g.
     nearest(0x4E85AE4) = Builtins_TypedArrayPrototypeFindLastIndex+0x24. -/
 private def cmdPublics (pdb : String) (queries : List UInt32)
-    (exe : Option String) : IO UInt32 := do
+    (greps : List String) (exe : Option String) : IO UInt32 := do
   match ← loadPublics pdb exe with
   | .error e => IO.eprintln s!"publics: {e}"; pure 1
   | .ok pubs =>
@@ -626,6 +626,13 @@ private def cmdPublics (pdb : String) (queries : List UInt32)
       | some (name, delta) =>
         IO.println s!"nearest(0x{hexPadUpper rva.toUInt64 8}) = {name}+0x{hexPadLower delta.toUInt64 0}"
       | none => IO.println s!"nearest(0x{hexPadUpper rva.toUInt64 8}) = <none>"
+    for g in greps do
+      let mut hits := 0
+      for (rva, name) in pubs.entries do
+        if name.contains g then
+          IO.println s!"0x{hexPadUpper rva.toUInt64 8}  {name}"
+          hits := hits + 1
+      IO.println s!"grep \"{g}\": {hits} hit(s)"
     pure 0
 
 
@@ -671,21 +678,22 @@ def main (args : List String) : IO UInt32 := do
     | none => usage
   | "publics" :: rest =>
     let rec parseP (pdb : Option String) (queries : List UInt32)
-        (exe : Option String) : List String
-        → Except String (Option String × List UInt32 × Option String)
-      | [] => .ok (pdb, queries, exe)
+        (greps : List String) (exe : Option String) : List String
+        → Except String (Option String × List UInt32 × List String × Option String)
+      | [] => .ok (pdb, queries, greps, exe)
       | "--nearest" :: r :: rest =>
         (match parseU32Arg r with
-         | some v => parseP pdb (queries ++ [v]) exe rest
+         | some v => parseP pdb (queries ++ [v]) greps exe rest
          | none => .error s!"bad rva {r}")
-      | "--exe" :: e :: rest => parseP pdb queries (some e) rest
+      | "--grep" :: g :: rest => parseP pdb queries (greps ++ [g]) exe rest
+      | "--exe" :: e :: rest => parseP pdb queries greps (some e) rest
       | x :: rest =>
         if x.startsWith "-" then .error s!"unknown flag {x}"
-        else parseP (some x) queries exe rest
-    match parseP none [] none rest with
+        else parseP (some x) queries greps exe rest
+    match parseP none [] [] none rest with
     | .error e => IO.eprintln e; usage
-    | .ok (some pdb, queries, exe) => cmdPublics pdb queries exe
-    | .ok (none, _, _) => usage
+    | .ok (some pdb, queries, greps, exe) => cmdPublics pdb queries greps exe
+    | .ok (none, _, _, _) => usage
   | "match" :: rest =>
     let rec parseM (path : Option String) (exes pdbs : List String) (json : Bool)
         : List String → Except String (Option String × List String × List String × Bool)
