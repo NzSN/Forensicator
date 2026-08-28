@@ -437,14 +437,12 @@ def nearest (p : Publics) (rva : UInt32) : Option (String × UInt32) := do
   let idx ← go 0 entries.size
   let (er, name) := entries[idx]!
   some (name, rva - er)
-
 /-- Format the nearest public symbol for `va` relative to `baseVa`
     (design §W2.4): NAME+0xHEX no-space (e.g.
-    Builtins_TypedArrayPrototypeFindLastIndex+0x24). none when no entry
+    Builtins_TypedArrayMergeSort+0x324; the 2026-08-28 design erratum
+    overrides the earlier FindLastIndex+0x24 attribution, a hex/decimal
+    slip). none when no entry
     is at or below the rva, `va` precedes the base, or the rva exceeds
-    32 bits (fail closed — callers keep their hex fallback). -/
-def symbol (p : Publics) (baseVa : VA) (va : VA) : Option String :=
-  if va < baseVa then none
   else
     let rva := va - baseVa
     if rva ≥ 0x100000000 then none
