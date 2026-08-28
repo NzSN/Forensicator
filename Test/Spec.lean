@@ -778,7 +778,7 @@ def runAll : IO UInt32 := do
     annotations := [("ver", "41.0.0"), ("v8_isolate_address", "0x1001C0000"),
                     ("v8_ro_space_firstpage_address", "0x100000000")] }
   check ctx "v8 js frame resolution (synthetic heap)"
-    (match (Analyzer.V8.analyzer).run jsDump jsSpace |>.custom with
+    (match (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) jsDump jsSpace |>.custom with
      | cs =>
        match cs.find? (·.1 == "v8_frames") with
        | some (_, .arr (f0 :: _)) =>

@@ -586,7 +586,7 @@ private def loadPublics (pdb : String) (exe : Option String)
   match exe with
   | none => Session.loadPublicsFromPdb pdb
   | some ep =>
-    let msecVas ←
+    let msecVas : Except String (Array UInt32) ←
       try do
         let bytes ← IO.FS.readBinFile ep
         match Util.ImageFile.fromBytes bytes 0 with
