@@ -53,103 +53,167 @@ private def readExternalChars (space : AddressSpace) (ptr : VA) (len : UInt32) (
       some (utf16Lossy units)
     else none
 
-private def externalStringViaEpt (space : AddressSpace) (eptBase : VA) (handle : UInt32)
-    (len : UInt32) (oneByte : Bool) (layout : V8Layout) : Option String := do
-  let entry ← readU64o space (eptBase + layout.eptEntrySize * (handle.toUInt64 >>> (UInt64.ofNat layout.eptIndexShift)))
-  let resource := entry &&& layout.eptPayloadMask
-  if resource == 0 then none
-  else
-    let chars ← readU64o space (resource + 16)
-    readExternalChars space chars len oneByte
+private def externalStringViaEpt (space : AddressSpace) (eptBase : VA)
+    (hRes hData : UInt32) (len : UInt32) (oneByte : Bool)
+    (moduleRanges : List (VA × UInt64)) (layout : V8Layout) : Option String :=
+  let entryAt (h : UInt32) : Option UInt64 := do
+    let idx := h.toUInt64 >>> (UInt64.ofNat layout.eptIndexShift)
+    if eptBase.toNat + layout.eptEntrySize.toNat * idx.toNat ≥ 2 ^ 64 then none
+    else readU64o space (eptBase + layout.eptEntrySize * idx)
+  let payloadOf (h : UInt32) : Option UInt64 :=
+    (entryAt h).map (· &&& layout.eptPayloadMask)
+  -- data path: payload reading as exactly len printable chars is the cached
+  -- char pointer (resource_data); hData = 0 disables it (uncached, string.tq:87)
+  let dataStr : Option String :=
+    match hData with
+    | 0 => none
+    | h =>
+      match payloadOf h with
+      | none => none
+      | some p => if p == 0 then none else readExternalChars space p len oneByte
+  -- resource path: payload pointing at an object with a module-resident
+  -- vtable is the ExternalStringResource; +16 is the older/uncached fallback
+  let resourceOf (p : UInt64) : Option VA :=
+    if p == 0 then none
+    else
+      match readU64o space p with
+      | none => none
+      | some vtable =>
+        if moduleRanges.any fun (b, s) =>
+            decide (vtable ≥ b ∧ vtable.toNat < b.toNat + s.toNat)
+        then some p else none
+  let resource : Option VA :=
+    match (payloadOf hRes).bind resourceOf with
+    | some r => some r
+    | none =>
+      match hData with
+      | 0 => none
+      | _ => (payloadOf hData).bind resourceOf
+  match dataStr with
+  | some s => some s
+  | none =>
+    match resource with
+    | none => none
+    | some r =>
+      match readU64o space (r + 16) with
+      | none => none
+      | some chars => readExternalChars space chars len oneByte
 
-/-- Scan the isolate region for the EPT base (v8.rs find_ept_base). -/
-private def findEptBase (space : AddressSpace) (isolateVa : VA) (handle : UInt32)
-    (len : UInt32) (oneByte : Bool) (moduleRanges : List (VA × UInt64))
-    (layout : V8Layout) : Option VA :=
+/-- Scan the isolate region for the EPT base (design §W3.3, addendum B).
+    Requires BOTH in-object handles to validate at the candidate: the
+    resource entry's payload points at an object with a module-resident
+    vtable, and the (cached) data entry's payload reads as exactly len
+    printable chars. Rejects bases inside the isolate region / modules —
+    the addendum B false table (0x38d4000c5c00) lived in the isolate.
+    Unreadable entry pages fail closed (-> none). -/
+private def findEptBase (space : AddressSpace) (isolateVa : VA)
+    (hRes hData : UInt32) (len : UInt32) (oneByte : Bool)
+    (moduleRanges : List (VA × UInt64)) (layout : V8Layout) : Option VA :=
   match space.regionAt isolateVa with
   | none => none
   | some region =>
-    let idx := handle.toUInt64 >>> (UInt64.ofNat layout.eptIndexShift)
+    let isoStart := region.vaStart
+    let isoEnd := region.vaStart + region.size
+    let inIso (v : VA) : Bool := decide (v ≥ isoStart ∧ v < isoEnd)
     let inModules (v : VA) : Bool :=
-      moduleRanges.any fun (base, size) =>
-        decide (v ≥ base ∧ v.toNat < base.toNat + size.toNat)
-    let rec pass (rejectInternal : Bool) : Option VA :=
-      let rec scan (off : Nat) : Option VA :=
-        if off + 8 ≤ region.data.size then
-          let b := readU64leAt region.data off
-          if b < 0x10000 || b &&& 7 != 0 then scan (off + 8)
-          else
-            -- v8.rs:539 overflow: Rust's checked_add (upstream fix bd46529,
-            -- after the 13c81d0 investigation) skips the candidate instead
-            -- of panicking; Nat-lifted here, so the guard is explicit.
-            if b.toNat + layout.eptEntrySize.toNat * idx.toNat ≥ 2 ^ 64 then scan (off + 8)
-            else
-              match readU64o space (b + layout.eptEntrySize * idx) with
-              | none => scan (off + 8)
-              | some entry =>
-                let resource := entry &&& layout.eptPayloadMask
-                if resource == 0 then scan (off + 8)
-                else if rejectInternal && resource ≥ b && resource < b + ((2 : UInt64) <<< 20) then
-                  scan (off + 8)
-                else if inModules resource then scan (off + 8)
-                else
-                  match readU64o space resource with
-                  | none => scan (off + 8)
-                  | some vtable =>
-                    if !inModules vtable then scan (off + 8)
-                    else
-                      match readU64o space (resource + 16) with
-                      | none => scan (off + 8)
-                      | some chars =>
-                        match readExternalChars space chars len oneByte with
-                        | some _ => some b
-                        | none => scan (off + 8)
-        else none
+      moduleRanges.any fun (b, s) =>
+        decide (v ≥ b ∧ v.toNat < b.toNat + s.toNat)
+    let idxOf (h : UInt32) : UInt64 := h.toUInt64 >>> (UInt64.ofNat layout.eptIndexShift)
+    let entryAt (b : VA) (h : UInt32) : Option UInt64 := do
+      let idx := idxOf h
+      -- v8.rs:539 overflow guard, Nat-lifted (upstream bd46529)
+      if b.toNat + layout.eptEntrySize.toNat * idx.toNat ≥ 2 ^ 64 then none
+      else readU64o space (b + layout.eptEntrySize * idx)
+    let dataOk (b : VA) : Bool :=
+      match hData with
+      | 0 => true
+      | h =>
+        match entryAt b h with
+        | none => false
+        | some entry =>
+          let p := entry &&& layout.eptPayloadMask
+          p != 0 && !inModules p && !inIso p &&
+            (readExternalChars space p len oneByte).isSome
+    let resourceOk (b : VA) : Bool :=
+      match entryAt b hRes with
+      | none => false
+      | some entry =>
+        let p := entry &&& layout.eptPayloadMask
+        p != 0 && !inModules p && !inIso p &&
+          (match readU64o space p with
+           | none => false
+           | some vtable => inModules vtable)
+    let rec scan (off : Nat) : Option VA :=
+      if off + 8 ≤ region.data.size then
+        let b := readU64leAt region.data off
+        if b < 0x10000 || b &&& 7 != 0 then scan (off + 8)
+        else if inModules b || inIso b then scan (off + 8)
+        else if dataOk b && resourceOk b then some b
+        else scan (off + 8)
+      else none
     termination_by region.data.size + 8 - off
     scan 0
-  match pass true with
-  | some b => some b
-  | none => pass false
+
+/-- Decode a V8 String object (inline one/two-byte, or external via EPT).
+    Shared by the script-name, frame-name, and ScopeInfo paths (design
+    §W3.3; addendum B: frame-local names may be external too). The
+    external test is (itype &&& stringRepMask) == stringExternalBit — a
+    bare &&& 2 would misclassify sliced strings (rep 3). Threads eptBase
+    in/out (the Rust version shares a Cell across frames). -/
+private def decodeStringObject (space : AddressSpace) (cage va : VA) (itype : UInt16)
+    (isolateVa : Option VA) (moduleRanges : List (VA × UInt64)) (eptBase : Option VA)
+    (layout : V8Layout) : Option String × Option VA :=
+  if itype ≥ layout.stringItypeMax then (none, eptBase)
+  else if (itype &&& layout.stringRepMask) != layout.stringExternalBit then
+    (readV8String space va itype layout, eptBase)
+  else
+    let shiftMask := ((1 : UInt64) <<< (UInt64.ofNat layout.eptIndexShift)) - 1
+    match readU32o space (va + layout.stringChars) with
+    | none => (none, eptBase)
+    | some h1 =>
+      -- valid handles: low index-shift bits clear; 0 = null handle
+      -- (external-pointer-table-inl.h:313 IsValidHandle)
+      if h1 == 0 || h1.toUInt64 &&& shiftMask != 0 then (none, eptBase)
+      else
+        let cached := (itype &&& layout.stringUncachedExternalBit) == 0
+        let h2 : UInt32 :=
+          if cached then
+            match readU32o space (va + layout.externalStringResourceData) with
+            | some h => h
+            | none => 0
+          else 0
+        if cached && (h2 == 0 || h2.toUInt64 &&& shiftMask != 0) then (none, eptBase)
+        else
+          match readU32o space (va + layout.stringLength) with
+          | none => (none, eptBase)
+          | some len =>
+            if len == 0 || len > layout.maxJsNameLen then (none, eptBase)
+            else
+              let oneByte := itype &&& layout.stringOneByteBit != 0
+              match eptBase with
+              | some b =>
+                (externalStringViaEpt space b h1 h2 len oneByte moduleRanges layout, some b)
+              | none =>
+                match isolateVa with
+                | none => (none, eptBase)
+                | some iso =>
+                  match findEptBase space iso h1 h2 len oneByte moduleRanges layout with
+                  | none => (none, eptBase)
+                  | some b =>
+                    -- Rust sets the ept_base cell when found, even if the
+                    -- string read then fails.
+                    (externalStringViaEpt space b h1 h2 len oneByte moduleRanges layout, some b)
 
 private def decodeScriptName (space : AddressSpace) (cage : VA) (script : VA)
     (isolateVa : Option VA) (moduleRanges : List (VA × UInt64))
     (eptBase : Option VA) (layout : V8Layout) : Option String × Option VA :=
-  let nameObjO := (readU32o space (script + layout.scriptName)).bind (decompress cage)
-  match nameObjO with
+  match (readU32o space (script + layout.scriptName)).bind (decompress cage) with
   | none => (none, eptBase)
   | some nameObj =>
     match instanceType space cage nameObj with
     | none => (none, eptBase)
     | some itype =>
-      if itype ≥ layout.stringItypeMax then (none, eptBase)
-      else if itype &&& layout.stringExternalBit == 0 then
-        (readV8String space nameObj itype layout, eptBase)
-      else
-        match readU32o space (nameObj + layout.stringChars) with
-        | none => (none, eptBase)
-        | some handle =>
-          if handle == 0 || handle.toUInt64 &&& (((1 : UInt64) <<< (UInt64.ofNat layout.eptIndexShift)) - 1) != 0 then
-            (none, eptBase)
-          else
-            match readU32o space (nameObj + layout.stringLength) with
-            | none => (none, eptBase)
-            | some len =>
-              if len == 0 || len > layout.maxJsNameLen then (none, eptBase)
-              else
-                let oneByte := itype &&& layout.stringOneByteBit != 0
-                match eptBase with
-                | some b =>
-                  (externalStringViaEpt space b handle len oneByte layout, some b)
-                | none =>
-                  match isolateVa with
-                  | none => (none, eptBase)
-                  | some iso =>
-                    match findEptBase space iso handle len oneByte moduleRanges layout with
-                    | none => (none, eptBase)
-                    | some b =>
-                      -- Rust sets the ept_base cell when found, even if the
-                      -- string read then fails.
-                      (externalStringViaEpt space b handle len oneByte layout, some b)
+      decodeStringObject space cage nameObj itype isolateVa moduleRanges eptBase layout
 
 private def decodeScriptLine (space : AddressSpace) (cage : VA) (script : VA)
     (position : Int) (layout : V8Layout) : Option UInt32 := do
@@ -174,13 +238,20 @@ private def decodeScriptLine (space : AddressSpace) (cage : VA) (script : VA)
       let out := lo + lineOffset + 1
       if out ≥ 0 then some ((UInt64.ofNat out.toNat).toUInt32) else none
 
-/-- Extract a function name from a ScopeInfo (v8.rs scope_info_function_name). -/
+/-- Extract a function name from a ScopeInfo (v8.rs scope_info_function_name);
+    name candidates may be external strings decoded via the EPT
+    (design §W3.3, addendum B). Threads eptBase in/out. -/
 private def scopeInfoFunctionName (space : AddressSpace) (cage : VA) (scope : VA)
-    (layout : V8Layout) : Option String := do
-  let flags ← readU32o space (scope + layout.scopeFlags)
-  let localCount ← smi (← readU32o space (scope + layout.scopeLocalCount))
-  if localCount < 0 || localCount > 0x10000 then none
-  else
+    (isolateVa : Option VA) (moduleRanges : List (VA × UInt64)) (eptBase : Option VA)
+    (layout : V8Layout) : Option String × Option VA :=
+  let hdrOk : Option (UInt32 × Int) := do
+    let flags ← readU32o space (scope + layout.scopeFlags)
+    let localCount ← smi (← readU32o space (scope + layout.scopeLocalCount))
+    if localCount < 0 || localCount > 0x10000 then none
+    else some (flags, localCount)
+  match hdrOk with
+  | none => (none, eptBase)
+  | some (flags, localCount) =>
     let mut off := layout.scopeDynamicStart
     if flags &&& 0xF == layout.scopeTypeModule then
       off := off + 4
@@ -196,18 +267,25 @@ private def scopeInfoFunctionName (space : AddressSpace) (cage : VA) (scope : VA
       off := off + 8
     if flags &&& layout.scopeFlagInferredFunctionName != 0 then
       candidates := candidates ++ [off]
-    candidates.findSome? fun slot =>
-      match readU32o space (scope + slot) with
-      | none => none
-      | some c =>
-        match decompress cage c with
-        | none => none
-        | some nameObj =>
-          match instanceType space cage nameObj with
-          | none => none
-          | some itype =>
-            if itype < layout.stringItypeMax then readV8String space nameObj itype layout
-            else none
+    let rec go (cs : List UInt64) (ept : Option VA) : Option String × Option VA :=
+      match cs with
+      | [] => (none, ept)
+      | slot :: rest =>
+        match readU32o space (scope + slot) with
+        | none => go rest ept
+        | some c =>
+          match decompress cage c with
+          | none => go rest ept
+          | some nameObj =>
+            match instanceType space cage nameObj with
+            | none => go rest ept
+            | some itype =>
+              let (nm, ept') :=
+                decodeStringObject space cage nameObj itype isolateVa moduleRanges ept layout
+              match nm with
+              | some s => (some s, ept')
+              | none => go rest ept'
+    go candidates eptBase
 
 /-- Everything decoded from a JavaScript stack frame's JSFunction. -/
 private structure JsFrameInfo where
@@ -275,9 +353,15 @@ private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA
             match instanceType space cage nameOrScope with
             | some itype =>
               if itype < layout.stringItypeMax then
-                info := { info with name := readV8String space nameOrScope itype layout }
+                let (nm, ept') :=
+                  decodeStringObject space cage nameOrScope itype isolateVa moduleRanges ept layout
+                ept := ept'
+                info := { info with name := nm }
               else
-                info := { info with name := scopeInfoFunctionName space cage nameOrScope layout }
+                let (nm, ept') :=
+                  scopeInfoFunctionName space cage nameOrScope isolateVa moduleRanges ept layout
+                ept := ept'
+                info := { info with name := nm }
                 position := match readU32o space (nameOrScope + layout.scopePositionStart) with
                   | some raw => smi raw
                   | none => none
