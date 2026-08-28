@@ -189,6 +189,15 @@ dump). Add a handle-based reader: `MsfHandle.open (path) : IO MsfHandle`
   backed on disk); fallback for segment 1 (`.text`, where all `Builtins_*`
   live): `rva = off` with a recorded caveat — verified exact for the
   nicholas PDB (`addr = 0001:82312896` ≡ RVA `0x4E7FEC0`).
+  (**Erratum 2026-08-28, T4 live gate:** that record is `Builtins_TypedArrayPrototypeFindLastIndex`
+  itself (seg 1, off 82312896 = 0x4E7FEC0). The crash RIP RVA is verified 0x4E85AE4 (exception VA
+  0x7FF74DD35AE4 − electron base 0x7FF748EB0000; the exe byte at the site is the crash instruction
+  `47 0f b6 64 26 0a` = `movzx r12d,BYTE [r14+r12*1+0xa]`), so it symbolizes as
+  **`Builtins_TypedArrayMergeSort+0x324`**, not `Builtins_TypedArrayPrototypeFindLastIndex+0x24`
+  (0x4E7FEE4 holds a `jcc`; nearest(0x4E85AE4) via the T4 publics parser = MergeSort+0x324 with the
+  segment-1 fallback, and PrototypeFindLast/PrototypeForEach resolve exactly at 82311168/82314624).
+  The untagged-`rax` decompression idiom also occurs in the merge-sort helper; W1.4/W2.4 consumers
+  must symbolize the crash site as MergeSort+0x324.)
 - `structure Publics where entries : Array (UInt32 × String)` sorted by RVA;
   `Publics.nearest (rva) : Option (String × UInt32)` = binary-search
   nearest-below + delta. Total, bounds-guarded.
