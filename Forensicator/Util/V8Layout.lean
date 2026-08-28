@@ -46,6 +46,13 @@ structure V8Layout where
   stringItypeMax : UInt16
   stringOneByteBit : UInt16
   stringExternalBit : UInt16
+  -- instance-type.h:30 kStringRepresentationMask = (1<<3)-1; the external
+  -- test is (itype &&& stringRepMask) == stringExternalBit (a bare &&& 2
+  -- would misclassify sliced strings, rep 3).
+  stringRepMask : UInt16
+  -- instance-type.h:73 kUncachedExternalStringMask = 1<<4; uncached
+  -- external strings LACK the resource_data field (string.tq WARNING).
+  stringUncachedExternalBit : UInt16
   maxJsNameLen : UInt32
   scopeFlags : UInt64
   scopeParamCount : UInt64
@@ -125,6 +132,8 @@ def V8Layout.v14_6 : V8Layout where
   stringItypeMax := 0x40
   stringOneByteBit := 0x08
   stringExternalBit := 0x02
+  stringRepMask := 0x07
+  stringUncachedExternalBit := 0x10
   maxJsNameLen := 4096
   scopeFlags := 4
   scopeParamCount := 8
