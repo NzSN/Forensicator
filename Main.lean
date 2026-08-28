@@ -566,7 +566,7 @@ private def parseU32Arg (s : String) : Option UInt32 :=
         match hexDigit c with
         | none => none
         | some d => go (acc * 16 + d) rest
-    match go 0 (s.drop 2).toList with
+    match go 0 s.toList.drop 2 with
     | some n => if n ≤ 0xFFFFFFFF then some (UInt32.ofNat n) else none
     | none => none
   else

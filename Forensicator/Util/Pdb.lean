@@ -313,8 +313,6 @@ def MsfHandle.stream (msf : MsfHandle) (idx : Nat) : IO (Except String ByteArray
 
 -- ── DBI stream (stream 3) + publics (design §W2.2) ─────────────────
 
-namespace Forensicator.Util
-
 /-- DBI stream header fields relevant to publics. Layout per llvm
     DbiStream.h "DbiStreamHeader": versionSignature i32 (-1) @0, version
     u32 @4, age u32 @8, global stream u16 @12, build number u16 @14,
