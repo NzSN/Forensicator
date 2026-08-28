@@ -309,7 +309,7 @@ private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA
   -- step 8 (design §W3.2; covers Maglev/TurboFan spill layouts). Slot order
   -- is the deterministic tie-breaker (the §W3.2 context-match bonus).
   trySlot ([layout.kFunctionOffset, layout.kFunctionOffsetLegacy]
-    ++ (List.range 6).map fun i => (-0x30 : Int) + 8 * (i : Int))
+    ++ (List.range 6).map fun i => (-0x30 : Int) + 8 * Int.ofNat i)
 
 /-- Classify a frame (v8.rs classify_frame). -/
 private def classifyFrame (returnAddress : VA) (moduleRanges : List (VA × UInt64))
