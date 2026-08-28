@@ -443,7 +443,7 @@ def nearest (p : Publics) (rva : UInt32) : Option (String × UInt32) := do
     Builtins_TypedArrayPrototypeFindLastIndex+0x24). none when no entry
     is at or below the rva, `va` precedes the base, or the rva exceeds
     32 bits (fail closed — callers keep their hex fallback). -/
-def Publics.symbol (p : Publics) (baseVa : VA) (va : VA) : Option String :=
+def symbol (p : Publics) (baseVa : VA) (va : VA) : Option String :=
   if va < baseVa then none
   else
     let rva := va - baseVa
