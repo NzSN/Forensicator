@@ -54,10 +54,10 @@ def runAll : IO UInt32 := do
   check ctx "public records walk accepts minimal non-pub record"
     (Util.walkPublicRecords (ByteArray.mk #[2, 0, 0x0E, 0]) == some #[])
   check ctx "public records walk fails closed on unterminated name"
-    (match Util.walkPublicRecords (ByteArray.mk (Test.MsfFixture.symRec 0x110E
+    (Util.walkPublicRecords (ByteArray.mk (Test.MsfFixture.symRec 0x110E
         (Test.MsfFixture.le32 0 ++ Test.MsfFixture.le32 0x10
-          ++ Test.MsfFixture.le16 1 ++ "NONUL".toUTF8.toList)).toArray) with
-     | none => true | some _ => false)
+          ++ Test.MsfFixture.le16 1 ++ "NONUL".toUTF8.toList)).toArray)
+      == none)
 
   let fallback := Util.Publics.ofRecords recs none
   check ctx "publics fallback: seg-1 off == rva, seg-2 dropped, sorted"
