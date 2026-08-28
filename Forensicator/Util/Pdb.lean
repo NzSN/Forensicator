@@ -438,6 +438,19 @@ def nearest (p : Publics) (rva : UInt32) : Option (String × UInt32) := do
   let (er, name) := entries[idx]!
   some (name, rva - er)
 
+/-- Format the nearest public symbol for `va` relative to `baseVa`
+    (design §W2.4): NAME+0xHEX no-space (e.g.
+    Builtins_TypedArrayPrototypeFindLastIndex+0x24). none when no entry
+    is at or below the rva, `va` precedes the base, or the rva exceeds
+    32 bits (fail closed — callers keep their hex fallback). -/
+def Publics.symbol (p : Publics) (baseVa : VA) (va : VA) : Option String :=
+  if va < baseVa then none
+  else
+    let rva := va - baseVa
+    if rva ≥ 0x100000000 then none
+    else (Publics.nearest p (UInt32.ofNat rva.toNat)).map fun (name, delta) =>
+      name ++ "+0x" ++ hexPadLower delta.toUInt64 0
+
 end Publics
 
 end Forensicator.Util

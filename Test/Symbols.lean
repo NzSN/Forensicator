@@ -42,6 +42,22 @@ def runAll : IO UInt32 := do
   check ctx "runPipeline filter still applies with ctx"
     (filtered.outputs.isEmpty)
 
+  -- Publics.symbol formatting (design §W2.4): NAME+0xHEX no-space.
+  let symRecs := match Util.walkPublicRecords Test.MsfFixture.pubSymStream with
+    | some r => r | none => #[]
+  let symPub := Util.Publics.ofRecords symRecs none
+  check ctx "publics symbol formats NAME+0xHEX no-space"
+    (Util.Publics.symbol symPub 0 0x1004 == some "alpha+0x4")
+  check ctx "publics symbol exact hit (delta 0)"
+    (Util.Publics.symbol symPub 0x1000 0x3024 == some "builtin+0x0")
+  check ctx "publics symbol below first entry is none"
+    (Util.Publics.symbol symPub 0 0x400 == none)
+  check ctx "publics symbol va before base is none"
+    (Util.Publics.symbol symPub 0x1000 0x900 == none)
+  check ctx "publics symbol 64-bit rva is none"
+    (Util.Publics.symbol symPub 0 (0x1000 + (0x100000000 : UInt64)) == none)
+
+
   -- --symbols loader over the synthetic fixture (tmp/ gitignored): the
   -- container's stream 1 carries age 7 + the DEADBEEF GUID.
   let pdbPath := "tmp/electron.pdb"

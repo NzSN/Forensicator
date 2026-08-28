@@ -1,10 +1,12 @@
 /- Forensicator.Analyzer.V8 — V8 JS stack recovery (analyzer/v8.rs port):
    walks native stacks (unwind tables → fp-chain → leaf), classifies V8
-   frames, decodes JSFunction → name/script/line. The PDB symbolizer is an
-   FFI boundary and out of scope: native_symbol falls back to hex, exactly
-   as Rust does when no PDBs are found (the gate's environment has none). -/
+   frames, decodes JSFunction → name/script/line. With a publics table
+   (design §W2.4) native_symbol becomes NAME+0xOFF for module-resident
+   frames (builtin frames land on Builtins_* entries) and falls back to
+   hex without one, exactly as before. -/
 import Forensicator.Analyzer.Scan
 import Forensicator.Analyzer.Cause
+import Forensicator.Util.Pdb
 import Forensicator.Util.V8Layout
 import Forensicator.Util.V8Obj
 import Forensicator.Util.Unwind
@@ -428,6 +430,7 @@ private structure WalkCtx where
   layout : V8Layout
   moduleRanges : List (VA × UInt64)
   cage : Option VA
+  publics : Option Util.Publics
   thread : Thread
   stackVa : VA
   stackEnd : VA
@@ -466,9 +469,16 @@ private def walkGo (ctx : WalkCtx) (st : WalkState) (acc : List V8StackFrame)
         let (fnName, scriptName, scriptLine) := match jsInfo with
           | some i => (i.name, i.scriptName, i.scriptLine)
           | none => (none, none, none)
+        let nativeSymbol : String := match ctx.publics with
+          | none => hexUpper rip
+          | some pubs =>
+            match (ctx.moduleRanges.find? fun (b, s) =>
+              decide (rip ≥ b && rip.toNat < b.toNat + s.toNat)) with
+            | some (base, _) => (Util.Publics.symbol pubs base rip).getD (hexUpper rip)
+            | none => hexUpper rip
         let frame : V8StackFrame :=
           { threadId := ctx.thread.id, depth := st.depth, frameType := frameType
-            nativeSymbol := hexUpper rip, nativeOffset := 0
+            nativeSymbol := nativeSymbol, nativeOffset := 0
             returnAddress := rip, framePointer := rbp
             jsFunctionName := fnName, scriptName := scriptName, scriptLine := scriptLine }
         let st1 := { st with depth := st.depth + 1, seen := st.seen.insert (rip, rsp)
@@ -516,7 +526,8 @@ private def walkThread (ctx : WalkCtx) (init : UnwindTables) :
 /-- Walk all threads' stacks (v8.rs walk_thread_stacks). Overflow candidates
     in the EPT scan are skipped, never raised (upstream fix bd46529, v8.rs:539
     checked_add), so no exception channel survives. -/
-def walkThreadStacks (dump : Dump) (space : AddressSpace) : List V8StackFrame :=
+def walkThreadStacks (publics : Option Util.Publics) (dump : Dump)
+    (space : AddressSpace) : List V8StackFrame :=
   let layout := V8Layout.detect dump
   let isolateVa := Cause.annotationHex dump "v8_isolate_address"
   let cage := Cause.annotationHex dump "v8_ro_space_firstpage_address"
@@ -528,7 +539,7 @@ def walkThreadStacks (dump : Dump) (space : AddressSpace) : List V8StackFrame :=
     | t :: rest =>
       let ctx : WalkCtx :=
         { dump := dump, space := space, isolateVa := isolateVa, layout := layout
-          moduleRanges := moduleRanges, cage := cage, thread := t
+          moduleRanges := moduleRanges, cage := cage, publics := publics, thread := t
           stackVa := t.stackVa, stackEnd := t.stackVa + t.stackSize }
       let (frames, tables') := walkThread ctx tables
       go rest tables' (acc ++ frames)
@@ -553,7 +564,7 @@ def disassembleException (dump : Dump) (space : AddressSpace) : Option Json := d
 def analyzer : Forensicator.Analyzer where
   name := "v8"
   description := "Recovers JS stack traces by walking native stacks and classifying V8 frames"
-  run _ctx dump space := analyzerOk dump space (walkThreadStacks dump space)
+  run ctx dump space := analyzerOk dump space (walkThreadStacks ctx.publics dump space)
 where
   analyzerOk (dump : Dump) (space : AddressSpace) (frames : List V8StackFrame) :
       Forensicator.AnalyzerOutput :=

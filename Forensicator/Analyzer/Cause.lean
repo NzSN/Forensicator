@@ -5,6 +5,7 @@
 import Forensicator.Analyzer.Scan
 import Forensicator.Util.Disasm
 import Forensicator.Util.Text
+import Forensicator.Util.Pdb
 
 namespace Forensicator.Analyzer.Cause
 
@@ -403,12 +404,40 @@ def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
         faultVa := faultVa, access := access, fatalMessage := fatal
         alternatives := rest.map fun h => (h.verdict, h.confidence) }
 
+/-- Append crash-IP symbolization to the evidence when a publics table is
+    present (design §W1.4): "faulting IP 0x{rva} = {symbol}+0x{off}", plus
+    a note when the site is inside an embedded V8 builtin (a V8-internal
+    defect signal). Fail closed: no change when there is no exception,
+    no module covers the exception address, or no symbol is at or below it. -/
+private def symbolEvidence (pubs : Util.Publics) (dump : Dump)
+    (d : CrashDiagnosis) : CrashDiagnosis :=
+  match dump.exception with
+  | none => d
+  | some exc =>
+    match dump.modules.find? fun m =>
+      decide (exc.address ≥ m.baseVa
+        && exc.address.toNat < m.baseVa.toNat + m.size.toNat) with
+    | none => d
+    | some m =>
+      match Util.Publics.symbol pubs m.baseVa exc.address with
+      | none => d
+      | some sym =>
+        let line := s!"faulting IP {hexUpper (exc.address - m.baseVa)} = {sym}"
+        let extra : List String :=
+          if sym.startsWith "Builtins_" then
+            [line, s!"crash site is inside embedded builtin {sym} — V8-internal defect evidence"]
+          else [line]
+        { d with evidence := d.evidence ++ extra }
+
 /-- The cause analyzer. -/
 def analyzer : Analyzer where
   name := "cause"
   description := "Diagnoses why the process crashed: exception semantics, disassembly, cage fault analysis"
-  run _ctx dump space :=
+  run ctx dump space :=
     let d := diagnose dump space
+    let d := match ctx.publics with
+      | none => d
+      | some pubs => symbolEvidence pubs dump d
     { AnalyzerOutput.new "cause" with
       custom := [("crash_diagnosis", .obj [
         ("verdict", .str d.verdict.debug),
@@ -421,3 +450,4 @@ def analyzer : Analyzer where
           .str s!"{v.debug}/{c.debug}"))])] }
 
 end Forensicator.Analyzer.Cause
+
