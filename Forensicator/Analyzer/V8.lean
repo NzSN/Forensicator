@@ -64,15 +64,21 @@ private def externalStringViaEpt (space : AddressSpace) (eptBase : VA)
     else readU64o space (eptBase + layout.eptEntrySize * idx)
   let payloadOf (h : UInt32) : Option UInt64 :=
     (entryAt h).map (· &&& layout.eptPayloadMask)
-  -- data path: payload reading as exactly len printable chars is the cached
-  -- char pointer (resource_data); hData = 0 disables it (uncached, string.tq:87)
-  let dataStr : Option String :=
-    match hData with
+  -- data path (design §W3.3: content-classified — the entry whose payload
+  -- reads as exactly len printable one-/two-byte chars is the cached char
+  -- pointer; checked across BOTH in-object handles, slot order first);
+  -- hData = 0 disables it (UNCACHED_EXTERNAL_* lacks the field, string.tq:87)
+  let charsOf (h : UInt32) : Option String :=
+    match h with
     | 0 => none
-    | h =>
+    | _ =>
       match payloadOf h with
       | none => none
       | some p => if p == 0 then none else readExternalChars space p len oneByte
+  let dataStr : Option String :=
+    match hData with
+    | 0 => none
+    | _ => (charsOf hRes).orElse (charsOf hData)
   -- resource path: payload pointing at an object with a module-resident
   -- vtable is the ExternalStringResource; +16 is the older/uncached fallback
   let resourceOf (p : UInt64) : Option VA :=
@@ -102,12 +108,13 @@ private def externalStringViaEpt (space : AddressSpace) (eptBase : VA)
       | some chars => readExternalChars space chars len oneByte
 
 /-- Scan the isolate region for the EPT base (design §W3.3, addendum B).
-    Requires BOTH in-object handles to validate at the candidate: the
-    resource entry's payload points at an object with a module-resident
-    vtable, and the (cached) data entry's payload reads as exactly len
-    printable chars. Rejects bases inside the isolate region / modules —
-    the addendum B false table (0x38d4000c5c00) lived in the isolate.
-    Unreadable entry pages fail closed (-> none). -/
+    Content-classified validation across BOTH in-object handles: one
+    payload must read as exactly len printable chars (the data pointer)
+    and one must point at an object with a module-resident vtable (the
+    resource); hData = 0 falls back to the legacy single-handle resource+16
+    check. Rejects bases inside the isolate region / modules — the addendum
+    B false table (0x38d4000c5c00) lived in the isolate. Unreadable entry
+    pages fail closed (-> none). -/
 private def findEptBase (space : AddressSpace) (isolateVa : VA)
     (hRes hData : UInt32) (len : UInt32) (oneByte : Bool)
     (moduleRanges : List (VA × UInt64)) (layout : V8Layout) : Option VA :=
@@ -126,25 +133,46 @@ private def findEptBase (space : AddressSpace) (isolateVa : VA)
       -- v8.rs:539 overflow guard, Nat-lifted (upstream bd46529)
       if b.toNat + layout.eptEntrySize.toNat * idx.toNat ≥ 2 ^ 64 then none
       else readU64o space (b + layout.eptEntrySize * idx)
-    let dataOk (b : VA) : Bool :=
-      match hData with
-      | 0 => true
-      | h =>
-        match entryAt b h with
-        | none => false
-        | some entry =>
-          let p := entry &&& layout.eptPayloadMask
-          p != 0 && !inModules p && !inIso p &&
-            (readExternalChars space p len oneByte).isSome
-    let resourceOk (b : VA) : Bool :=
-      match entryAt b hRes with
+    let payloadAt (b : VA) (h : UInt32) : Option UInt64 :=
+      (entryAt b h).map (· &&& layout.eptPayloadMask)
+    let printableAt (b : VA) (h : UInt32) : Bool :=
+      match payloadAt b h with
       | none => false
-      | some entry =>
-        let p := entry &&& layout.eptPayloadMask
+      | some p =>
+        p != 0 && !inModules p && !inIso p &&
+          (readExternalChars space p len oneByte).isSome
+    let vtableObjAt (b : VA) (h : UInt32) : Bool :=
+      match payloadAt b h with
+      | none => false
+      | some p =>
         p != 0 && !inModules p && !inIso p &&
           (match readU64o space p with
            | none => false
            | some vtable => inModules vtable)
+    -- content classification (design §W3.3): the data entry is whichever
+    -- payload prints, the resource entry whichever carries a module vtable —
+    -- checked across BOTH in-object handles; both classes must validate
+    -- (addendum B). hData = 0 (uncached): legacy single-handle validation,
+    -- chars come from resource+16.
+    let legacyOk (b : VA) : Bool :=
+      match payloadAt b hRes with
+      | none => false
+      | some p =>
+        p != 0 && !inModules p && !inIso p &&
+          (match readU64o space p with
+           | none => false
+           | some vt => inModules vt) &&
+          (match readU64o space (p + 16) with
+           | none => false
+           | some chars => (readExternalChars space chars len oneByte).isSome)
+    let dataOk (b : VA) : Bool :=
+      match hData with
+      | 0 => legacyOk b
+      | _ => printableAt b hRes || printableAt b hData
+    let resourceOk (b : VA) : Bool :=
+      match hData with
+      | 0 => vtableObjAt b hRes
+      | _ => vtableObjAt b hRes || vtableObjAt b hData
     let rec scan (off : Nat) : Option VA :=
       if off + 8 ≤ region.data.size then
         let b := readU64leAt region.data off
