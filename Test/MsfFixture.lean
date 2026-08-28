@@ -112,10 +112,9 @@ def pubStream : ByteArray := ByteArray.mk (le32 0 ++ le32 0).toArray
 def publicsContainer : ByteArray :=
   let hdr : List UInt8 := magic ++ le32 pageSize ++ le32 1 ++ le32 9
     ++ le32 64 ++ le32 0 ++ le32 2
-  let dir : List UInt8 := le32 10
-    ++ (le32 0 :: le32 28 :: le32 0xFFFFFFFF :: le32 64 :: le32 0xFFFFFFFF
-      :: le32 0xFFFFFFFF :: le32 0xFFFFFFFF :: le32 0xFFFFFFFF
-      :: le32 pubSymStream.size :: le32 8)
+  let dir : List UInt8 := le32 10 ++ le32 0 ++ le32 28 ++ le32 0xFFFFFFFF
+    ++ le32 64 ++ le32 0xFFFFFFFF ++ le32 0xFFFFFFFF ++ le32 0xFFFFFFFF
+    ++ le32 0xFFFFFFFF ++ le32 pubSymStream.size ++ le32 8
     ++ le32 4                -- stream 1 block list: [4]
     ++ le32 5                -- stream 3 block list: [5]
     ++ le32 6 ++ le32 7      -- stream 8 block list: [6, 7]

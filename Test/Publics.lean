@@ -2,8 +2,8 @@
    docs/analyzers/2026-08-27-crash-analysis-fidelity-design.md §W2.2):
    DBI header, S_PUB32 symbol-record walk, RVA mapping and
    Publics.nearest, plus a lazy MsfHandle round trip over the synthetic
-   container (same tmp/-file pattern as the msf handle checks in
-   Test/Spec.lean). -/
+   container (same tmp folder + writeBinFile pattern as the msf
+   handle checks in Test/Spec.lean). -/
 import Forensicator
 import Test.MsfFixture
 

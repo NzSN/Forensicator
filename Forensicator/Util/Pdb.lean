@@ -311,9 +311,9 @@ def MsfHandle.stream (msf : MsfHandle) (idx : Nat) : IO (Except String ByteArray
           else
             pure (.ok (assembled.extract 0 want))
 
-end Forensicator.Util
-
 -- ── DBI stream (stream 3) + publics (design §W2.2) ─────────────────
+
+namespace Forensicator.Util
 
 /-- DBI stream header fields relevant to publics. Layout per llvm
     DbiStream.h "DbiStreamHeader": versionSignature i32 (-1) @0, version
@@ -415,7 +415,8 @@ namespace Publics
     efficient implementation). -/
 def ofRecords (recs : Array PublicRecord) (secVas : Option (Array UInt32))
     : Publics :=
-  let mapped := recs.toList.filterMap (mapRva secVas)
+  let mapped := recs.toList.filterMap fun rec =>
+    (mapRva secVas rec).map fun r => (r, rec.name)
   let sorted := List.mergeSort mapped (fun a b => decide (a.1 ≤ b.1))
   { entries := sorted.toArray }
 
