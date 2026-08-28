@@ -843,7 +843,7 @@ def runAll : IO UInt32 := do
                   tebVa := 0, provenance := {} }]
     annotations := [("ver", "41.0.0"), ("v8_isolate_address", "0x1001C0000"),
                     ("v8_ro_space_firstpage_address", "0x100000000")] }
-  let jitOut := (Analyzer.Jit.analyzer).run jsDumpJit jsSpaceJit
+  let jitOut := (Analyzer.Jit.analyzer).run ({ } : SymbolsCtx) jsDumpJit jsSpaceJit
   check ctx "jit frame count (synthetic FeedbackVector)"
     (match jitOut.custom.find? (·.1 == "jit_frame_count") with
      | some (_, .int n) => n == 1
