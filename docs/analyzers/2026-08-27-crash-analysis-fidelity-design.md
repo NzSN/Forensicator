@@ -332,3 +332,41 @@ proxy live-gate pattern):**
    generally or to parse the DBI optional-debug-header section substream.
 4. **Publics load cost** on multi-GB PDBs: measure; if >2 s on the
    acceptance dump, consider the `.pubcache` sidecar (non-v1).
+
+## 8. Addendum A (2026-08-28): V8HE/MemoryList overlap-drop bug — FIXED
+
+T9's debug probe surfaced a fourth gap, worse than the three originals:
+V8HE ranges are prepended for priority, and `AddressSpace.addRegion`'s overlap
+rejection then **dropped entire MemoryList regions** (nicholas: an 87 MB heap
+region dropped over 20 small V8HE overlaps), hiding most JS frames' objects.
+Fix (`Parse/Minidump.lean`): `clipRanges` — interval subtraction with
+data slicing; V8HE bytes win inside their ranges, MemoryList fragments keep
+the rest; MemoryInfo protection lookup switched to containment. Guard
+regression test added. Golden audit required (fulldump goldens encode the
+lossy behavior).
+
+## 9. Addendum B (2026-08-28): ExternalString reality on selective dumps
+
+The instrumented handler's dump **does not capture most EPT pages** (only
+`0xf3ff0000-0xf4010000` of the `0xF4000000` table reservation). Handles of
+the app script's name/source strings (indices 0x2e3e/0x2e40) live outside the
+captured page. Consequences:
+
+- `findEptBase`'s probe-based scan latched onto a **false table** inside the
+  isolate region (0x38d4000c5c00) whose entries happened to resolve to a
+  vtable-ish object + 59 printable chars of SkSL shader text — a garbage
+  `script_name`. Fix: validate **both** in-object handles (resource →
+  module vtable, resource_data → exactly-length printable chars) and reject
+  candidate bases inside the isolate region; fail closed (`none`) when the
+  entry page is absent.
+- `readV8String` gains an EPT path (external one/two-byte) shared with
+  `scopeInfoFunctionName` — frame-local names may be external strings too.
+- **Acceptance contract correction:** on this dump, app-frame `script_name`
+  is honestly `null` (EPT page not captured); the canonical JS sequence
+  (canonical kFunctionOffset attribution) is:
+  `slice, getPt, updatePt, setStaticPolygonInfo, setMatrix, mainVisible,
+  <anonymous>, modify, notifyShape, notify, modify, <anonymous>, publish,
+  publish, c`
+  The earlier 15-name list came from a spill-slot scan-order artifact
+  (ascending window found callers' spilled functions first). The harness pins
+  the canonical sequence; `script_name` accepts null-or-valid-lceda-URL.
