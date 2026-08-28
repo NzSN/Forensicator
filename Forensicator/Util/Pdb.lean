@@ -213,6 +213,9 @@ private def MsfHandle.openFromHeader (file : IO.FS.Handle)
   else if blockMapPage ≥ numBlocks then pure (.error "MSF: block map page out of range")
   else
     -- Phase A: the block map page (page indices of the directory pages).
+    -- `open` has already consumed the 56-byte superblock, so rewind to
+    -- page 0 first (Phase B and `stream` rewind likewise).
+    file.rewind
     match ← scanWanted file pageSize (blockMapPage + 1) #[blockMapPage] with
     | .error e => pure (.error e)
     | .ok chunks =>
