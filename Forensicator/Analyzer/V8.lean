@@ -253,6 +253,7 @@ private def jsCandidateAt (space : AddressSpace) (fp : VA) (slot : Int)
           if sfiItype != layout.itypeSharedFunctionInfo then none
           else some ⟨heap, cage⟩
 
+/-- Resolve JS frame info at `fp` (v8.rs decode_js_frame). `eptBase` is
     threaded in/out (the Rust version shares a Cell across frames). -/
 private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA)
     (isolateVa : Option VA) (moduleRanges : List (VA × UInt64)) (eptBase : Option VA)
