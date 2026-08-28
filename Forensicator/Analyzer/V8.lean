@@ -244,7 +244,7 @@ private def jsCandidateAt (space : AddressSpace) (fp : VA) (slot : Int)
       else
         let itype ← instanceType space cage heap
         if itype < layout.itypeJsFunctionFirst || itype > layout.itypeJsFunctionLast then none
-        else some (heap, cage)
+        else some ⟨heap, cage⟩
 
 /-- Resolve JS frame info at `fp` (v8.rs decode_js_frame). `eptBase` is
     threaded in/out (the Rust version shares a Cell across frames). -/
