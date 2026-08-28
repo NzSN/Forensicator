@@ -112,6 +112,8 @@ def runAll : IO UInt32 := do
             let pubs := Util.Publics.ofRecords recsLazy none
             check ctx "publics lazy handle: nearest"
               (Util.Publics.nearest pubs 0x1004 == some ("alpha", 4))
+  IO.FS.removeFile path
+
   -- Loader identity path (the CLI match comparison): the good container
   -- yields the pinned age/GUID; the mismatch container yields a DIFFERENT
   -- identity (age 8, last GUID byte 0xCC), so match's guid/age comparison
