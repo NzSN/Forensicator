@@ -96,6 +96,7 @@ private structure Ctx where
   faultVa : Option VA
   disasm : Option Instruction
   cageBase : Option VA
+  publics : Option Util.Publics := none
 
 private def isOomMessage (msg : String) : Bool :=
   ["Out of memory", "out of memory", "CALL_AND_RETRY_LAST", "Allocation failed"].any fun n =>
@@ -264,6 +265,27 @@ where
     | some (_, v) => s!"electron {v}"
     | none => "generic"
 
+/-- Crash-IP symbolization (design §W1.4): the exception address's RVA
+    within its module, its nearest public symbol ("NAME+0xHEX" no-space via
+    Util.Publics.symbol), plus an embedded-builtin note when the symbol is
+    a V8 builtin (a builtin crash site is itself evidence for a V8-internal
+    defect). Fail closed: no module covers the address or no symbol sits at
+    or below the rva → no lines. -/
+private def crashIpSymbolLines (pubs : Util.Publics) (dump : Dump)
+    (exc : ExceptionInfo) : List String :=
+  match dump.modules.find? fun m =>
+    decide (exc.address ≥ m.baseVa
+      && exc.address.toNat < m.baseVa.toNat + m.size.toNat) with
+  | none => []
+  | some m =>
+    match Util.Publics.symbol pubs m.baseVa exc.address with
+    | none => []
+    | some sym =>
+      let line := s!"faulting IP {hexUpper (exc.address - m.baseVa)} = {sym}"
+      if sym.startsWith "Builtins_" then
+        [line, s!"crash site is inside embedded builtin {sym} — V8-internal defect evidence"]
+      else [line]
+
 private def ruleCageDecompression (c : Ctx) : Option Hit := do
   -- W1.3 (design §3): AV read/write fault inside the 4 GB V8 pointer-
   -- compression cage reservation but outside every committed region — the
@@ -290,6 +312,9 @@ private def ruleCageDecompression (c : Ctx) : Option Hit := do
           if fault ≥ e then
             s!"; fault is 0x{String.ofList (Nat.toDigits 16 (fault - e).toNat)} past the highest committed cage region (end {hexUpper e})"
           else ""
+      let symLines : List String := match c.publics with
+        | none => []
+        | some pubs => crashIpSymbolLines pubs c.dump exc
       let idiom : Option (UInt64 × UInt8 × Int) :=
         match c.disasm, exc.context with
         | some instr, some regs =>
@@ -305,17 +330,17 @@ private def ruleCageDecompression (c : Ctx) : Option Hit := do
         let eff := (Int.ofNat cage.toNat + Int.ofNat v.toNat * Int.ofNat scale.toNat + disp).toNat % (2 ^ 64)
         if eff != fault.toNat then
           some { rule := 11, verdict := .decompressedGarbagePointer, confidence := .medium
-                 evidence := [s!"access violation at fault VA {hexUpper fault}: inside the 4GB V8 cage reservation (base {hexUpper cage}) but uncommitted — decompressed garbage 32-bit value{pastText}"] }
+                 evidence := [s!"access violation at fault VA {hexUpper fault}: inside the 4GB V8 cage reservation (base {hexUpper cage}) but uncommitted — decompressed garbage 32-bit value{pastText}"] ++ symLines }
         else
           let tagNote :=
             if v &&& 1 == 0 then " (untagged even value — Smi or garbage used as a heap pointer)"
             else " (tag bit set)"
           some { rule := 11, verdict := .v8TagConfusion, confidence := .high
                  evidence := [s!"access violation at uncommitted VA {hexUpper fault} inside the V8 pointer-compression cage (base {hexUpper cage}){pastText}",
-                              s!"faulting instruction decompresses a compressed pointer: base register holds the cage base, compressed value 0x{String.ofList (Nat.toDigits 16 v.toNat)}{tagNote}: {instr.text}"] }
+                              s!"faulting instruction decompresses a compressed pointer: base register holds the cage base, compressed value 0x{String.ofList (Nat.toDigits 16 v.toNat)}{tagNote}: {instr.text}"] ++ symLines }
       | _, _ =>
         some { rule := 11, verdict := .decompressedGarbagePointer, confidence := .medium
-               evidence := [s!"access violation at fault VA {hexUpper fault}: inside the 4GB V8 cage reservation (base {hexUpper cage}) but uncommitted — decompressed garbage 32-bit value{pastText}"] }
+               evidence := [s!"access violation at fault VA {hexUpper fault}: inside the 4GB V8 cage reservation (base {hexUpper cage}) but uncommitted — decompressed garbage 32-bit value{pastText}"] ++ symLines }
 
 private def ruleOomState (c : Ctx) : Option Hit := do
   let ext ← c.dump.v8heapExt
@@ -360,6 +385,13 @@ private def ruleWildAccess (c : Ctx) : Option Hit := do
 
 /-- Diagnose the dump's exception into a ranked verdict (cause.rs diagnose). -/
 def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
+  diagnoseWith none dump space
+
+/-- Diagnose with an optional publics table (design §W1.4): the cage rule
+    enriches its evidence with crash-IP symbolization when symbols are
+    available; none behaves exactly as diagnose. -/
+def diagnoseWith (publics : Option Util.Publics) (dump : Dump)
+    (space : AddressSpace) : CrashDiagnosis :=
   match dump.exception with
   | none =>
     { verdict := .noException, confidence := .high
@@ -405,36 +437,27 @@ def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
         alternatives := rest.map fun h => (h.verdict, h.confidence) }
 
 /-- Append crash-IP symbolization to the evidence when a publics table is
-    present (design §W1.4): "faulting IP 0x{rva} = {symbol}+0x{off}", plus
-    a note when the site is inside an embedded V8 builtin (a V8-internal
-    defect signal). Fail closed: no change when there is no exception,
-    no module covers the exception address, or no symbol is at or below it. -/
+    present (design §W1.4), but only when the verdict's own rule has not
+    already added it; ruleCageDecompression carries the same lines inline,
+    so the builtin note sits WITHIN the V8TagConfusion and
+    DecompressedGarbagePointer evidence rather than trailing (T7).
+    Fail closed: no change when there is no exception, no module covers
+    the exception address, or no symbol is at or below it. -/
 private def symbolEvidence (pubs : Util.Publics) (dump : Dump)
     (d : CrashDiagnosis) : CrashDiagnosis :=
   match dump.exception with
   | none => d
   | some exc =>
-    match dump.modules.find? fun m =>
-      decide (exc.address ≥ m.baseVa
-        && exc.address.toNat < m.baseVa.toNat + m.size.toNat) with
-    | none => d
-    | some m =>
-      match Util.Publics.symbol pubs m.baseVa exc.address with
-      | none => d
-      | some sym =>
-        let line := s!"faulting IP {hexUpper (exc.address - m.baseVa)} = {sym}"
-        let extra : List String :=
-          if sym.startsWith "Builtins_" then
-            [line, s!"crash site is inside embedded builtin {sym} — V8-internal defect evidence"]
-          else [line]
-        { d with evidence := d.evidence ++ extra }
+    let extra := crashIpSymbolLines pubs dump exc
+    if extra.isEmpty || d.evidence.any (·.startsWith "faulting IP") then d
+    else { d with evidence := d.evidence ++ extra }
 
 /-- The cause analyzer. -/
 def analyzer : Analyzer where
   name := "cause"
   description := "Diagnoses why the process crashed: exception semantics, disassembly, cage fault analysis"
   run ctx dump space :=
-    let d := diagnose dump space
+    let d := diagnoseWith ctx.publics dump space
     let d := match ctx.publics with
       | none => d
       | some pubs => symbolEvidence pubs dump d

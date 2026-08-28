@@ -734,6 +734,42 @@ def runAll : IO UInt32 := do
   check ctx "cause cage: no cage annotation does not fire the rule"
     (dgNoAnn.verdict == .wildAccess)
 
+  -- cause: W1.4 rule-level symbolization (design §W1.4, task T7) —
+  -- publics reach ruleCageDecompression's evidence; the analyzer wrapper
+  -- then dedupes its trailing line.
+  let pubs : Util.Publics :=
+    { entries := #[(0x1000, "Builtins_TypedArrayMergeSort"),
+                   (0x1024, "Builtins_TypedArrayPrototypeFindLastIndex")] }
+  let mod : Model.Module :=
+    { name := "electron.exe", baseVa := 0x140000000, size := 0x10000, provenance := tprov }
+  let (dSym0, sSym) := mkCauseFixture [0x47, 0x0F, 0xB6, 0x64, 0x26, 0x0A] 0x140001000 faultUnc true
+  let dSym : Model.Dump := { dSym0 with modules := [mod] }
+  let dgSym := Analyzer.Cause.diagnoseWith (some pubs) dSym sSym
+  check ctx "cause cage: rule evidence carries faulting-IP symbol (W1.4)"
+    (dgSym.verdict == .v8TagConfusion && dgSym.confidence == .high
+      && dgSym.evidence.any (· == "faulting IP 0x1000 = Builtins_TypedArrayMergeSort+0x0")
+      && dgSym.evidence.any (· == "crash site is inside embedded builtin Builtins_TypedArrayMergeSort+0x0 — V8-internal defect evidence"))
+  let (dWSym0, sWSym) := mkCauseFixture [0x48, 0x8B, 0x00] 0x140001030 faultUnc true
+  let dgWSym := Analyzer.Cause.diagnoseWith (some pubs) { dWSym0 with modules := [mod] } sWSym
+  check ctx "cause cage: weak form carries faulting-IP symbol too (W1.4)"
+    (dgWSym.verdict == .decompressedGarbagePointer
+      && dgWSym.evidence.any (· == "faulting IP 0x1030 = Builtins_TypedArrayPrototypeFindLastIndex+0xC"))
+  let dgNoPubs := Analyzer.Cause.diagnoseWith none dSym sSym
+  check ctx "cause cage: no publics means no symbol lines (W1.4)"
+    (!dgNoPubs.evidence.any (·.startsWith "faulting IP"))
+  let aout := Analyzer.Cause.analyzer.run { publics := some pubs } dSym sSym
+  let ipCount := match aout.custom.find? (·.1 == "crash_diagnosis") with
+    | some (_, .obj fields) =>
+      match fields.find? (·.1 == "evidence") with
+      | some (_, .arr evs) =>
+        (evs.filterMap fun j => match j with
+          | .str s => if s.startsWith "faulting IP" then some s else none
+          | _ => none).length
+      | _ => 0
+    | _ => 0
+  check ctx "cause cage: wrapper does not duplicate rule symbol lines"
+    (ipCount == 1)
+
   -- v8 JS-frame resolution (port of v8.rs decodes_js_frame_from_captured_heap)
   let setU32 := fun (o : Nat) (v : UInt32) => (o, (List.range 4).map fun i => ((v.toUInt64 >>> (8 * UInt64.ofNat i)).toUInt8))
   let setU64 := fun (o : Nat) (v : UInt64) => (o, (List.range 8).map fun i => ((v >>> (8 * UInt64.ofNat i)).toUInt8))
