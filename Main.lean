@@ -546,8 +546,88 @@ private def cmdShell (path : String) (symbols : Option String) (proxy : Bool) : 
 
 private def usage : IO UInt32 := do
 
-  IO.eprintln "usage: forensicator <inspect|analyze|match|list-plugins|shell> <file> [flags]"
+  IO.eprintln "usage: forensicator <inspect|analyze|match|list-plugins|publics|shell> <file> [flags]"
   pure 2
+
+-- ── publics (design §W2.2 probe: DBI + S_PUB32 + Publics.nearest) ────
+
+/-- Decimal-or-0x-hex UInt32 literal (queries like 0x4E85AE4 or 82311168). -/
+private def parseU32Arg (s : String) : Option UInt32 :=
+  let hexDigit (c : Char) : Option Nat :=
+    let v := c.toNat
+    if 48 ≤ v && v ≤ 57 then some (v - 48)
+    else if 97 ≤ v && v ≤ 102 then some (v - 97 + 10)
+    else if 65 ≤ v && v ≤ 70 then some (v - 65 + 10)
+    else none
+  if s.startsWith "0x" || s.startsWith "0X" then
+    let rec go (acc : Nat) : List Char → Option Nat
+      | [] => some acc
+      | c :: rest =>
+        match hexDigit c with
+        | none => none
+        | some d => go (acc * 16 + d) rest
+    match go 0 (s.drop 2).toList with
+    | some n => if n ≤ 0xFFFFFFFF then some (UInt32.ofNat n) else none
+    | none => none
+  else
+    match s.toNat? with
+    | some n => if n ≤ 0xFFFFFFFF then some (UInt32.ofNat n) else none
+    | none => none
+
+/-- Load the publics table: PDB stream 3 (DBI) → symbol record stream →
+    S_PUB32 walk → sorted Publics. With `--exe`, section VAs from the PE
+    drive the RVA mapping (rva = sectionVA(seg) + off); without one the
+    segment-1 fallback applies (off is already the RVA on MSVC PE PDBs —
+    verified exact on the nicholas PDB). IO lives here, Analyzer stays
+    pure. -/
+private def loadPublics (pdb : String) (exe : Option String)
+    : IO (Except String Util.Publics) := do
+  match ← Util.MsfHandle.open pdb with
+  | .error e => pure (.error e)
+  | .ok msf =>
+    match ← Util.MsfHandle.stream msf 3 with
+    | .error e => pure (.error e)
+    | .ok dbiBytes =>
+      match Util.parseDbiHeader dbiBytes with
+      | none => pure (.error "PDB: stream 3 is not a DBI stream")
+      | some dbi =>
+        match ← Util.MsfHandle.stream msf dbi.symRecordStream.toNat with
+        | .error e => pure (.error e)
+        | .ok symBytes =>
+          match Util.walkPublicRecords symBytes with
+          | none => pure (.error "PDB: malformed symbol record stream")
+          | some recs =>
+            let secVas ← match exe with
+              | none => pure (.ok none)
+              | some ep =>
+                try do
+                  let bytes ← IO.FS.readBinFile ep
+                  match Util.ImageFile.fromBytes bytes 0 with
+                  | .ok img => pure (.ok (some (img.sections.map (·.vaStart) |>.toArray)))
+                  | .error e => pure (.error e)
+                catch _ => pure (.error "publics: cannot read exe")
+            match secVas with
+            | .error e => pure (.error e)
+            | .ok vas =>
+              pure (.ok (Util.Publics.ofRecords recs vas))
+
+/-- Probe command: prints the entry count and nearest-below for each
+    query RVA as NAME+0xHEX (no space), e.g.
+    nearest(0x4E85AE4) = Builtins_TypedArrayPrototypeFindLastIndex+0x24. -/
+private def cmdPublics (pdb : String) (queries : List UInt32)
+    (exe : Option String) : IO UInt32 := do
+  match ← loadPublics pdb exe with
+  | .error e => IO.eprintln s!"publics: {e}"; pure 1
+  | .ok pubs =>
+    let caveat := if exe.isSome then "PE section VAs" else "segment-1 fallback (off == RVA)"
+    IO.println s!"publics {pdb}: {pubs.entries.size} entries ({caveat})"
+    for rva in queries do
+      match Util.Publics.nearest pubs rva with
+      | some (name, delta) =>
+        IO.println s!"nearest(0x{hexPadUpper rva.toUInt64 8}) = {name}+0x{hexPadLower delta.toUInt64 0}"
+      | none => IO.println s!"nearest(0x{hexPadUpper rva.toUInt64 8}) = <none>"
+    pure 0
+
 
 def main (args : List String) : IO UInt32 := do
   match args with
@@ -589,6 +669,23 @@ def main (args : List String) : IO UInt32 := do
     match path with
     | some p => cmdShell p symbols proxy
     | none => usage
+  | "publics" :: rest =>
+    let rec parseP (pdb : Option String) (queries : List UInt32)
+        (exe : Option String) : List String
+        → Except String (Option String × List UInt32 × Option String)
+      | [] => .ok (pdb, queries, exe)
+      | "--nearest" :: r :: rest =>
+        (match parseU32Arg r with
+         | some v => parseP pdb (queries ++ [v]) exe rest
+         | none => .error s!"bad rva {r}")
+      | "--exe" :: e :: rest => parseP pdb queries (some e) rest
+      | x :: rest =>
+        if x.startsWith "-" then .error s!"unknown flag {x}"
+        else parseP (some x) queries exe rest
+    match parseP none [] none rest with
+    | .error e => IO.eprintln e; usage
+    | .ok (some pdb, queries, exe) => cmdPublics pdb queries exe
+    | .ok (none, _, _) => usage
   | "match" :: rest =>
     let rec parseM (path : Option String) (exes pdbs : List String) (json : Bool)
         : List String → Except String (Option String × List String × List String × Bool)

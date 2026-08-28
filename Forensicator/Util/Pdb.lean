@@ -24,6 +24,7 @@
    standard semantics (pinned by the synthetic fixture with an absent
    stream at index 2). -/
 import Forensicator.Util.Bytes
+import Forensicator.Util.Text
 import Forensicator.Basic
 
 namespace Forensicator.Util
@@ -311,3 +312,133 @@ def MsfHandle.stream (msf : MsfHandle) (idx : Nat) : IO (Except String ByteArray
             pure (.ok (assembled.extract 0 want))
 
 end Forensicator.Util
+
+-- ── DBI stream (stream 3) + publics (design §W2.2) ─────────────────
+
+/-- DBI stream header fields relevant to publics. Layout per llvm
+    DbiStream.h "DbiStreamHeader": versionSignature i32 (-1) @0, version
+    u32 @4, age u32 @8, global stream u16 @12, build number u16 @14,
+    public stream u16 @16, pdb dll version u16 @18, symbol record stream
+    u16 @20, pdb dll rbld u16 @22, substream sizes/flag/machine/padding
+    to a 64-byte header. -/
+structure DbiHeader where
+  age : UInt32
+  globalStream : UInt16
+  publicStream : UInt16
+  symRecordStream : UInt16
+
+/-- Parse the DBI header from stream-3 bytes; fail closed (none) on a
+    truncated header or a missing version signature (0xFFFFFFFF). -/
+def parseDbiHeader (d : ByteArray) : Option DbiHeader := do
+  if d.size < 64 || readU32leAt d 0 != 0xFFFFFFFF then none
+  else
+    some {
+      age := readU32leAt d 8
+      globalStream := readU16leAt d 12
+      publicStream := readU16leAt d 16
+      symRecordStream := readU16leAt d 20 }
+
+/-- CodeView S_PUB32 symbol record kind. -/
+def symbolKindPub32 : UInt16 := 0x110E
+
+/-- A raw S_PUB32 record (design §W2.2): segment/offset as recorded in the
+    PDB plus the symbol name; RVA mapping happens in `Publics.ofRecords`. -/
+structure PublicRecord where
+  off : UInt32
+  seg : UInt16
+  name : String
+
+/-- Walk the symbol record stream sequentially. Every record is
+    [reclen u16][kind u16][payload] with reclen counting kind+payload
+    (CodeView layout); S_PUB32 payload is [flags u32][off u32][seg u16]
+    [name cstring]. Records follow back-to-back: the nicholas PDB pads
+    3-byte names to 4 but the padding sits inside reclen, so the walk
+    always advances by 2 + reclen (no alignment assumption). Bounds-
+    guarded: a truncated field, a zero record length, or a missing name
+    NUL fails the whole walk (fail closed). -/
+def walkPublicRecords (d : ByteArray) : Option (Array PublicRecord) :=
+  let rec go (off : Nat) (acc : Array PublicRecord) : Option (Array PublicRecord) :=
+    if off == d.size then some acc
+    else if off + 4 > d.size then none
+    else
+      let reclen := readU16leAt d off |>.toNat
+      let recEnd := off + 2 + reclen
+      if reclen < 2 || recEnd > d.size then none
+      else if readU16leAt d (off + 2) != symbolKindPub32 then go recEnd acc
+      else
+        let p := off + 4
+        -- S_PUB32 minimal payload: flags(4) + off(4) + seg(2) + NUL(1)
+        if p + 11 > recEnd then none
+        else
+          let roff := readU32leAt d (p + 4)
+          let seg := readU16leAt d (p + 8)
+          let nameBytes := d.extract (p + 10) recEnd
+          let nameLen := (nameBytes.toList.takeWhile (· != 0)).length
+          if nameLen == nameBytes.size then none   -- cstring not terminated
+          else
+            let name := fromUTF8Lossy (nameBytes.extract 0 nameLen)
+            go recEnd (acc.push { off := roff, seg := seg, name := name })
+  termination_by d.size - off
+  go 0 #[]
+
+/-- Map a raw (seg, off) record to an RVA (design §W2.2). With PE section
+    VAs (`secVas`, 1-based segment = 0-based section index): rva = secVA +
+    off, Nat-lifted with a 32-bit overflow check (house style kills wrap
+    edges). Without a PE only segment 1 maps: MSVC PE PDBs record publics
+    with seg == 1 and off already the RVA — verified exact on the nicholas
+    PDB (e.g. addr 0001:82312896 ≡ RVA 0x4E7FEC0). Other segments are
+    unmappable without a PE and are dropped (fail closed). -/
+private def mapRva (secVas : Option (Array UInt32)) (rec : PublicRecord)
+    : Option UInt32 :=
+  match secVas with
+  | some vas =>
+    if rec.seg == 0 then none
+    else
+      let idx := rec.seg.toNat - 1
+      match vas[idx]? with
+      | none => none
+      | some base =>
+        let sum := base.toNat + rec.off.toNat
+        if sum > 0xFFFFFFFF then none else some (UInt32.ofNat sum)
+  | none => if rec.seg == 1 then some rec.off else none
+
+/-- Public symbols sorted ascending by RVA (design §W2.2). Duplicate RVAs
+    are legal (linker aliases); `nearest` returns the greatest entry ≤ rva. -/
+structure Publics where
+  entries : Array (UInt32 × String)
+
+namespace Publics
+
+/-- Build from walked records: map each (seg, off) via mapRva (dropping
+    unmappable records, fail closed), sort by RVA with the core
+    `List.mergeSort` (stable, O(n log n); compiled to the tail-recursive
+    efficient implementation). -/
+def ofRecords (recs : Array PublicRecord) (secVas : Option (Array UInt32))
+    : Publics :=
+  let mapped := recs.toList.filterMap (mapRva secVas)
+  let sorted := List.mergeSort mapped (fun a b => decide (a.1 ≤ b.1))
+  { entries := sorted.toArray }
+
+/-- Binary search: nearest-below `rva` with the delta `rva - entryRva`;
+    none when every entry is above `rva` (or the table is empty). Total,
+    bounds-guarded (indexes always < entries.size). -/
+def nearest (p : Publics) (rva : UInt32) : Option (String × UInt32) := do
+  let entries := p.entries
+  let rec go (lo hi : Nat) : Option Nat :=
+    if lo < hi then
+      let mid := lo + (hi - lo) / 2
+      if entries[mid]!.1 ≤ rva then go (mid + 1) hi else go lo mid
+    else
+      if lo == 0 then none
+      else
+        let idx := lo - 1
+        if entries[idx]!.1 ≤ rva then some idx else none
+  termination_by hi - lo
+  let idx ← go 0 entries.size
+  let (er, name) := entries[idx]!
+  some (name, rva - er)
+
+end Publics
+
+end Forensicator.Util
+

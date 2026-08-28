@@ -1,4 +1,7 @@
 import Test.Spec
+import Test.Publics
 
 def main (_args : List String) : IO UInt32 := do
-  Test.Spec.runAll
+  let nSpec ← Test.Spec.runAll
+  let nPub ← Test.Publics.runAll
+  pure (nSpec + nPub)
