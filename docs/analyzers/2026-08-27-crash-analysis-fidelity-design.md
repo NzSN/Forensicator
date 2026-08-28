@@ -221,7 +221,9 @@ guid+age validation.
 - Fix `V8Layout.v14_6`: `eptEntrySize := 8`, `eptIndexShift := 6` (per-OS
   note: Android 7 / iOS 8 — add a layout selector field or document
   Windows/Linux default), `eptPayloadMask := 0xff00ffffffffffff`.
-- Add: `itypeJsFunctionFirst := 0x0812`, `itypeJsFunctionLast := 0x0826`,
+- Add: `itypeJsFunctionFirst := 0x0812`, `itypeJsFunctionLast := 0x0822`
+  (LAST_JS_FUNCTION_TYPE = 2082 in the 14.6 generated instance-types.h — the
+  first draft's 0x0826 was wrong; corrected 2026-08-28),
   `itypeSharedFunctionInfo` (pin from the 14.6 `instance-types.h`),
   `itypeScopeInfo := 0x011E` (confirms existing dispatch), plus
   `externalStringResourceData : UInt64` (see W3.3).
