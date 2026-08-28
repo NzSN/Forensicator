@@ -30,9 +30,14 @@ def Confidence.debug : Confidence → String
 inductive CrashVerdict where
   | v8CheckFailure | v8OutOfMemory | stackOverflow | smiTypeConfusion
   | v8ObjectAccess (instanceType : UInt16)
+  | v8TagConfusion | decompressedGarbagePointer
   | nullDeref | wildAccess | corruptedCodePointer | wasmGuardFault
   | noException | unknown
   deriving Repr, DecidableEq, Inhabited
+  -- W1.2 (design §3): v8TagConfusion == tag/representation confusion in V8
+  -- values (strong cage-decompression form); decompressedGarbagePointer ==
+  -- AV at an uncommitted address inside the pointer-compression cage
+  -- (weak form).
 
 /-- Rust `{:?}` Debug names. -/
 def CrashVerdict.debug : CrashVerdict → String
@@ -41,6 +46,8 @@ def CrashVerdict.debug : CrashVerdict → String
   | .stackOverflow => "StackOverflow"
   | .smiTypeConfusion => "SmiTypeConfusion"
   | .v8ObjectAccess it => "V8ObjectAccess { instance_type: " ++ toString it ++ " }"
+  | .v8TagConfusion => "V8TagConfusion"
+  | .decompressedGarbagePointer => "DecompressedGarbagePointer"
   | .nullDeref => "NullDeref"
   | .wildAccess => "WildAccess"
   | .corruptedCodePointer => "CorruptedCodePointer"
