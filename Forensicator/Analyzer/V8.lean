@@ -78,7 +78,7 @@ private def externalStringViaEpt (space : AddressSpace) (eptBase : VA)
   let dataStr : Option String :=
     match hData with
     | 0 => none
-    | _ => (charsOf hRes).orElse (charsOf hData)
+    | _ => (charsOf hRes).orElse (fun _ => charsOf hData)
   -- resource path: payload pointing at an object with a module-resident
   -- vtable is the ExternalStringResource; +16 is the older/uncached fallback
   let resourceOf (p : UInt64) : Option VA :=
