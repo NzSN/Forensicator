@@ -597,7 +597,7 @@ private def loadPublics (pdb : String) (exe : Option String)
           match Util.walkPublicRecords symBytes with
           | none => pure (.error "PDB: malformed symbol record stream")
           | some recs =>
-            let secVas ← match exe with
+            let secVas : Except String (Option (Array UInt32)) ← match exe with
               | none => pure (.ok none)
               | some ep =>
                 try do
