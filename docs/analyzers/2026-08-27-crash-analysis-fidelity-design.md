@@ -17,7 +17,9 @@ Three analyzers silently degraded on the nicholas fulldump; all three defects
 were found only by manual cross-tool analysis (v8-forensics, v8_minidump.py,
 llvm-pdbutil, hand-rolled heap walkers). Ground truth established manually:
 
-- Crash RIP = electron.exe RVA `0x4E85AE4` = **`Builtins_TypedArrayPrototypeFindLastIndex` +0x24**
+- Crash RIP = electron.exe RVA `0x4E85AE4` = **`Builtins_TypedArrayMergeSort` +0x324**
+  (corrected — see the T4 erratum below; the first draft's FindLastIndex+0x24
+  attribution came from a hex→decimal conversion slip)
   (PDB publics, byte-identical PDB verified against `out/Release_S_41_10_6`).
 - Fault VA `0x12CEEC1190A` = cage (`0x12C00000000`) + `0xEEC1190A` — **~3.3 GB past
   the highest committed cage region (`0x12C1A600000`), inside the 4 GB
@@ -41,7 +43,7 @@ Forensicator's output on the same dump:
 | Gap | Expected | Actual |
 |---|---|---|
 | G1 `cause` | tag-confusion verdict w/ cage evidence | `WildAccess/Low` "no V8 correlation" |
-| G2 symbols | `Builtins_TypedArrayPrototypeFindLastIndex+0x24` at crash site | hex addresses only; `--symbols` accepted but **ignored** (`Main.lean:196` `_symbols`) |
+| G2 symbols | `Builtins_TypedArrayMergeSort+0x324` at crash site | hex addresses only; `--symbols` accepted but **ignored** (`Main.lean:196` `_symbols`) |
 | G3 `v8` | all 14 JS frames named + script URL + line | 3 frames named (`slice`, `<anonymous>`, `notify`), `script_name` null everywhere |
 
 ## 2. Root Causes (code-level)
@@ -290,7 +292,7 @@ start producing values; no algorithm change, only correctness of inputs.
 **Live acceptance (the nicholas dump + PDB, manual/opt-in, mirrors the
 proxy live-gate pattern):**
 - `cause`: verdict `V8TagConfusion/High`; evidence contains
-  `Builtins_TypedArrayPrototypeFindLastIndex+0x24`, compressed value
+  `Builtins_TypedArrayMergeSort+0x324`, compressed value
   `0xEEC11900`, ~3.3 GB past committed.
 - `v8`: the 14 names from §1 in order; `script_name` = the resolved
   external-string URL; `native_symbol` of builtin frames = `Builtins_*`.
