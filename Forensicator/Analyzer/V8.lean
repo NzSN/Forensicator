@@ -253,6 +253,41 @@ private def jsCandidateAt (space : AddressSpace) (fp : VA) (slot : Int)
           if sfiItype != layout.itypeSharedFunctionInfo then none
           else some ⟨heap, cage⟩
 
+/-- TEMPORARY (T9 debug): stage-reporting variant of jsCandidateAt at the
+    primary slot. Remove after the nicholas probe. -/
+private def jsCandidateStage (space : AddressSpace) (fp : VA) (slot : Int)
+    (cageHint : Option VA) (layout : V8Layout) : String :=
+  let tagged := readU64 space (wadd fp slot)
+  if tagged &&& 1 != 1 then s!"untagged(0x{String.ofList (Nat.toDigits 16 tagged.toNat)})"
+  else
+    let heap := tagged &&& 0xFFFFFFFFFFFFFFFE
+    if heap &&& 3 != 0 then "misaligned"
+    else
+      let derived := tagged &&& 0xFFFFFFFF00000000
+      let cage := match cageHint with
+        | some h => if heap ≥ h && heap < h + ((1 : UInt64) <<< 32) then h else derived
+        | none => derived
+      if heap < cage || heap ≥ cage + ((1 : UInt64) <<< 32) then "not-in-cage"
+      else
+        match instanceType space cage heap with
+        | none => "itype-unreadable"
+        | some itype =>
+          if itype < layout.itypeJsFunctionFirst || itype > layout.itypeJsFunctionLast then
+            s!"itype=0x{String.ofList (Nat.toDigits 16 itype.toNat)}"
+          else
+            match readU32o space (heap + layout.jsfunctionSharedFunctionInfo) with
+            | none => "sfi-slot-unreadable"
+            | some sfiC =>
+              match decompress cage sfiC with
+              | none => s!"sfi-decompress(0x{String.ofList (Nat.toDigits 16 sfiC.toNat)})"
+              | some sfi =>
+                match instanceType space cage sfi with
+                | none => "sfi-itype-unreadable"
+                | some sfiItype =>
+                  if sfiItype != layout.itypeSharedFunctionInfo then
+                    s!"sfi-itype=0x{String.ofList (Nat.toDigits 16 sfiItype.toNat)}"
+                  else "ok"
+
 /-- Resolve JS frame info at `fp` (v8.rs decode_js_frame). `eptBase` is
     threaded in/out (the Rust version shares a Cell across frames). -/
 private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA)
@@ -491,8 +526,16 @@ where
       match Cause.annotationHex dump "v8_ro_space_firstpage_address" with
       | some cage => (space.regionAt cage).isSome
       | none => false
+    -- TEMPORARY (T9 debug): per-unnamed-frame candidate stage at the
+    -- primary slot. Remove after the nicholas probe.
+    let layout := V8Layout.detect dump
+    let cage := Cause.annotationHex dump "v8_ro_space_firstpage_address"
+    let debugJson := frames.filter (·.jsFunctionName.isNone) |>.map fun f =>
+      Json.obj [("fp", .str (hexUpper f.framePointer)),
+                ("stage", .str (jsCandidateStage space f.framePointer layout.kFunctionOffset cage layout))]
     let custom : List (String × Json) :=
       [("v8_frames", .arr framesJson), ("v8_frame_count", .ofNat frames.length)]
+        ++ [("v8_debug", .arr debugJson)]
         ++ (match disassembleException dump space with
             | some d => [("crash_disasm", d)] | none => [])
         ++ [("v8_heap_captured", .bool heapCaptured)]
