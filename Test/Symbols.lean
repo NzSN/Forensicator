@@ -54,7 +54,7 @@ def runAll : IO UInt32 := do
       pdbName := some "electron.pdb", provenance := { } }
   let crashDump : Model.Dump :=
     { modules := [crashMod]
-      exception := some { code := 0xC0000005, address := 0x140001000,
+      exception := some { code := 0xC0000005, address := 0x140000800,
                           threadId := 1, provenance := { } } }
   match ← Session.loadSymbolsCtxFor crashDump (some "tmp") with
   | ctx2 =>
