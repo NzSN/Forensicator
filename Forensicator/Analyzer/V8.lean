@@ -244,7 +244,14 @@ private def jsCandidateAt (space : AddressSpace) (fp : VA) (slot : Int)
       else
         let itype ← instanceType space cage heap
         if itype < layout.itypeJsFunctionFirst || itype > layout.itypeJsFunctionLast then none
-        else some ⟨heap, cage⟩
+        else
+          -- check 3: the shared_function_info slot decompresses and its map
+          -- is SHARED_FUNCTION_INFO_TYPE (design §W3.2).
+          let sfiC ← readU32o space (heap + layout.jsfunctionSharedFunctionInfo)
+          let sfi ← decompress cage sfiC
+          let sfiItype ← instanceType space cage sfi
+          if sfiItype != layout.itypeSharedFunctionInfo then none
+          else some ⟨heap, cage⟩
 
 /-- Resolve JS frame info at `fp` (v8.rs decode_js_frame). `eptBase` is
     threaded in/out (the Rust version shares a Cell across frames). -/
@@ -298,7 +305,11 @@ private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA
       match jsCandidateAt space fp slot cageHint layout with
       | none => trySlot rest
       | some c => decodeAt c.heap c.cage
-  trySlot [layout.kFunctionOffset, layout.kFunctionOffsetLegacy]
+  -- fixed offsets first, then the bounded fallback scan [rbp-0x30 … rbp-0x8]
+  -- step 8 (design §W3.2; covers Maglev/TurboFan spill layouts). Slot order
+  -- is the deterministic tie-breaker (the §W3.2 context-match bonus).
+  trySlot ([layout.kFunctionOffset, layout.kFunctionOffsetLegacy]
+    ++ (List.range 6).map fun i => (-0x30 : Int) + 8 * (i : Int))
 
 /-- Classify a frame (v8.rs classify_frame). -/
 private def classifyFrame (returnAddress : VA) (moduleRanges : List (VA × UInt64))

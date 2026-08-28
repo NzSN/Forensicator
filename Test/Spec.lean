@@ -724,10 +724,12 @@ def runAll : IO UInt32 := do
       -- at Map+8) — the scored validator (design §W3.2) requires the
       -- candidate map instance type in [0x812, 0x822].
       { vaStart := cage, size := 0x300, data := buildBuf 0x300
-          [setU32 0x108 0x08, setBytes 0x208 [0x12, 0x08]]
+          [setU32 0x108 0x08, setBytes 0x208 [0x12, 0x08], setBytes 0x288 [0x20, 0x01]]
         protection := 3, state := .Commit, classification := .Other }
     , mkHeap (cage + 0x40000) [setU32 0 0x201, setU32 16 0x80001, setU32 20 0x180001]
-    , mkHeap (cage + 0x80000) [setU32 0 0x101, setU32 12 0xC0001, setU32 20 0x100001]
+    , -- SFI: map → cage+0x280 (itype 0x120 = SHARED_FUNCTION_INFO_TYPE at
+      -- Map+8) — required by scored-validation check 3 (design §W3.2)
+      mkHeap (cage + 0x80000) [setU32 0 0x281, setU32 12 0xC0001, setU32 20 0x100001]
     , mkHeap (cage + 0xC0000) [setU32 0 0x101, setU32 8 6, setBytes 12 [0x6D, 0x79, 0x46, 0x75, 0x6E, 0x63]]
     , mkHeap (cage + 0x100000) [setU32 0 0x101, setU32 8 0x140001]
     , mkHeap (cage + 0x140000) [setU32 0 0x101, setU32 8 7, setBytes 12 [0x74, 0x65, 0x73, 0x74, 0x2E, 0x6A, 0x73]]
@@ -768,14 +770,18 @@ def runAll : IO UInt32 := do
   let monoMapAddr := cage + 0x70000  -- Map with itype 0x0116 (MAP_TYPE) for monomorphic slot
   let jsRegionsJit : List Forensicator.Spec.AddressRegion :=
     [ -- RO space: string Map at cage+0x100 + FeedbackVector Map at cage+0x200
+      -- + JSFunction Map at cage+0x280 (itype 0x812) + SFI Map at cage+0x2C0
+      -- (itype 0x120) — the scored validator (design §W3.2 checks 2-3)
+      -- requires real map types.
       { vaStart := cage, size := 0x300
-        data := buildBuf 0x300 [setU32 0x108 0x08, setU32 0x208 0x83]
+        data := buildBuf 0x300 [setU32 0x108 0x08, setU32 0x208 0x83,
+                                setBytes 0x288 [0x12, 0x08], setBytes 0x2C8 [0x20, 0x01]]
         protection := 3, state := .Commit, classification := .Other }
-    , -- JSFunction at cage+0x40000: map=0x101, sfi@16=0x80001, ctx@20=0x180001,
+    , -- JSFunction at cage+0x40000: map=0x281, sfi@16=0x80001, ctx@20=0x180001,
       -- feedback_cell@24 = compressed to cage+0x50000 = 0x50001
-      mkHeap (cage + 0x40000) [setU32 0 0x101, setU32 16 0x80001, setU32 20 0x180001, setU32 24 0x50001]
+      mkHeap (cage + 0x40000) [setU32 0 0x281, setU32 16 0x80001, setU32 20 0x180001, setU32 24 0x50001]
     , -- SFI at cage+0x80000: name_or_scope@12 → string at cage+0xC0000
-      mkHeap (cage + 0x80000) [setU32 0 0x101, setU32 12 0xC0001, setU32 20 0x100001]
+      mkHeap (cage + 0x80000) [setU32 0 0x2C1, setU32 12 0xC0001, setU32 20 0x100001]
     , -- ScopeInfo at cage+0xC0000: function name "myFunc"
       mkHeap (cage + 0xC0000) [setU32 0 0x101, setU32 8 6, setBytes 12 [0x6D, 0x79, 0x46, 0x75, 0x6E, 0x63]]
     , -- Script at cage+0x100000
