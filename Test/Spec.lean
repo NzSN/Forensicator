@@ -1039,7 +1039,7 @@ def runAll : IO UInt32 := do
     , mkStack eptCage ]
   let eptSpace := mkEptDump eptRegions
   let eptDump := mkEptDumpDoc "0x200000000"
-  let eptOut := (Analyzer.V8.analyzer).run eptDump eptSpace
+  let eptOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) eptDump eptSpace
   check ctx "v8 ept: external name + script url + script line (synthetic EPT)"
     (match v8Frames eptOut with
      | f0 :: _ =>
@@ -1073,7 +1073,7 @@ def runAll : IO UInt32 := do
     , mkStack bCage ]
   let bSpace := mkEptDump bRegions
   let bDump := mkEptDumpDoc "0x400000000"
-  let bOut := (Analyzer.V8.analyzer).run bDump bSpace
+  let bOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) bDump bSpace
   check ctx "v8 ept: uncached external resolves via resource+16 fallback"
     (match v8Frames bOut with
      | f0 :: _ =>
@@ -1109,7 +1109,7 @@ def runAll : IO UInt32 := do
     , mkStack cCage ]
   let cSpace := mkEptDump cRegions
   let cDump := mkEptDumpDoc "0x600000000"
-  let cOut := (Analyzer.V8.analyzer).run cDump cSpace
+  let cOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) cDump cSpace
   check ctx "v8 ept: isolate-resident false table rejected"
     (match v8Frames cOut with
      | f0 :: _ =>

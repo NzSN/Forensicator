@@ -120,12 +120,12 @@ def runAll : IO UInt32 := do
   check ctx "publics identity: good container parses pinned identity"
     (match Util.pdbIdentity Test.MsfFixture.container with
      | .ok (age, guid) =>
-       age == 7 && guid.toList == Test.MsfFixture.pdbInfo.extract 12 28 |>.toList
+       age == 7 && guid.toList == (Test.MsfFixture.pdbInfo.extract 12 28).toList
      | .error _ => false)
   check ctx "publics identity: mismatch container differs (age and guid)"
     (match Util.pdbIdentity Test.MsfFixture.containerMismatch with
      | .ok (age, guid) =>
-       age == 8 && guid.toList != Test.MsfFixture.pdbInfo.extract 12 28 |>.toList
+       age == 8 && guid.toList != (Test.MsfFixture.pdbInfo.extract 12 28).toList
      | .error _ => false)
   check ctx "publics identity: truncated container fails closed"
     (match Util.pdbIdentity (Test.MsfFixture.container.extract 0 600) with
