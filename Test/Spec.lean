@@ -963,6 +963,160 @@ def runAll : IO UInt32 := do
      | .ok rs => rs.get Model.X64.DR0 == 0x7FFA0000 && rs.get Model.X64.DR7 == 0x400
      | .error _ => false)
 
+  -- W3 (T11): synthetic cage graph with ExternalString + EPT (design §W3.3,
+  -- addendum B). A JSFunction -> SFI -> ScopeInfo chain resolves the name
+  -- through an EXTERNAL string over the EPT (dual handles, 8-byte entries at
+  -- (idx << 6), payload masked 0xff00ffffffffffff); the Script name is a
+  -- second external string (the 55-char lceda URL); script_line comes from
+  -- the line-ends FixedArray. findEptBase must validate BOTH handles from
+  -- the isolate-scan (module-resident resource vtable + exactly-len
+  -- printable data) and reject isolate-resident false tables.
+  let eptCage : UInt64 := 0x200000000
+  let eptBase : UInt64 := 0x300000000
+  let isoBase : UInt64 := 0x1C000000
+  let modLo : UInt64 := 0x7FFA0000
+  let urlStr : String := "https://pro.lceda.cn/editor?entry=ui-worker.js&cll=warn"
+  let eptMkReg (va : UInt64) (size : Nat) (writes : List (Nat × List UInt8)) : Forensicator.Spec.AddressRegion :=
+    { vaStart := va, size := UInt64.ofNat size, data := buildBuf size writes
+      protection := 3, state := .Commit, classification := .Other }
+  let mkEptDump (regions : List Forensicator.Spec.AddressRegion) : AddressSpace :=
+    regions.foldl (fun sp r => match sp.addRegion r with | .ok s => s | .error _ => sp) (.new 64)
+  let eptRegs := (Model.RegisterSet.new.set Model.X64.RBP 0x10000).set Model.X64.RSP 0xFF00
+    |>.set Model.X64.RIP (modLo + 0x1000)
+  let mkStack (cage : UInt64) : Forensicator.Spec.AddressRegion :=
+    { vaStart := 0xF000, size := 0x2000
+      data := buildBuf 0x2000 [
+        setU64 (0x10000 - 24 - 0xF000) 3,
+        setU64 (0x10000 - 16 - 0xF000) ((cage + 0x40000) ||| 1),
+        setU64 (0x10000 - 8 - 0xF000) ((cage + 0x100000) ||| 1)]
+      protection := 3, state := .Commit, classification := .Stack }
+  let mkEptDumpDoc (cageAnn : String) : Model.Dump := {
+    modules := [{ name := "test.dll", baseVa := modLo, size := 0x10000
+                  checksum := 0, provenance := { streamType := 2 } }]
+    threads := [{ id := 1, registers := eptRegs, stackVa := 0xF000, stackSize := 0x2000
+                  tebVa := 0, provenance := {} }]
+    annotations := [("ver", "41.0.0"), ("v8_isolate_address", "0x1C000000"),
+                    ("v8_ro_space_firstpage_address", cageAnn)] }
+  let v8Frames (out : Forensicator.AnalyzerOutput) : List Json :=
+    match out.custom.find? (·.1 == "v8_frames") with
+    | some (_, .arr fs) => fs
+    | _ => []
+  let eptRegions : List Forensicator.Spec.AddressRegion :=
+    [ -- maps: external one-byte string (0x0A), ScopeInfo (0x011E),
+      -- JSFunction (0x0812), SFI (0x0120)
+      { vaStart := eptCage, size := 0x300
+        data := buildBuf 0x300 [setBytes 0x108 [0x0A, 0x00], setBytes 0x188 [0x1E, 0x01],
+                                setBytes 0x208 [0x12, 0x08], setBytes 0x288 [0x20, 0x01]]
+        protection := 3, state := .Commit, classification := .Other }
+    , mkHeap (eptCage + 0x40000) [setU32 0 0x201, setU32 16 0x80001, setU32 20 0x100001]
+    , mkHeap (eptCage + 0x80000) [setU32 0 0x281, setU32 12 0xC0001, setU32 20 0x100001]
+    , -- ScopeInfo: flags 0x5000 (func-var alloc + inferred-name), localCount
+      -- Smi 2 (raw 4), position Smi 6 (raw 12), slot@40 -> external name
+      mkHeap (eptCage + 0xC0000) [setU32 0 0x181, setU32 4 0x5000, setU32 12 4,
+                                  setU32 16 12, setU32 40 0x140001, setU32 48 0]
+    , -- ExternalString "extFunc" (cached): len 7, chars@12 = EPT data handle
+      -- 0x400 (idx 0x10), resourceData@16 = EPT handle 0x440 (idx 0x11)
+      mkHeap (eptCage + 0x140000) [setU32 0 0x101, setU32 8 7, setU32 12 0x400, setU32 16 0x440]
+    , -- Script: name@8 -> URL external string, line_offset@12 = 0,
+      -- line_ends@28 -> FixedArray
+      mkHeap (eptCage + 0x100000) [setU32 0 0x101, setU32 8 0x180001, setU32 12 0, setU32 28 0x1C0001]
+    , -- ExternalString URL (55 chars, cached): chars@12 = EPT handle 0x800
+      -- (idx 0x20), resourceData@16 = 0x840 (idx 0x21)
+      mkHeap (eptCage + 0x180000) [setU32 0 0x101, setU32 8 55, setU32 12 0x800, setU32 16 0x840]
+    , -- line-ends FixedArray: length Smi 2 (raw 4), ends [5, 12] (Smis 10, 24)
+      mkHeap (eptCage + 0x1C0000) [setU32 0 0x101, setU32 4 4, setU32 8 10, setU32 12 24]
+    , -- EPT table: 8-byte entries at base + (idx << 6). idx 0x10 -> name
+      -- char data, 0x11 -> name resource, 0x20 -> URL char data,
+      -- 0x21 -> URL resource. Payloads keep low-48 bits (mask 0xff00ffffffffffff).
+      eptMkReg eptBase 0x200 [setU64 0x80 0x30100000, setU64 0x88 0x30200000,
+                              setU64 0x100 0x30110000, setU64 0x108 0x30210000]
+    , eptMkReg 0x30100000 0x10 [(0, "extFunc".toUTF8.toList)]
+    , eptMkReg 0x30110000 0x40 [(0, urlStr.toUTF8.toList)]
+    , eptMkReg 0x30200000 0x20 [setU64 0 (modLo + 0x1000)]
+    , eptMkReg 0x30210000 0x20 [setU64 0 (modLo + 0x1000)]
+    , -- isolate region: the EPT base is found by scanning its data (offset 0)
+      eptMkReg isoBase 0x1000 [setU64 0 eptBase]
+    , mkStack eptCage ]
+  let eptSpace := mkEptDump eptRegions
+  let eptDump := mkEptDumpDoc "0x200000000"
+  let eptOut := (Analyzer.V8.analyzer).run eptDump eptSpace
+  check ctx "v8 ept: external name + script url + script line (synthetic EPT)"
+    (match v8Frames eptOut with
+     | f0 :: _ =>
+       Json.get f0 "js_function_name" == some (Json.str "extFunc")
+         && Json.get f0 "script_name" == some (Json.str urlStr)
+         && Json.get f0 "script_line" == some (.ofNat 2)
+     | _ => false)
+
+  -- W3-B: UNCACHED external string falls back to resource+16 (legacy path).
+  -- SFI name is an uncached external (itype 0x1A): only the resource handle
+  -- exists (hData = 0), so the chars are read from the resource object +16.
+  let bCage : UInt64 := 0x400000000
+  let bRegions : List Forensicator.Spec.AddressRegion :=
+    [ { vaStart := bCage, size := 0x400
+        data := buildBuf 0x400 [setBytes 0x108 [0x08, 0x00], setBytes 0x208 [0x12, 0x08],
+                                setBytes 0x288 [0x20, 0x01], setBytes 0x308 [0x1A, 0x00]]
+        protection := 3, state := .Commit, classification := .Other }
+    , mkHeap (bCage + 0x40000) [setU32 0 0x201, setU32 16 0x80001, setU32 20 0x100001]
+    , mkHeap (bCage + 0x80000) [setU32 0 0x281, setU32 12 0xC0001, setU32 20 0x100001]
+    , -- uncached external "legacy": map 0x301 (itype 0x1A), len 6, chars@12 = 0x400
+      mkHeap (bCage + 0xC0000) [setU32 0 0x301, setU32 8 6, setU32 12 0x400]
+    , -- Script with internal one-byte name "legacy.js"
+      mkHeap (bCage + 0x100000) [setU32 0 0x101, setU32 8 0x180001, setU32 12 0, setU32 28 0]
+    , mkHeap (bCage + 0x180000) [setU32 0 0x101, setU32 8 9, setBytes 12 "legacy.js".toUTF8.toList]
+    , -- EPT: one entry (idx 0x10) -> resource object
+      eptMkReg eptBase 0x100 [setU64 0x80 0x30200000]
+    , -- resource object: vtable@0 in module; chars pointer @16 (the +16 fallback)
+      eptMkReg 0x30200000 0x20 [setU64 0 (modLo + 0x1000), setU64 16 0x30100000]
+    , eptMkReg 0x30100000 0x10 [(0, "legacy".toUTF8.toList)]
+    , eptMkReg isoBase 0x1000 [setU64 0 eptBase]
+    , mkStack bCage ]
+  let bSpace := mkEptDump bRegions
+  let bDump := mkEptDumpDoc "0x400000000"
+  let bOut := (Analyzer.V8.analyzer).run bDump bSpace
+  check ctx "v8 ept: uncached external resolves via resource+16 fallback"
+    (match v8Frames bOut with
+     | f0 :: _ =>
+       Json.get f0 "js_function_name" == some (Json.str "legacy")
+         && Json.get f0 "script_name" == some (Json.str "legacy.js")
+     | _ => false)
+
+  -- W3-C: an EPT candidate table living INSIDE the isolate region (the
+  -- addendum-B false-table shape) is rejected: its entry pages are readable
+  -- and would validate, but the base is in-isolate, so the external name
+  -- decodes to <anonymous> and the script name stays null.
+  let cCage : UInt64 := 0x600000000
+  let cRegions : List Forensicator.Spec.AddressRegion :=
+    [ { vaStart := cCage, size := 0x300
+        data := buildBuf 0x300 [setBytes 0x108 [0x0A, 0x00], setBytes 0x208 [0x12, 0x08],
+                                setBytes 0x288 [0x20, 0x01]]
+        protection := 3, state := .Commit, classification := .Other }
+    , mkHeap (cCage + 0x40000) [setU32 0 0x201, setU32 16 0x80001, setU32 20 0x100001]
+    , mkHeap (cCage + 0x80000) [setU32 0 0x281, setU32 12 0xC0001, setU32 20 0x100001]
+    , -- external name string (would decode via the false table): len 7,
+      -- chars@12 = 0x400 (idx 0x10), resourceData@16 = 0x440 (idx 0x11)
+      mkHeap (cCage + 0xC0000) [setU32 0 0x101, setU32 8 7, setU32 12 0x400, setU32 16 0x440]
+    , -- isolate region holding the false table: candidate base 0x1C000800 is
+      -- INSIDE the isolate; its entry pages (0x1C000880 / 0x1C000888) are
+      -- readable and would validate (printable chars + module vtable), yet
+      -- the in-isolate filter must reject the base.
+      { vaStart := isoBase, size := 0x4000
+        data := buildBuf 0x4000 [setU64 0 0x1C000800, setU64 0x880 0x30100000,
+                                 setU64 0x888 0x30200000]
+        protection := 3, state := .Commit, classification := .Other }
+    , eptMkReg 0x30100000 0x10 [(0, "decoyxx".toUTF8.toList)]
+    , eptMkReg 0x30200000 0x20 [setU64 0 (modLo + 0x1000)]
+    , mkStack cCage ]
+  let cSpace := mkEptDump cRegions
+  let cDump := mkEptDumpDoc "0x600000000"
+  let cOut := (Analyzer.V8.analyzer).run cDump cSpace
+  check ctx "v8 ept: isolate-resident false table rejected"
+    (match v8Frames cOut with
+     | f0 :: _ =>
+       Json.get f0 "js_function_name" == some (Json.str "<anonymous>")
+         && Json.get f0 "script_name" == some (.null)
+     | _ => false)
+
   -- W2: lazy MSF reader (design §4). The synthetic fixture exercises the
   -- eager MsfFile and the lazy MsfHandle on the same container: empty
   -- stream (0), PdbInfo stream 1, absent stream (2, 0xFFFFFFFF — consumes

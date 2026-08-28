@@ -41,7 +41,7 @@ def stream3 : ByteArray := mkPattern stream3Size
     (directory page list), 3 = directory, 4 = stream 1,
     5/6/7 = stream 3. Directory: 4 streams with sizes
     [0, 28, 0xFFFFFFFF, 549]; absent stream 2 consumes no entries. -/
-def container : ByteArray :=
+def containerWith (info : ByteArray) : ByteArray :=
   let hdr : List UInt8 := magic ++ le32 pageSize ++ le32 1 ++ le32 8
     ++ le32 36 ++ le32 0 ++ le32 2
   let dir : List UInt8 := le32 4 ++ le32 0 ++ le32 28 ++ le32 0xFFFFFFFF
@@ -52,9 +52,21 @@ def container : ByteArray :=
     body ++ List.replicate (pageSize - body.length) 0
   let s3 := stream3.toList
   ByteArray.mk ((page 0 hdr) ++ (page 1 []) ++ (page 2 (le32 3)) ++ (page 3 dir)
-    ++ (page 4 pdbInfo.toList)
+    ++ (page 4 info.toList)
     ++ (page 5 (s3.take 256)) ++ (page 6 (s3.drop 256 |>.take 256))
     ++ (page 7 (s3.drop 512))).toArray
+
+def container : ByteArray := containerWith pdbInfo
+
+/-- PdbInfo variant with a DIFFERENT identity: age 8 (vs 7) and a different
+    last GUID byte (0xCC vs 0xBB). Feeds the loader-mismatch fixture: match's
+    guid/age comparison must fail closed (no false acceptance). -/
+def pdbInfoMismatch : ByteArray :=
+  ByteArray.mk (le32 0x3 ++ le32 0x1234 ++ le32 8
+    ++ le64 0xDEADBEEF00112233 ++ le64 0x445566778899AACC).toArray
+
+/-- The base container with the mismatched identity in stream 1. -/
+def containerMismatch : ByteArray := containerWith pdbInfoMismatch
 
 /-- LE u16 encoder (2 bytes). -/
 def le16 (v : Nat) : List UInt8 :=

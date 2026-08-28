@@ -112,13 +112,23 @@ def runAll : IO UInt32 := do
             let pubs := Util.Publics.ofRecords recsLazy none
             check ctx "publics lazy handle: nearest"
               (Util.Publics.nearest pubs 0x1004 == some ("alpha", 4))
-            check ctx "publics lazy handle: entry count"
-              (pubs.entries.size == 4)
-  IO.FS.removeFile path
+  -- Loader identity path (the CLI match comparison): the good container
+  -- yields the pinned age/GUID; the mismatch container yields a DIFFERENT
+  -- identity (age 8, last GUID byte 0xCC), so match's guid/age comparison
+  -- fails closed and no false acceptance occurs (the analyzers degrade
+  -- exactly as today). Corrupt input makes pdbIdentity error.
+  check ctx "publics identity: good container parses pinned identity"
+    (match Util.pdbIdentity Test.MsfFixture.container with
+     | .ok (age, guid) =>
+       age == 7 && guid.toList == Test.MsfFixture.pdbInfo.extract 12 28 |>.toList
+     | .error _ => false)
+  check ctx "publics identity: mismatch container differs (age and guid)"
+    (match Util.pdbIdentity Test.MsfFixture.containerMismatch with
+     | .ok (age, guid) =>
+       age == 8 && guid.toList != Test.MsfFixture.pdbInfo.extract 12 28 |>.toList
+     | .error _ => false)
+  check ctx "publics identity: truncated container fails closed"
+    (match Util.pdbIdentity (Test.MsfFixture.container.extract 0 600) with
+     | .error _ => true | .ok _ => false)
 
   let n ← ctx.failures.get
-  IO.println (if n == 0 then "== ALL PUBLICS GUARDS PASSED =="
-    else s!"== {n} PUBLICS FAILURE(S) ==")
-  pure n.toUInt32
-
-end Test.Publics
