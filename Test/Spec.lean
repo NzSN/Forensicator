@@ -1042,6 +1042,11 @@ def runAll : IO UInt32 := do
   let eptOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) eptDump eptSpace
   let dbgFrames := (v8Frames eptOut).take 2
   IO.println s!"T9DBG W3-A frames: {repr dbgFrames}"
+  IO.println s!"T9DBG itypeName: {repr (Util.instanceType eptSpace eptCage (eptCage + 0x140000))}"
+  IO.println s!"T9DBG itypeUrl: {repr (Util.instanceType eptSpace eptCage (eptCage + 0x180000))}"
+  IO.println s!"T9DBG name len/h1/h2: {repr (Util.readU32o eptSpace (eptCage + 0x140008))}, {repr (Util.readU32o eptSpace (eptCage + 0x14000C))}, {repr (Util.readU32o eptSpace (eptCage + 0x140010))}"
+  IO.println s!"T9DBG url len/h1/h2: {repr (Util.readU32o eptSpace (eptCage + 0x180008))}, {repr (Util.readU32o eptSpace (eptCage + 0x18000C))}, {repr (Util.readU32o eptSpace (eptCage + 0x180010))}"
+  IO.println s!"T9DBG scope flags/local/slot40: {repr (Util.readU32o eptSpace (eptCage + 0xC0004))}, {repr (Util.readU32o eptSpace (eptCage + 0xC000C))}, {repr (Util.readU32o eptSpace (eptCage + 0xC0028))}"
   check ctx "v8 ept: external name + script url + script line (synthetic EPT)"
     (match v8Frames eptOut with
      | f0 :: _ =>
