@@ -160,7 +160,7 @@ private def findEptBase (space : AddressSpace) (isolateVa : VA)
     external test is (itype &&& stringRepMask) == stringExternalBit — a
     bare &&& 2 would misclassify sliced strings (rep 3). Threads eptBase
     in/out (the Rust version shares a Cell across frames). -/
-private def decodeStringObject (space : AddressSpace) (cage va : VA) (itype : UInt16)
+private def decodeStringObject (space : AddressSpace) (va : VA) (itype : UInt16)
     (isolateVa : Option VA) (moduleRanges : List (VA × UInt64)) (eptBase : Option VA)
     (layout : V8Layout) : Option String × Option VA :=
   if itype ≥ layout.stringItypeMax then (none, eptBase)
@@ -213,7 +213,7 @@ private def decodeScriptName (space : AddressSpace) (cage : VA) (script : VA)
     match instanceType space cage nameObj with
     | none => (none, eptBase)
     | some itype =>
-      decodeStringObject space cage nameObj itype isolateVa moduleRanges eptBase layout
+      decodeStringObject space nameObj itype isolateVa moduleRanges eptBase layout
 
 private def decodeScriptLine (space : AddressSpace) (cage : VA) (script : VA)
     (position : Int) (layout : V8Layout) : Option UInt32 := do
@@ -252,21 +252,19 @@ private def scopeInfoFunctionName (space : AddressSpace) (cage : VA) (scope : VA
   match hdrOk with
   | none => (none, eptBase)
   | some (flags, localCount) =>
-    let mut off := layout.scopeDynamicStart
-    if flags &&& 0xF == layout.scopeTypeModule then
-      off := off + 4
     let n := localCount.toNat.toUInt64
-    off := off + (if n.toUInt32 < layout.scopeMaxInlinedLocalNames then 4 * n else 4)
-    off := off + 4 * n
-    if flags &&& layout.scopeFlagSavedClassVariable != 0 then
-      off := off + 4
+    let offNamed : UInt64 := layout.scopeDynamicStart +
+      (if flags &&& 0xF == layout.scopeTypeModule then 4 else 0) +
+      (if n.toUInt32 < layout.scopeMaxInlinedLocalNames then 4 * n else 4) + 4 * n
+    let offVar : UInt64 :=
+      if flags &&& layout.scopeFlagSavedClassVariable != 0 then offNamed + 4 else offNamed
     let alloc := (flags >>> layout.scopeFunctionVariableShift) &&& layout.scopeFunctionVariableMask
-    let mut candidates : List UInt64 := []
-    if alloc != 0 then
-      candidates := [off]
-      off := off + 8
-    if flags &&& layout.scopeFlagInferredFunctionName != 0 then
-      candidates := candidates ++ [off]
+    -- function-variable slot (if allocated) is 8 bytes; the inferred-name
+    -- slot follows it
+    let candidates : List UInt64 :=
+      (if alloc != 0 then [offVar] else []) ++
+      (if flags &&& layout.scopeFlagInferredFunctionName != 0 then
+        [offVar + (if alloc != 0 then 8 else 0)] else [])
     let rec go (cs : List UInt64) (ept : Option VA) : Option String × Option VA :=
       match cs with
       | [] => (none, ept)
@@ -281,7 +279,7 @@ private def scopeInfoFunctionName (space : AddressSpace) (cage : VA) (scope : VA
             | none => go rest ept
             | some itype =>
               let (nm, ept') :=
-                decodeStringObject space cage nameObj itype isolateVa moduleRanges ept layout
+                decodeStringObject space nameObj itype isolateVa moduleRanges ept layout
               match nm with
               | some s => (some s, ept')
               | none => go rest ept'
@@ -354,7 +352,7 @@ private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA
             | some itype =>
               if itype < layout.stringItypeMax then
                 let (nm, ept') :=
-                  decodeStringObject space cage nameOrScope itype isolateVa moduleRanges ept layout
+                  decodeStringObject space nameOrScope itype isolateVa moduleRanges ept layout
                 ept := ept'
                 info := { info with name := nm }
               else
