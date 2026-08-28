@@ -263,6 +263,59 @@ where
     | some (_, v) => s!"electron {v}"
     | none => "generic"
 
+private def ruleCageDecompression (c : Ctx) : Option Hit := do
+  -- W1.3 (design §3): AV read/write fault inside the 4 GB V8 pointer-
+  -- compression cage reservation but outside every committed region — the
+  -- signature of a garbage 32-bit value decompressed as a pointer.
+  -- Strong form (v8TagConfusion/High): the faulting instruction is the
+  -- decompression idiom — memory base register holds the cage base and the
+  -- compressed value rides the SIB index register ([cage_reg + idx*scale +
+  -- disp]), with the effective address matching the fault VA.
+  let fault ← c.faultVa
+  let exc ← c.dump.exception
+  if exc.code != EXCEPTION_ACCESS_VIOLATION then none
+  else
+    let cage ← c.cageBase
+    let cageEnd := cage + ((1 : UInt64) <<< 32)
+    if fault < cage || fault ≥ cageEnd then none
+    else if (c.space.regionAt fault).isSome then none  -- committed → rules 5/6
+    else
+      let inCage := c.space.regions.filter fun r => r.vaStart ≥ cage && r.vaStart < cageEnd
+      let pastText :=
+        match inCage.getLast? with
+        | none => ""
+        | some r =>
+          let e := r.vaStart + r.size
+          if fault ≥ e then
+            s!"; fault is 0x{String.ofList (Nat.toDigits 16 (fault - e).toNat)} past the highest committed cage region (end {hexUpper e})"
+          else ""
+      let idiom : Option (UInt64 × UInt8 × Int) :=
+        match c.disasm, exc.context with
+        | some instr, some regs =>
+          match instr.kind with
+          | Util.InstrKind.memRead (some b) (some ix) s d =>
+            if regs.get b == cage then some (regs.get ix, s, d) else none
+          | Util.InstrKind.memWrite (some b) (some ix) s d =>
+            if regs.get b == cage then some (regs.get ix, s, d) else none
+          | _ => none
+        | _, _ => none
+      match idiom, c.disasm with
+      | some (v, scale, disp), some instr =>
+        let eff := (Int.ofNat cage.toNat + Int.ofNat v.toNat * Int.ofNat scale.toNat + disp).toNat % (2 ^ 64)
+        if eff != fault.toNat then
+          some { rule := 11, verdict := .decompressedGarbagePointer, confidence := .medium
+                 evidence := [s!"access violation at fault VA {hexUpper fault}: inside the 4GB V8 cage reservation (base {hexUpper cage}) but uncommitted — decompressed garbage 32-bit value{pastText}"] }
+        else
+          let tagNote :=
+            if v &&& 1 == 0 then " (untagged even value — Smi or garbage used as a heap pointer)"
+            else " (tag bit set)"
+          some { rule := 11, verdict := .v8TagConfusion, confidence := .high
+                 evidence := [s!"access violation at uncommitted VA {hexUpper fault} inside the V8 pointer-compression cage (base {hexUpper cage}){pastText}",
+                              s!"faulting instruction decompresses a compressed pointer: base register holds the cage base, compressed value 0x{String.ofList (Nat.toDigits 16 v.toNat)}{tagNote}: {instr.text}"] }
+      | _, _ =>
+        some { rule := 11, verdict := .decompressedGarbagePointer, confidence := .medium
+               evidence := [s!"access violation at fault VA {hexUpper fault}: inside the 4GB V8 cage reservation (base {hexUpper cage}) but uncommitted — decompressed garbage 32-bit value{pastText}"] }
+
 private def ruleOomState (c : Ctx) : Option Hit := do
   let ext ← c.dump.v8heapExt
   if ext.allocTopVa == 0 || ext.allocLimitVa == 0 then none
@@ -332,7 +385,7 @@ def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
         cageBase := annotationHex dump "v8_ro_space_firstpage_address" }
     let rules : List (Ctx → Option Hit) :=
       [ruleFatalMessage, ruleBreakpoint, ruleStackOverflow, ruleWasmGuard,
-       ruleSmiConfusion, ruleObjectAccess, ruleOomState, ruleCorruptedCodePointer,
+       ruleSmiConfusion, ruleObjectAccess, ruleCageDecompression, ruleOomState, ruleCorruptedCodePointer,
        ruleNullDeref, ruleWildAccess]
     let hits := rules.filterMap fun r => r ctx
     let hits := hits.mergeSort fun a b =>

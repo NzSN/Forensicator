@@ -666,6 +666,48 @@ def runAll : IO UInt32 := do
   check ctx "sib truncated modrm fails closed (48 8b 04)"
     ((decode1 [0x48, 0x8B, 0x04]).map (·.kind) == some .other)
 
+  -- cause: cage-decompression rule (design §W1.3, rule 11)
+  let cage2 : UInt64 := 0x12C00000000
+  let mkCauseFixture (codeBytes : List UInt8) (codeVa faultVa : UInt64)
+      (withCageAnn : Bool) : Model.Dump × AddressSpace :=
+    let regs := ((Model.RegisterSet.new.set Model.X64.R14 cage2).set Model.X64.R12 0xEEC11900).set Model.X64.RAX faultVa
+    let codeRegion : Forensicator.Spec.AddressRegion :=
+      { vaStart := codeVa, size := UInt64.ofNat codeBytes.length
+        data := ba codeBytes, protection := 0x20, state := .Commit
+        classification := .Image }
+    let heapRegion : Forensicator.Spec.AddressRegion :=
+      { vaStart := cage2, size := 0x1000
+        data := ByteArray.mk (Array.replicate 0x1000 0)
+        protection := 4, state := .Commit, classification := .Private }
+    let space := addTo (addTo (AddressSpace.new 64) heapRegion) codeRegion
+    let anns : List (String × String) :=
+      if withCageAnn then [("v8_ro_space_firstpage_address", "0x12C00000000")] else []
+    let exc : Model.ExceptionInfo :=
+      { code := 0xC0000005, address := codeVa, threadId := 1
+        parameters := [0, faultVa], context := some regs, provenance := tprov }
+    (({ exception := some exc, annotations := anns } : Model.Dump), space)
+  let faultUnc : UInt64 := cage2 + 0xEEC1190A
+  -- strong: movzx r12d, BYTE [r14+r12*1+0xa] with r14=cage (nicholas crash)
+  let (dStrong, sStrong) := mkCauseFixture [0x47, 0x0F, 0xB6, 0x64, 0x26, 0x0A] 0x7FF700000000 faultUnc true
+  let dgStrong := Analyzer.Cause.diagnose dStrong sStrong
+  check ctx "cause cage: decompression idiom is V8TagConfusion/High"
+    (dgStrong.verdict == .v8TagConfusion && dgStrong.confidence == .high)
+  -- weak: fault in cage uncommitted but the instruction is not the idiom
+  let (dWeak, sWeak) := mkCauseFixture [0x48, 0x8B, 0x00] 0x7FF700000000 faultUnc true
+  let dgWeak := Analyzer.Cause.diagnose dWeak sWeak
+  check ctx "cause cage: non-idiom is DecompressedGarbagePointer/Medium"
+    (dgWeak.verdict == .decompressedGarbagePointer && dgWeak.confidence == .medium)
+  -- non-firing: fault covered by a committed cage region -> falls through
+  let (dCom, sCom) := mkCauseFixture [0x48, 0x8B, 0x00] 0x7FF700000000 (cage2 + 0x800) true
+  let dgCom := Analyzer.Cause.diagnose dCom sCom
+  check ctx "cause cage: committed fault does not fire the rule"
+    (dgCom.verdict == .wildAccess)
+  -- non-firing: no cage annotation -> no cage reasoning at all
+  let (dNoAnn, sNoAnn) := mkCauseFixture [0x47, 0x0F, 0xB6, 0x64, 0x26, 0x0A] 0x7FF700000000 faultUnc false
+  let dgNoAnn := Analyzer.Cause.diagnose dNoAnn sNoAnn
+  check ctx "cause cage: no cage annotation does not fire the rule"
+    (dgNoAnn.verdict == .wildAccess)
+
   -- v8 JS-frame resolution (port of v8.rs decodes_js_frame_from_captured_heap)
   let setU32 := fun (o : Nat) (v : UInt32) => (o, (List.range 4).map fun i => ((v.toUInt64 >>> (8 * UInt64.ofNat i)).toUInt8))
   let setU64 := fun (o : Nat) (v : UInt64) => (o, (List.range 8).map fun i => ((v >>> (8 * UInt64.ofNat i)).toUInt8))
@@ -677,10 +719,14 @@ def runAll : IO UInt32 := do
       protection := 3, state := .Commit, classification := .Other }
   let jsSpace0 : AddressSpace := .new 64
   let jsRegions : List Forensicator.Spec.AddressRegion :=
-    [ -- RO space: one-byte-string Map at cage+0x100 (itype 0x08 at Map+8)
-      { vaStart := cage, size := 0x200, data := buildBuf 0x200 [setU32 0x108 0x08]
+    [ -- RO space: one-byte-string Map at cage+0x100 (itype 0x08 at Map+8);
+      -- JSFunction Map at cage+0x200 (itype 0x812 = JS_FUNCTION_TYPE, u16 LE
+      -- at Map+8) — the scored validator (design §W3.2) requires the
+      -- candidate map instance type in [0x812, 0x822].
+      { vaStart := cage, size := 0x300, data := buildBuf 0x300
+          [setU32 0x108 0x08, setBytes 0x208 [0x12, 0x08]]
         protection := 3, state := .Commit, classification := .Other }
-    , mkHeap (cage + 0x40000) [setU32 0 0x101, setU32 16 0x80001, setU32 20 0x180001]
+    , mkHeap (cage + 0x40000) [setU32 0 0x201, setU32 16 0x80001, setU32 20 0x180001]
     , mkHeap (cage + 0x80000) [setU32 0 0x101, setU32 12 0xC0001, setU32 20 0x100001]
     , mkHeap (cage + 0xC0000) [setU32 0 0x101, setU32 8 6, setBytes 12 [0x6D, 0x79, 0x46, 0x75, 0x6E, 0x63]]
     , mkHeap (cage + 0x100000) [setU32 0 0x101, setU32 8 0x140001]
