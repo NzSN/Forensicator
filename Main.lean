@@ -384,7 +384,13 @@ private def eventJson (e : ExecutionEvent) : Json :=
     ("address", .str (hexUpper e.address)), ("thread_id", .ofUInt32 e.threadId),
     ("name", .str e.name), ("size", .ofUInt64 e.size)]
 
-private def pointInspectPrint (input : AnalysisInput) (frontier : Position)
+private def frameJson (frame : RecoveredFrame) : Json :=
+  .obj [("instruction", .str (hexUpper frame.instruction)),
+    ("stack_pointer", .str (hexUpper frame.stackPointer)),
+    ("frame_pointer", match frame.framePointer with | some p => .str (hexUpper p) | none => .null),
+    ("confidence", .ofFloat frame.confidence)]
+
+private def pointInspectPrint (input : AnalysisInput) (frontier : Option Position)
     (json quiet : Bool) : IO Unit := do
   let point := input.point
   let position := match point.id.position with
@@ -403,10 +409,11 @@ private def pointInspectPrint (input : AnalysisInput) (frontier : Position)
           .obj [("va", .str (hexUpper r.va)), ("size", .ofUInt64 r.size)]),
         ("frames", knowledgeJson t.frames fun f =>
           .obj [("count", .ofNat f.frames.length),
+            ("frames", .arr (f.frames.map frameJson)),
             ("coverage", .str (coverageName f.coverage)), ("confidence", .ofFloat f.confidence)])]
     IO.println (Json.render (.obj [
       ("source", .str point.id.source), ("position", .str position),
-      ("frontier", .str (hexUpper frontier)),
+      ("frontier", match frontier with | some p => .str (hexUpper p) | none => .null),
       ("memory", .obj [("known_regions", .ofNat input.space.regions.length),
         ("byte_coverage", .str (coverageName point.memory.byteCoverage)),
         ("mapping_coverage", .str (coverageName point.memory.mappingCoverage)),
@@ -420,7 +427,8 @@ private def pointInspectPrint (input : AnalysisInput) (frontier : Position)
   else if quiet then
     IO.println s!"position: {position}  memory_regions: {input.space.regions.length}  events: {point.events.length}  threads: {point.threads.length}  byte_coverage: {coverageName point.memory.byteCoverage}"
   else
-    IO.println s!"Execution point {position} / frontier {hexUpper frontier}"
+    let suffix := frontier.map (fun p => " / frontier " ++ hexUpper p) |>.getD ""
+    IO.println s!"Execution point {position}{suffix}"
     IO.println s!"Memory: {input.space.regions.length} known regions; bytes {coverageName point.memory.byteCoverage}; mappings {coverageName point.memory.mappingCoverage}"
     IO.println s!"Events at this position: {point.events.length}"
     for (e, i) in point.events.zipIdx do
@@ -444,6 +452,60 @@ private def selectAnalysisEvent (input : AnalysisInput) (args : List String) :
       else .error "selected event is not an exception"
     | none => .error "event index out of range"
 
+private def stackStopCode : Execution.Stack.StopReason → String
+  | .validatedRoot => "validated_root" | .missingThread => "missing_thread"
+  | .missingContext => "missing_context" | .missingArchitecture => "missing_architecture"
+  | .unsupportedArchitecture => "unsupported_architecture" | .missingStackBounds => "missing_stack_bounds"
+  | .missingMemory => "missing_memory" | .absentMemory => "absent_memory"
+  | .missingArtifact => "missing_artifact" | .invalidArtifact => "invalid_artifact"
+  | .unsupportedUnwind => "unsupported_unwind" | .invalidContext => "invalid_context"
+  | .invalidStackTransition => "invalid_stack_transition" | .invalidReturnAddress => "invalid_return_address"
+  | .cycle => "cycle" | .frameBudget => "frame_budget" | .byteBudget => "byte_budget"
+  | .contextMismatch => "context_mismatch"
+
+private def stackDependencyJson : Execution.Stack.Dependency → Json
+  | .registers thread => .obj [("kind", .str "registers"), ("thread_id", .ofUInt32 thread.1)]
+  | .stackBounds thread => .obj [("kind", .str "stack_bounds"), ("thread_id", .ofUInt32 thread.1)]
+  | .memory range => .obj [("kind", .str "memory"), ("va", .str (hexUpper range.va)),
+      ("size", .ofUInt64 range.size)]
+  | .unwindArtifact base => .obj [("kind", .str "unwind_artifact"), ("module_base", .str (hexUpper base))]
+  | .artifactBytes base range => .obj [("kind", .str "artifact_bytes"),
+      ("module_base", .str (hexUpper base)), ("va", .str (hexUpper range.va)),
+      ("size", .ofUInt64 range.size)]
+
+private def stackPrint (result : Execution.Stack.StackRecovery) (json : Bool) : IO Unit := do
+  let position := match result.evidence.pointId.position with
+    | .capture => "capture" | .trace p => hexUpper p
+  let origin := match result.evidence.registerOrigin with
+    | none => "unavailable" | some .thread => "thread"
+    | some (.exceptionEvent i) => s!"exception_event:{i}"
+  if json then
+    IO.println (Json.render (.obj [
+      ("source", .str result.evidence.pointId.source), ("position", .str position),
+      ("thread_id", .ofUInt32 result.evidence.thread.1),
+      ("frames", .arr (result.stack.frames.map frameJson)),
+      ("coverage", .str (coverageName result.stack.coverage)),
+      ("confidence", .ofFloat result.stack.confidence),
+      ("stop_reason", .str (stackStopCode result.stopReason)),
+      ("register_origin", .str origin), ("bytes_read", .ofNat result.bytesRead),
+      ("dependencies", .arr (result.dependencies.map stackDependencyJson))]))
+  else
+    IO.println s!"Stack for thread {result.evidence.thread.1} at {position}: {result.stack.frames.length} frame(s), {coverageName result.stack.coverage}"
+    for (frame, i) in result.stack.frames.zipIdx do
+      IO.println s!"  #{i}  IP {hexUpper frame.instruction}  SP {hexUpper frame.stackPointer}"
+    IO.println s!"Stopped: {(stackStopCode result.stopReason).replace "_" " "}; registers: {origin}"
+    if !result.dependencies.isEmpty then
+      IO.println s!"Dependencies needed: {Json.render (.arr (result.dependencies.map stackDependencyJson))}"
+
+private def stackBudget (args : List String) (flag : String) (fallback limit : Nat) :
+    Except String Nat := do
+  match args.dropWhile (· != flag) with
+  | [] => pure fallback
+  | [_] => .error s!"{flag} needs a number"
+  | _ :: value :: _ =>
+    let n ← parseU64 value
+    if n.toNat > limit then .error s!"{flag} must be at most {limit}" else pure n.toNat
+
 private def shellDispatch (s : Session) (args : List String) : IO (Session × Bool) := do
   match args with
   | "quit" :: _ => do
@@ -452,12 +514,30 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
   | "inspect" :: rest =>
     match s.target with
     | .dump (dump, _, _) _ =>
-      inspectPrint dump ("--json" ∈ rest) ("--quiet" ∈ rest)
+      if "--point" ∈ rest then
+        match ← s.currentIO with
+        | .error e => IO.eprintln s!"error: {e}"
+        | .ok input => pointInspectPrint input none ("--json" ∈ rest) ("--quiet" ∈ rest)
+      else inspectPrint dump ("--json" ∈ rest) ("--quiet" ∈ rest)
     | .trace t _ =>
       match (← s.currentIO) with
       | .error e => IO.eprintln s!"error: {e}"
-      | .ok input => pointInspectPrint input t.frontier ("--json" ∈ rest) ("--quiet" ∈ rest)
+      | .ok input => pointInspectPrint input (some t.frontier) ("--json" ∈ rest) ("--quiet" ∈ rest)
     pure (s, true)
+  | "stack" :: threadStr :: rest =>
+    let settings : Except String (UInt32 × Execution.Stack.StackOptions) := do
+      let thread ← parseU64 threadStr
+      if thread.toNat ≥ 2^32 then .error "thread ID is outside UInt32 range"
+      else
+        let maxFrames ← stackBudget rest "--max-frames" 128 4096
+        let maxReadBytes ← stackBudget rest "--max-bytes" 65536 67108864
+        pure (thread.toUInt32, { maxFrames, maxReadBytes })
+    match settings with
+    | .error e => IO.eprintln s!"error: {e}"; pure (s, true)
+    | .ok (thread, options) =>
+      match ← s.recoverThreadStack thread options with
+      | .error e => IO.eprintln s!"error: {e}"; pure (s, true)
+      | .ok (next, result) => stackPrint result ("--json" ∈ rest); pure (next, true)
   | "analyze" :: rest =>
     match (← s.prepareAnalysis) with
     | .error e => IO.eprintln s!"error: {e}"
@@ -640,8 +720,9 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
         IO.println s!"   call on {c.threadId}: [{hexUpper c.interval.start}, {state})"
     pure (s, true)
   | "help" :: _ =>
-    IO.println "commands: inspect analyze match list-plugins load symbols seek t+ t- position events read writes intervals quit"
+    IO.println "commands: inspect analyze stack match list-plugins load symbols seek t+ t- position events read writes intervals quit"
     IO.println "events [from to]  |  read <address> <length>  |  analyze [--event <index>]"
+    IO.println "stack <thread-id> [--max-frames N] [--max-bytes N] [--json]  |  inspect --point"
     pure (s, true)
   | [] => pure (s, true)
   | cmd :: _ =>

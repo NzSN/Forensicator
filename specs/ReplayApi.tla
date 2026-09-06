@@ -1,16 +1,21 @@
 ---- MODULE ReplayApi ----
 EXTENDS Timeline
 
-\* ── ReplayApi — the public TTD Replay API as a formal engine surface ─────
+\* ── ReplayApi — an idealized TTD adapter contract over a trace oracle ────
 \*
-\* Formal counterpart of the Microsoft.TimeTravelDebugging.Apis surface,
-\* pinned to the v0.9.5 NuGet header (sdk/include/TTD/IReplayEngine.h in
-\* Microsoft.TimeTravelDebugging.Apis.0.9.5.nupkg — the latest published
-\* version; verified symbol-for-symbol against the package itself). The
-\* WinDbg-Samples TTD/docs tree is a secondary cross-check only — its
-\* divergences from the header are listed below.
+\* Names are pinned to Microsoft.TimeTravelDebugging.Apis 0.9.5
+\* (sdk/include/TTD/IReplayEngine.h). The actions below are stronger than the
+\* public header's guarantees: exactness, complete read-failure classification,
+\* and the integer write-phase conversion are explicit model assumptions.
+\* R0 header/ABI evidence: Drafts/2026-09-06-timeline-native-prerequisites.md.
+\* Its actual-header inspection does NOT certify native replay semantics.
+\* Existing bounded checks establish invariants within this idealization;
+\* they do not verify that any SDK policy implements QueryExact. See also
+\* ObservationScopes.tla for the separate trusted-certification boundary.
+\* WinDbg-Samples documentation is a secondary cross-check only; historical
+\* differences from the pinned package are listed below.
 \* Timeline.tla models the recorded trace (append-only write log, frontier).
-\* This module models what the *Replay API* exposes over it:
+\* This module models an assumed adapter surface over it:
 \*
 \*   * engine view (IReplayEngineView) — lifetime [0, frontier], threads,
 \*     modules, events: read-only projections of Timeline's logs; nothing to
@@ -22,22 +27,24 @@ EXTENDS Timeline
 \*     last stop reason.
 \*   * memory queries (QueryMemoryBuffer / QueryMemoryRange) with
 \*     QueryMemoryPolicy (v0.9.5: Default, ThreadLocal, GloballyConservative,
-\*     GloballyAggressive, InFragmentAggressive). Only GloballyConservative
-\*     is exact at the cursor; ThreadLocal CONCENTRATES on the current
-\*     position/thread but may return past/future memory observed by the
-\*     current thread (header comment) — it is a bounded search, modeled
-\*     with the search family. Aggressive variants search anywhere.
+\*     GloballyAggressive, InFragmentAggressive). QueryExact uses the legacy
+\*     CONSERVATIVE label but ASSUMES independently certified exact reads.
+\*     The header describes GloballyConservative as high-confidence, not
+\*     exact. ThreadLocal concentrates on the current position/thread;
+\*     non-exact policy behavior is abstracted by the search family. Policy
+\*     selection alone cannot establish exact applicability.
 \*   * replay scans (ReplayForward/ReplayBackward(limit, stepCount)) —
 \*     stop at the FIRST (forward) / LAST (backward) of: a masked
 \*     memory-watchpoint write, a masked position-watchpoint range entry,
 \*     a masked exception (all three gated on the cursor's EventMask),
 \*     the destination ("Position"), or the lifetime boundary ("Process").
 \*
-\* Engine position convention (v0.9.5 callback docs: "the current position
-\* points to the call or ret instruction"): positions are PRE-instruction
-\* states — a write at p materializes at engine position p+1 (the proxy
-\* design's Implementation-note off-by-one, here made explicit as
-\* EngineValueAt; the jigsaw client's fetch-at-(t+1) clamp implements it).
+\* ASSUMED position convention: a write at integer p materializes at p+1
+\* (EngineValueAt and the legacy jigsaw fetch-at-(t+1) clamp). The package's
+\* call/return and during-access callback descriptions do not establish this
+\* as a global native phase rule. Native positions have two u64 components;
+\* steps can include non-instruction advances, and SetPosition normalizes.
+\* R0 replay probes must establish any supported conversion domain.
 \*
 \* Abstractions and known simplifications (deliberate):
 \*   * Positions collapse TTD's (Sequence, Steps) pair to Timeline's single
@@ -53,12 +60,13 @@ EXTENDS Timeline
 \*     unmodeled stop reasons (gaps: the trace here is fully recorded).
 \*   * Partial reads: QueryMemoryBuffer "fills as much of the buffer as
 \*     possible" — with one-cell queries, reads are binary (ok/fail). Range
-\*     composition is out of scope (QueryMemoryBufferWithRanges is the
-\*     per-cell loop of QueryMemoryRange).
+\*     composition is out of scope; this is not a proof that composing
+\*     QueryMemoryRange calls implements QueryMemoryBufferWithRanges.
 \*   * Provenance observability: only MemoryRange/WithRanges carry the
-\*     recording Sequence; MemoryBuffer does NOT. q_pos/q_val honesty for
-\*     buffer queries is model instrumentation, not an API-observable fact.
-\*   * GetCrossPlatformContext (per-position register file) is out of scope:
+\*     recording Sequence, not full Position; MemoryBuffer does NOT.
+\*     q_pos/q_val honesty is idealized model instrumentation, not an
+\*     API-observable full-position attestation.
+\*   * GetCrossPlatformContext (context query for live threads) is out of scope:
 \*     the trace model has no register contents. SetPositionOnThread
 \*     (thread-scoped seek), ReplayResult payloads (steps/instructions/
 \*     event data), and the query-buffer lifetime rule ("valid until the
@@ -98,8 +106,9 @@ EXTENDS Timeline
 \*       (NewCursor's signature — the header returns ICursor* — and
 \*       QueryMemory/GetCurrentThreadId calls ICursorView does not have).
 \*
-\* Commit truth is needed because memory queries FAIL on uncommitted cells
-\* (the API's read failure is a fact, cf. JigSawSpawner's D3): a commit log
+\* The idealized oracle succeeds iff a cell is committed. A real API failure
+\* does not by itself prove decommit/absence; missing recording data and replay
+\* limitations require separate classification. The modeled commit log is
 \* recorded at the moving frontier, same shape as JigSawSpawner's. Commit
 \* positions are engine-visible at their recorded position (post-state
 \* convention — the commit log is this module's own abstraction).
@@ -376,8 +385,10 @@ SetMask(c, m) ==
 
 \* ---- Actions: memory queries (QueryMemoryBuffer/Range + policies) ----
 
-\* GloballyConservative ("high confidence of being correct, efficient to
-\* find"): the answer is exact at the cursor. Fails iff uncommitted there.
+\* ASSUMED certified oracle, retaining the historical CONSERVATIVE wire label.
+\* Exact-at-cursor and failure iff uncommitted are adapter preconditions, not
+\* consequences of choosing SDK GloballyConservative. This stronger action is
+\* intentionally unchanged so prior BMC results keep their conditional meaning.
 QueryExact(c, a, pol) ==
     /\ c \in 1..MaxCursors /\ a \in 1..MaxAddr
     /\ cur_on[c] /\ pol = "CONSERVATIVE"
@@ -602,8 +613,8 @@ QueryHonest ==
       /\ q_val = EngineValueAt(q_addr, q_pos)
       /\ CmAt(q_addr, q_pos)
 
-\* GloballyConservative answers are exact: provenance is the position the
-\* query was issued at.
+\* Conditional property of QueryExact's assumed oracle: provenance is the
+\* issued position. It is not an SDK GloballyConservative correctness theorem.
 ExactAtCursor ==
     (q_ok /\ q_pol = "CONSERVATIVE") => q_pos = q_cursor
 

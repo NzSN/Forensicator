@@ -5,9 +5,16 @@ EXTENDS ReplayApi
 \*
 \* Formal counterpart of docs/trace/2026-08-12-lazy-trace-proxy-design.md
 \* and docs/trace/2026-09-06-execution-timeline-design.md (execution views).
+\* Assumption correction (2026-09-06 R0): ReplayApi.QueryExact is an idealized
+\* certified oracle, not a guarantee of SDK GloballyConservative. The pinned
+\* header promises high confidence, not strict exactness. Existing actions and
+\* BMC invariants below are unchanged and conditional on that oracle, complete
+\* absence classification, the integer p+1 phase rule and honest index coverage.
+\* No native replay certification follows from a successful model check.
+\* Evidence: Drafts/2026-09-06-timeline-native-prerequisites.md.
 \*
 \* 2026-08-18 refactor: the engine surface is now ReplayApi (the public
-\* TTD Replay API, pinned to the v0.9.5 NuGet header) instead of the
+\* TTD adapter abstraction, using v0.9.5 NuGet header names) instead of the
 \* dbgeng-channel truth oracle of the 2026-08-13 revision (in git history;
 \* that revision was Apalache-verified, full run green). What changes:
 \*
@@ -16,9 +23,10 @@ EXTENDS ReplayApi
 \*   * Recording steps are ReplayApi's RecordOrNav: writes land only on
 \*     committed cells (engine-consistency PIN 1). The previous revision
 \*     let Timeline record writes anywhere.
-\*   * Page fetch (READ_AT on the wire) has the semantics of SetPos(e)
-\*     followed by a GloballyConservative QueryMemoryBuffer — QueryExact's
-\*     contract, folded into one atomic step: succeeds iff CmAt(p, e), the
+\*   * Page fetch (READ_AT on the wire) ASSUMES SetPos(e) followed by the
+\*     certified QueryExact oracle, folded into one atomic step. A successful
+\*     GloballyConservative query alone is insufficient. In the model the
+\*     query succeeds iff CmAt(p, e), the
 \*     value is EngineValueAt(p, e). The p+1 write-visibility clamp is now
 \*     explicit: e = min(t+1, frontier) (Trace/Jigsaw.lean fetchPosition).
 \*   * Write-index acquisition (WRITES_INDEX on the wire) is the watchpoint
@@ -56,8 +64,9 @@ EXTENDS ReplayApi
 \*
 \* KNOWN GAP (unchanged): a decommit→recommit cycle can replace a page's
 \* contents (kernel zero-fill) without any write-log entry. The client
-\* cannot see recommits from the index; the engineered mitigation is
-\* proxy-side (an N-mask/NewData watchpoint pass clips intervals). Here
+\* cannot see recommits from the index. A proposed proxy-side NewData pass
+\* requires native validation; SDK NewData is not a certified allocation or
+\* lifecycle event and cannot alone close this gap. Here
 \* byte equality below is against ReplayApi's write-log ValueAt oracle,
 \* which does not model kernel zero-fill. It proves neither complete
 \* mapping knowledge nor lifecycle coverage. NoRecommitWithin remains
@@ -273,12 +282,12 @@ ScanFinishEmpty ==
                    cache_state, cache_val, cache_lo, cache_hi, cache_req, cache_obs, cache_first_e, cache_e, cache_reply,
                    scan_page>>
 
-\* ---- Page fetch: READ_AT = SetPos(e) ∘ GloballyConservative query ----
+\* ---- Page fetch: READ_AT = SetPos(e) ∘ assumed certified oracle ----
 
 \* Fetch one page for model query position t (D2/D3 + Implementation
 \* notes). Dependency rule: the page's index first, and t within the
-\* full static frontier. The probe is a GloballyConservative query at the p+1-clamped
-\* engine position e (the QueryExact contract): succeeds iff the page is
+\* full static frontier. The probe assumes QueryExact at the p+1-clamped
+\* engine position e: succeeds iff the page is
 \* committed there, the value is the engine truth at e. On failure, the P3
 \* fallback probes a next known write strictly below the frontier at e2 and
 \* caches at the honest model position e2−1; otherwise the piece is ABSENT

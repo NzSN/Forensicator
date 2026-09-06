@@ -338,6 +338,14 @@ def decodeMemoryInfoList (data : ByteArray) (prov : Provenance) :
         else .ok entries
 
 -- ── thread_list ─────────────────────────────────────────────────────
+/-- Raw decoding does not establish that Windows supplied the registers. The
+    current x64 consumers need CONTROL and INTEGER context groups (winnt.h).
+    Per-register validity remains the R1b migration; missing core groups fail
+    closed here instead of becoming authoritative zero-valued slots. -/
+private def decodeCoreContext (bytes : ByteArray) : Option RegisterSet :=
+  if bytes.size < 0x100 || u32le bytes 0x30 &&& 0x00100003 != 0x00100003 then none
+  else (RegisterSet.decodeContext bytes).toOption
+
 def decodeThreadList (data dumpData : ByteArray) (prov : Provenance) :
     Except Anomaly (List Thread) :=
   if data.size < 4 then .ok []
@@ -353,7 +361,7 @@ def decodeThreadList (data dumpData : ByteArray) (prov : Provenance) :
       let ctxRva := (u32le data (off + 44)).toNat
       let registers : Option RegisterSet :=
         if ctxSize > 0 && ctxRva > 0 && ctxRva + ctxSize ≤ dumpData.size then
-          (RegisterSet.decodeContext (dumpData.extract ctxRva (ctxRva + ctxSize))).toOption
+          decodeCoreContext (dumpData.extract ctxRva (ctxRva + ctxSize))
         else none
       { id := u32le data off
         registers := registers.getD RegisterSet.new
@@ -381,7 +389,7 @@ def decodeException (data dumpData : ByteArray) (prov : Provenance) :
         let ctxSize := (u32le data 160).toNat
         let ctxRva := (u32le data 164).toNat
         if ctxSize > 0 && ctxRva > 0 && ctxRva + ctxSize ≤ dumpData.size then
-          (RegisterSet.decodeContext (dumpData.extract ctxRva (ctxRva + ctxSize))).toOption
+          decodeCoreContext (dumpData.extract ctxRva (ctxRva + ctxSize))
         else none
       else none
     .ok { code := u32le data 8

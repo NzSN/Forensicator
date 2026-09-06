@@ -120,6 +120,14 @@ is its compatibility entry. Run `python3 scripts/test-execution-shell.py` after
 building when changing these paths; run `scripts/check-timeline-specs.sh` for
 TLA+ contract changes.
 
+Host stack completion tasks are tracked in
+`Drafts/2026-09-06-timeline-task-board.md`. `Execution/Stack.lean` is pure and
+budgeted; shell `stack` retains capture frame knowledge and `inspect --point`
+shows it. Native v2 context acquisition and V8/JIT shared-walk migration remain
+queued. `Model/Observation.lean` supplies native-coordinate/identity primitives;
+these have not replaced live v1 identities/coordinates. Run
+`python3 scripts/test-stack-shell.py` for capture/session changes.
+
 ## Built-in pointer patterns
 
 `all_strict`, `all_loose`, `saved_frame_pointers`, `vtables`, `heap_references`

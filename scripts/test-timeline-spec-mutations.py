@@ -99,7 +99,35 @@ def main():
         "JigSawSpawnerRegression.tla", "", "", [], 2,
         config_file="JigSawSpawnerRegression.cfg",
     )
-    print("== 6 TIMELINE SPEC MUTATIONS REJECTED ==")
+    completion_cases = [
+        ("query policy manufactures certification", "ObservationScopes.tla",
+         "Certify ==\n    /\\ adapterValidated",
+         'Certify ==\n    /\\ policy = "conservative"',
+         "ObservationInit", "ObservationNext", ["TrustedCertification"], 1),
+        ("durable reuse accepts stale live reply", "ObservationScopes.tla",
+         "AcceptLive ==\n    /\\ observed = target",
+         "AcceptLive ==\n    /\\ Reusable(observed, target)",
+         "ObservationInit", "ObservationNext", ["LiveAttachment"], 2),
+        ("stored observations ignore attachment epochs", "ObservationScopes.tla",
+         '    /\\ a.epoch = b.epoch \\/ a.sourceKind = "verified"',
+         "    /\\ TRUE",
+         "ObservationInit", "ObservationNext", ["ReuseScope"], 2),
+        ("wrong-point typed root completes stack", "StackRecovery.tla",
+         "    /\\ terminalScope = inputScope /\\ terminalFrame = frame",
+         "    /\\ terminalFrame = frame",
+         "StackInit", "StackNext", ["CompleteHasRoot"], 3),
+        ("frame-pointer prefix declared complete", "StackRecovery.tla",
+         "    /\\ complete' = (dependencies = {} /\\ ~usedFramePointer)",
+         "    /\\ complete' = TRUE",
+         "StackInit", "StackNext", ["CompleteHasRoot"], 5),
+        ("stack read bypasses byte budget", "StackRecovery.tla",
+         "ELSE IF bytesRead + cost > byteLimit", "ELSE IF FALSE",
+         "StackInit", "StackNext", ["BudgetsHold"], 3),
+    ]
+    for name, file, before, after, init, step, invariants, bound in completion_cases:
+        run_mutant(name, file, lambda s: replace_once(s, before, after),
+                   file, init, step, invariants, bound)
+    print("== 12 TIMELINE SPEC MUTATIONS REJECTED ==")
 
 
 if __name__ == "__main__":

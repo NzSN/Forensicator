@@ -60,16 +60,19 @@ private def isAbsent : MemoryRead → Bool
   | .absent => true
   | _ => false
 
-/-- One real ThreadList record whose context descriptor is varied independently
-    of its stack metadata. The backing includes 256 zero bytes at RVA 64. -/
-private def decodedThreadInput (contextSize contextRva : UInt32) : Option AnalysisInput := do
+/-- A real ThreadList descriptor with independently varied context validity.
+    Register values are zero; the flags state which Windows groups were supplied. -/
+private def decodedThreadInput (contextSize contextRva : UInt32)
+    (flags : UInt32 := 0x00100003) : Option AnalysisInput := do
   let fields : List (Nat × UInt32) :=
     [(0, 1), (4, 17), (28, 0x1000), (36, 0x100), (44, contextSize), (48, contextRva)]
   let record := ByteArray.mk (fields.foldl (init := Array.replicate 52 (0 : UInt8))
     fun bytes (offset, value) =>
       (List.range 4).foldl (init := bytes) fun acc i =>
         acc.set! (offset + i) (value >>> (8 * UInt32.ofNat i)).toUInt8)
-  let backing := ByteArray.mk (Array.replicate 320 0)
+  let backing := ByteArray.mk ((List.range 4).foldl
+    (fun bytes i => bytes.set! (64 + 0x30 + i) (flags >>> (8 * UInt32.ofNat i)).toUInt8)
+    (Array.replicate 320 0))
   let threads ← (Parse.Minidump.decodeThreadList record backing prov).toOption
   pure (AnalysisInput.ofDump { threads } (Spec.AddressSpace.new 64) "context-fixture")
 
@@ -81,6 +84,15 @@ private def lacksDecodedRegisters (input : Option AnalysisInput) : Bool :=
       && (match a.point.threads with
           | [t] => match t.registers with | .unavailable _ => true | _ => false
           | _ => false)
+
+private def exceptionWithFlags (flags : UInt32) : Option ExceptionInfo :=
+  let write (bytes : Array UInt8) (offset : Nat) (value : UInt32) :=
+    (List.range 4).foldl (fun acc i =>
+      acc.set! (offset + i) (value >>> (8 * UInt32.ofNat i)).toUInt8) bytes
+  let record := ByteArray.mk
+    (write (write (write (Array.replicate 168 0) 8 0xC0000005) 160 256) 164 64)
+  let backing := ByteArray.mk (write (Array.replicate 320 0) (64 + 0x30) flags)
+  (Parse.Minidump.decodeException record backing prov).toOption
 
 private def le32 (value : UInt32) : List UInt8 :=
   (List.range 4).map fun i => (value >>> (8 * UInt32.ofNat i)).toUInt8
@@ -206,6 +218,11 @@ def runAll : IO UInt32 := do
     (lacksDecodedRegisters (decodedThreadInput 128 64))
   check ctx "execution out of bounds parsed thread context stays unavailable after capture adaptation"
     (lacksDecodedRegisters (decodedThreadInput 256 512))
+  check ctx "execution missing or partial core context flags cannot authorize registers"
+    (lacksDecodedRegisters (decodedThreadInput 256 64 0)
+      && lacksDecodedRegisters (decodedThreadInput 256 64 0x00100001)
+      && lacksDecodedRegisters (decodedThreadInput 256 64 0x00100002)
+      && lacksDecodedRegisters (decodedThreadInput 256 64 0x00010003))
   check ctx "execution valid all zero parsed thread context remains known"
     (match decodedThreadInput 256 64 with
      | some a =>
@@ -216,6 +233,12 @@ def runAll : IO UInt32 := do
         | _ => false)
        && a.threads.length == 1 && a.stackRanges == [(17, 0x1000, 0x100)]
      | none => false)
+  check ctx "execution exception core context requires valid Windows groups"
+    ((exceptionWithFlags 0).map (·.context.isNone) == some true
+      && (exceptionWithFlags 0x00100001).map (·.context.isNone) == some true)
+  check ctx "execution valid zero exception registers remain available"
+    (((exceptionWithFlags 0x00100003).bind (·.context) |>.map (fun r => r.values.all (· == 0)))
+      == some true)
   let noStack : ThreadState := { knownZero with stackRange := .unknown }
   check ctx "execution register knowledge alone cannot fabricate a stack range"
     (noStack.observedThread.isNone)

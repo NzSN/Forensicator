@@ -28,6 +28,8 @@ check_model SnapshotRegression 8
 # loaded-trace regression reaches both fallback branches without setup steps.
 check_model JigSawSpawner 6
 check_model JigSawSpawnerRegression 4
+check_model ObservationScopes 6
+check_model StackRecovery 8
 
 apalache-mc typecheck --features=no-rows specs/SnapshotMBT.tla \
   >"$timeline_logs/SnapshotMBT-typecheck.log" 2>&1

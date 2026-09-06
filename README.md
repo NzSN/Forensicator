@@ -20,6 +20,7 @@ export PATH="$HOME/.elan/bin:$PATH"
 lake build                    # lib + `forensicator` / `forensicator-test` exes
 lake exe forensicator-test    # guard suite (decoder/model/analyzer units + fuzz)
 python3 scripts/test-execution-shell.py # deterministic proxy shell integration
+python3 scripts/test-stack-shell.py # capture stack/session integration
 ./scripts/check-timeline-specs.sh # bounded TLA+ contracts (Apalache required)
 ./scripts/conformance-lean.sh # golden gate (~8 min: 1.2 GB fulldump checks)
 ```

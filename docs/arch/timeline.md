@@ -27,6 +27,32 @@ survives parsing; missing/invalid contexts remain unavailable. A valid zero-valu
 context is still known. MemoryInfoList uses native Windows layout/constants and
 rejects invalid states instead of turning them into positive free-memory evidence.
 
+## Current host stack and identity increment
+
+The [completion task board](../../Drafts/2026-09-06-timeline-task-board.md) tracks
+active and queued subagent ownership. `Execution/Stack.lean` now provides pure,
+budgeted x64 recovery with dependencies, stop reasons and observation evidence.
+The shell's `stack` command retains partial capture results; `inspect --point`
+exposes them through the common execution view. Ordinary dump inspection keeps its
+capture format. Point inspection itself does not run recovery or acquire bytes.
+
+Retained results are scoped to the current attachment and checked against point,
+thread, effective selected-exception/thread registers, system/module information
+and observed reads. Reload drops this knowledge. The production path currently
+uses conservative frame-pointer recovery unless independently verified unwind
+artifacts are supplied; it does not invent a terminal witness. V8/JIT migration to
+this shared walk, native v2 contexts and broader/per-register recovery remain queued.
+
+`Model/Observation.lean` adds native 64+64 coordinates, identity and applicability
+primitives with tests/proofs; these do not yet replace the live legacy coordinate
+or path-based identity. `Util/Digest.lean` supplies streaming SHA-256 for future
+source/cache integrity, not a persistence format.
+
+The actual SDK's conservative policy is confidence-based, not an exactness
+certificate. Existing replay/cache oracle assumptions are now labelled explicitly.
+See the [native report](../../Drafts/2026-09-06-timeline-native-prerequisites.md)
+for verified ABI facts and remaining replay/fixture gates.
+
 ## Pure timeline queries
 
 `Model/Trace.lean` retains the trace logs and initial memory model:
@@ -91,7 +117,9 @@ for the current input and bound to the selected module base.
 shell --proxy <trace.run>       attach to the trace
 seek <position>               select an encoded position
 t+ / t- / position             navigate or display the cursor
-inspect [--json|--quiet]       inspect current point knowledge without fetching
+inspect [--json|--quiet]       inspect trace point knowledge without fetching
+inspect --point [--json]       inspect a capture through the execution view
+stack <thread-id> [--json]     recover/retain a bounded host stack
 read <address> <length>        acquire up to 65536 bytes for display
 events                        occurrences exactly at the current point
 events <from> <to>             recorded events in (from,to]
@@ -146,3 +174,9 @@ are assumed truthful; the cache model separately checks its engine/index mapping
 runner. `python3 scripts/test-execution-shell.py` exercises the real CLI and
 transport against a deterministic stdio proxy. The fixture golden/live gates
 remain separate; see the plan for their actual availability and results.
+
+The completion increment adds `Test/Digest.lean`, `Test/Observation.lean`,
+`Test/Stack.lean` and `Test/StackSession.lean`, plus
+`python3 scripts/test-stack-shell.py`. `ObservationScopes.tla` and
+`StackRecovery.tla` check the new pure eligibility and host-recovery contracts.
+The task board records their bounds, negative controls and integrated results.

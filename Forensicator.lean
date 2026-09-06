@@ -9,6 +9,9 @@ import Forensicator.Spec.AddressSpace
 import Forensicator.Model.Dump
 import Forensicator.Model.Execution
 import Forensicator.Model.Capture
+import Forensicator.Util.Digest
+import Forensicator.Model.Observation
+import Forensicator.Execution.Stack
 import Forensicator.Model.Trace
 import Forensicator.Spec.Timeline
 import Forensicator.Spec.JigSaw

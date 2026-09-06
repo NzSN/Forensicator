@@ -9,6 +9,7 @@
    never diffed against the Rust binary's `error: {e}` output. -/
 import Forensicator.Model.Trace
 import Forensicator.Model.Capture
+import Forensicator.Execution.Stack
 import Forensicator.Parse.Minidump
 import Forensicator.Pipeline
 import Forensicator.Util.Image
@@ -27,12 +28,86 @@ inductive Target where
   | dump (s1 : Dump × AddressSpace × DumpKind) (images : Nat)
   | trace (t : Model.Trace) (cursor : Position)
 
+/-- In-attachment retained recovery. Runtime source/epoch migration is R1b;
+    opening/reloading a source creates a Session with an empty recovery list. -/
+structure RetainedStack where
+  recovery : Execution.Stack.StackRecovery
+  modules : List Module
+  systemInfo : Option SystemInfo
+  options : Execution.Stack.StackOptions
+
 structure Session where
   path : String
   target : Target
   symbols : Option String
   /-- The live proxy when `target` is a lazy trace (plan §C5). -/
   proxy : Option Trace.ProxySession := none
+  stacks : List RetainedStack := []
+
+private def sameModule (a b : Module) : Bool :=
+  a.name == b.name && a.baseVa == b.baseVa && a.size == b.size
+    && a.checksum == b.checksum && a.codeviewGuid == b.codeviewGuid
+    && a.codeviewAge == b.codeviewAge && a.pdbName == b.pdbName
+    && decide (a.provenance = b.provenance)
+
+private def sameSystem (a b : Option SystemInfo) : Bool :=
+  match a, b with
+  | some a, some b => a.os == b.os && a.cpu == b.cpu && a.version == b.version
+      && decide (a.provenance = b.provenance)
+  | none, none => true
+  | _, _ => false
+
+/-- Reuse requires the exact input observations, not just the displayed TID.
+    Unknown current dependencies cannot validate a retained recovery. -/
+def RetainedStack.validFor (entry : RetainedStack) (input : AnalysisInput) : Bool := Id.run do
+  let ev := entry.recovery.evidence
+  if ev.pointId != input.point.id || input.context.pointId != input.point.id
+    || !sameSystem entry.systemInfo input.systemInfo
+    || entry.modules.length != input.modules.length
+    || !(entry.modules.zip input.modules).all (fun (a, b) => sameModule a b)
+    || !(input.systemInfo.map (fun s => s.cpu == .X64)).getD false then return false
+  let thread := input.point.threadAt ev.thread
+  match thread, Execution.Stack.effectiveRegisters input ev.thread with
+  | some thread, .ok regs =>
+    if thread.stackRange.toOption != ev.stackRange
+      || !decide (thread.provenance = ev.threadProvenance)
+      || !decide (ev.registers = some regs.registers)
+      || ev.registerOrigin != some regs.origin
+      || !decide (ev.registerProvenance = some regs.provenance) then return false
+    let memory := { input.point.memory with
+      space := { input.space with backing := none } }
+    return ev.reads.all fun read =>
+      match read.origin with
+      | .observedMemory =>
+        match memory.read read.range.va read.range.size.toNat with
+        | .known bytes => bytes == read.bytes
+        | _ => false
+      | .verifiedArtifact identity =>
+        entry.options.artifacts.any fun artifact =>
+          artifact.pointId == input.point.id && artifact.identityEvidence == identity
+            && input.modules.any (fun m => sameModule m artifact.module)
+            && ({ artifact.metadata with backing := none }.read
+                  read.range.va read.range.size.toNat == some read.bytes)
+  | _, _ => return false
+
+/-- Pure enrichment: inspection never invokes the walker or acquires memory. -/
+def Session.withStackKnowledge (s : Session) (input : AnalysisInput) : AnalysisInput :=
+  let threads := input.point.threads.map fun thread =>
+    match s.stacks.find? (fun entry => entry.recovery.evidence.thread == thread.key
+      && entry.validFor input) with
+    | some entry => { thread with frames := .known entry.recovery.stack }
+    | none => thread
+  { input with point := { input.point with threads } }
+
+def Session.retainStack (s : Session) (input : AnalysisInput)
+    (result : Execution.Stack.StackRecovery) (options : Execution.Stack.StackOptions) : Session :=
+  let old := s.stacks.filter fun entry =>
+    entry.recovery.evidence.pointId != result.evidence.pointId
+      || entry.recovery.evidence.thread != result.evidence.thread
+  let entry : RetainedStack :=
+    { recovery := result, modules := input.modules, systemInfo := input.systemInfo, options }
+  if result.stack.frames.isEmpty || !entry.validFor input then { s with stacks := old }
+  else { s with stacks := (entry :: old).take 32 }
 
 private def hexDigitsU (v : UInt64) : String :=
   String.ofList ((Nat.toDigits 16 v.toNat).map fun c => if c.isAlpha then c.toUpper else c)
@@ -115,12 +190,12 @@ def Session.prompt (s : Session) : String :=
     use `currentIO` so the result reflects current knowledge. -/
 def Session.current (s : Session) : Except String AnalysisInput :=
   match s.target with
-  | .dump (dump, space, _) _ => .ok (AnalysisInput.ofDump dump space s.path)
+  | .dump (dump, space, _) _ => .ok (s.withStackKnowledge (AnalysisInput.ofDump dump space s.path))
   | .trace t cursor =>
     if s.proxy.isSome then .error "lazy trace requires currentIO"
     else match t.analysisAt cursor s.path with
     | none => .error "cursor out of recorded range"
-    | some input => .ok input
+    | some input => .ok (s.withStackKnowledge input)
 
 /-- Obtain currently known execution state without discovering/fetching pages. -/
 def Session.currentIO (s : Session) : IO (Except String AnalysisInput) := do
@@ -131,7 +206,7 @@ def Session.currentIO (s : Session) : IO (Except String AnalysisInput) := do
         match ← ps.viewAt cursor with
         | some input => pure input
         | none => throw (IO.Error.userError "cursor out of recorded range"))) with
-    | .ok r => pure (.ok r)
+    | .ok r => pure (.ok (s.withStackKnowledge r))
     | .error e => pure (.error e)
   | _, _ => pure (s.current)
 
@@ -143,9 +218,24 @@ def Session.prepareAnalysis (s : Session) : IO (Except String AnalysisInput) := 
     if cursor > ps.frontier then return .error "cursor out of recorded range"
     ps.guarded (do
       match ← ps.prepareAnalysisAt cursor with
-      | some input => pure input
+      | some input => pure (s.withStackKnowledge input)
       | none => throw (IO.Error.userError "cursor out of recorded range"))
   | _, _ => pure s.current
+
+/-- Explicit host recovery over the currently available point. Native acquisition
+    of missing context/artifacts remains S1b; failures return their dependencies. -/
+def Session.recoverThreadStack (s : Session) (threadId : UInt32)
+    (options : Execution.Stack.StackOptions := {}) :
+    IO (Except String (Session × Execution.Stack.StackRecovery)) := do
+  match ← s.currentIO with
+  | .error e => pure (.error e)
+  | .ok input =>
+    match input.point.threads.filter (·.id == threadId) with
+    | [] => pure (.error "thread is not present in the current point")
+    | [thread] =>
+      let result := Execution.Stack.recoverStack input thread.key options
+      pure (.ok (s.retainStack input result options, result))
+    | _ => pure (.error "thread ID is ambiguous at the current point")
 
 /-- Explicit targeted acquisition. Validate user bounds before the transport
     guard so an invalid address cannot poison an otherwise usable session. -/
