@@ -270,6 +270,30 @@ def decodeMemory64 (data : ByteArray) (prov : Provenance) :
       .ok (go 0 baseRva []).reverse
 
 -- ── memory_info_list ────────────────────────────────────────────────
+/-- Native MINIDUMP_MEMORY_INFO constants, distinct from the internal enum
+    encoding used by MemState.ofUInt32. -/
+def nativeMemoryState : UInt32 → Option MemState
+  | 0x1000 => some .Commit
+  | 0x2000 => some .Reserve
+  | 0x10000 => some .Free
+  | _ => none
+
+def nativeMemoryType : UInt32 → Option MemType
+  | 0x20000 => some .Private
+  | 0x40000 => some .Mapped
+  | 0x1000000 => some .Image
+  | _ => none
+
+/-- Translate observed PAGE_* flags for AddressSpace consumers. MemoryInfoEntry
+    retains the original flags for rules that inspect native guard metadata. -/
+def nativeProtection (p : UInt32) : Protection :=
+  let base := p &&& 0xFF
+  (if ([0x02, 0x04, 0x08, 0x20, 0x40, 0x80] : List UInt32).contains base then Protection.READ else 0)
+    ||| (if ([0x04, 0x08, 0x40, 0x80] : List UInt32).contains base then Protection.WRITE else 0)
+    ||| (if ([0x10, 0x20, 0x40, 0x80] : List UInt32).contains base then Protection.EXECUTE else 0)
+    ||| (if p &&& 0x100 != 0 then Protection.GUARD else 0)
+    ||| (if p &&& 0x200 != 0 then Protection.NO_CACHE else 0)
+
 structure RawMemoryInfoEntry where
   vaStart : VA
   size : UInt64
@@ -279,12 +303,16 @@ structure RawMemoryInfoEntry where
 
 def decodeMemoryInfoList (data : ByteArray) (prov : Provenance) :
     Except Anomaly (List RawMemoryInfoEntry) :=
-  if data.size < 16 then .ok []
+  if data.size < 16 then .error (.ofProv prov "truncated MemoryInfoList header")
   else
     let sizeOfHeader := (u32le data 0).toNat
     let sizeOfEntry := (u32le data 4).toNat
     let count := (u64le data 8).toNat
-    if sizeOfEntry == 0 || count == 0 then .ok []
+    if sizeOfHeader < 16 || sizeOfHeader > data.size then
+      .error (.ofProv prov "invalid MemoryInfoList header size")
+    else if count == 0 then .ok []
+    else if sizeOfEntry < 48 then
+      .error (.ofProv prov "invalid MemoryInfoList entry size")
     else
       let expectedLen := sizeOfHeader + count * sizeOfEntry
       if data.size < expectedLen then
@@ -297,13 +325,17 @@ def decodeMemoryInfoList (data : ByteArray) (prov : Provenance) :
             if off + sizeOfEntry > data.size then acc
             else go (i + 1) ({
               vaStart := u64le data off
-              size := u64le data (off + 8)
-              memType := u32le data (off + 16)
-              protection := u32le data (off + 20)
-              state := u32le data (off + 28) } :: acc)
+              size := u64le data (off + 24)
+              memType := u32le data (off + 40)
+              protection := u32le data (off + 36)
+              state := u32le data (off + 32) } :: acc)
           else acc
         termination_by count - i
-        .ok (go 0 []).reverse
+        let entries := (go 0 []).reverse
+        if entries.any (fun mi => (nativeMemoryState mi.state).isNone
+            || mi.size == 0 || decide (mi.vaStart.toNat + mi.size.toNat > 2^64)) then
+          .error (.ofProv prov "invalid MemoryInfoList state or address range")
+        else .ok entries
 
 -- ── thread_list ─────────────────────────────────────────────────────
 def decodeThreadList (data dumpData : ByteArray) (prov : Provenance) :
@@ -319,13 +351,13 @@ def decodeThreadList (data dumpData : ByteArray) (prov : Provenance) :
       let off := 4 + i * 48
       let ctxSize := (u32le data (off + 40)).toNat
       let ctxRva := (u32le data (off + 44)).toNat
-      let registers :=
+      let registers : Option RegisterSet :=
         if ctxSize > 0 && ctxRva > 0 && ctxRva + ctxSize ≤ dumpData.size then
-          (RegisterSet.decodeContext (dumpData.extract ctxRva (ctxRva + ctxSize))).toOption.getD
-            RegisterSet.new
-        else RegisterSet.new
+          (RegisterSet.decodeContext (dumpData.extract ctxRva (ctxRva + ctxSize))).toOption
+        else none
       { id := u32le data off
-        registers := registers
+        registers := registers.getD RegisterSet.new
+        registersKnown := registers.isSome
         stackVa := u64le data (off + 24)
         stackSize := (u32le data (off + 32)).toUInt64
         tebVa := u64le data (off + 16)
@@ -526,12 +558,13 @@ def decodeV8heap (data : ByteArray) (prov : Provenance) :
 -- ── assembly (dump.rs from_bytes_inner) ─────────────────────────────
 
 def classifyRegion (state memType _protection : UInt32) : Option RegionClass :=
-  if state == 2 then none
-  else match memType with
-    | 2 => some .Image
-    | 1 => some .Mapped
-    | 0 => some .Private
-    | _ => some .Other
+  match nativeMemoryState state with
+  | none | some .Free => none
+  | _ => match nativeMemoryType memType with
+    | some .Image => some .Image
+    | some .Mapped => some .Mapped
+    | some .Private => some .Private
+    | none => some .Other
 
 /-- decode_optional: find stream, bounds-check, decode, collect anomaly. -/
 private def decodeOptional (data : ByteArray) (dir : StreamDirectory) (streamType : UInt32)
@@ -630,16 +663,16 @@ def fromBytes (data : ByteArray) : Except Fatal Dump := do
       { vaStart := mr.vaStart
         size := UInt64.ofNat mr.data.size
         data := mr.data
-        protection := (info.map (·.protection)).getD 0
-        state := ((info.map fun i => MemState.ofUInt32 i.state)).join |>.getD .Commit
-        memType := ((info.map fun i => MemType.ofUInt32 i.memType)).join |>.getD .Private
+        protection := (info.map (nativeProtection ∘ (·.protection))).getD 0
+        state := ((info.map fun i => nativeMemoryState i.state)).join |>.getD .Commit
+        memType := ((info.map fun i => nativeMemoryType i.memType)).join |>.getD .Private
         provenance := mr.provenance
         regionClass := ((info.map fun i => classifyRegion i.state i.memType i.protection)).join }
 
-    let memoryInfo := memInfoEntries.map fun mi =>
-      { vaStart := mi.vaStart, size := mi.size, protection := mi.protection
-        state := (MemState.ofUInt32 mi.state).getD .Free
-        memType := (MemType.ofUInt32 mi.memType).getD .Private : MemoryInfoEntry }
+    let memoryInfo := memInfoEntries.filterMap fun mi => do
+      let state ← nativeMemoryState mi.state
+      pure ({ vaStart := mi.vaStart, size := mi.size, protection := mi.protection
+              state, memType := (nativeMemoryType mi.memType).getD .Private } : MemoryInfoEntry)
 
     let exception ← decodeOptionalDump data dir ST_EXCEPTION decodeException
 

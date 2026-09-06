@@ -3,7 +3,8 @@ EXTENDS ReplayApi
 
 \* ── JigSawSpawner — the lazy trace proxy's client core ───────────────────
 \*
-\* Formal counterpart of docs/trace/2026-08-12-lazy-trace-proxy-design.md.
+\* Formal counterpart of docs/trace/2026-08-12-lazy-trace-proxy-design.md
+\* and docs/trace/2026-09-06-execution-timeline-design.md (execution views).
 \*
 \* 2026-08-18 refactor: the engine surface is now ReplayApi (the public
 \* TTD Replay API, pinned to the v0.9.5 NuGet header) instead of the
@@ -29,16 +30,21 @@ EXTENDS ReplayApi
 \*     old atomic FetchIndex's postcondition.
 \*   * The P3 fallback (pages with write records but never readable)
 \*     retries at the next known write's materialization position
-\*     e2 = min(nw+1, frontier) and caches the piece at the honest model
-\*     position e2−1 — mirroring Trace/Client.lean fetchPage.
-\*   * Every piece records its probe: cache_req (model position requested)
-\*     and cache_e (engine position probed). The one position-level
-\*     divergence — a write exactly AT the frontier never materializes in
-\*     any engine state — is explicit in CacheSound's guard.
+\*     only when nw < frontier, at e2 = nw+1, and caches at model nw.
+\*     A write at the frontier has no post-write state to retry. This
+\*     strict guard mirrors Trace/Jigsaw.lean fallbackPosition.
+\*   * Probe instrumentation distinguishes the original request, initial
+\*     engine probe, observed model position and final engine probe. A
+\*     successful future fallback returns ABSENT for the original point.
+\*     Public page knowledge suppresses writes exactly at the frontier;
+\*     they cannot be fetched as faithful post-write observations.
 \*
 \* Abstractions (all deliberate):
 \*   * One page = one Timeline memory cell (1..MaxAddr). Validity logic
 \*     lives in the position domain, not the address domain.
+\*   * Bounded integer positions assume the supported client domain. The
+\*     UInt64 maximum frontier is rejected before attachment in Lean,
+\*     since the half-open cache sentinel frontier+1 must be representable.
 \*   * One client cursor (Client = 1); one outstanding client op (D6): a
 \*     scan and a fetch never overlap. The cursor's seek is folded into
 \*     the atomic fetch — READ_AT carries its position on the wire.
@@ -52,10 +58,13 @@ EXTENDS ReplayApi
 \* contents (kernel zero-fill) without any write-log entry. The client
 \* cannot see recommits from the index; the engineered mitigation is
 \* proxy-side (an N-mask/NewData watchpoint pass clips intervals). Here
-\* CacheSound is guarded by CmAt and the residual risk is stated as the
-\* NoRecommitWithin assumption (not checked).
+\* byte equality below is against ReplayApi's write-log ValueAt oracle,
+\* which does not model kernel zero-fill. It proves neither complete
+\* mapping knowledge nor lifecycle coverage. NoRecommitWithin remains
+\* an external assumption (not checked or silently conjoined).
 
 PieceStates == {"EMPTY", "PRESENT", "ABSENT"}
+KnowledgeStates == {"UNKNOWN", "KNOWN", "ABSENT"}
 
 \* The client's one API cursor (ICursorView; D6 serialization).
 Client == 1
@@ -79,9 +88,15 @@ VARIABLES
     cache_hi,       \* (uniform: ABSENT is the point interval [t, t])
     \* ── per-piece probe provenance ──
     \* @type: Int -> Int;
-    cache_req,      \* model position the piece was fetched for
+    cache_req,      \* ORIGINAL requested model position
     \* @type: Int -> Int;
-    cache_e,        \* engine position actually probed (p+1-clamped)
+    cache_obs,      \* model position used to establish the stored piece
+    \* @type: Int -> Int;
+    cache_first_e,  \* initial engine probe for the original request
+    \* @type: Int -> Int;
+    cache_e,        \* final engine probe (may be a future fallback)
+    \* @type: Int -> Str;
+    cache_reply,    \* original request result; fallback success returns ABSENT
     \* ── index-acquisition scan state ──
     \* @type: Bool;
     scan_on,        \* a watchpoint scan is walking the trace
@@ -89,7 +104,7 @@ VARIABLES
     scan_page       \* the page being indexed
 
 jvars == <<idx_known, idx_F, cache_state, cache_val, cache_lo, cache_hi,
-           cache_req, cache_e, scan_on, scan_page>>
+           cache_req, cache_obs, cache_first_e, cache_e, cache_reply, scan_on, scan_page>>
 
 allJVars == <<allVars, jvars>>
 
@@ -126,32 +141,49 @@ FetchPos(t) == IF t + 1 <= frontier THEN t + 1 ELSE frontier
 
 \* ---- Host-side position knowledge (views; D9) ----
 
-\* The host can serve the byte at (p, t) locally: a PRESENT piece whose
-\* validity interval covers t. (Meaningful where committed — CacheSound.)
+\* Raw bounded cache predicates. A piece alone is not a public answer:
+\* pageKnowledge additionally checks position bounds, index knowledge and
+\* the unobservable frontier write (Trace/Client.lean).
 \* @type: (Int, Int) => Bool;
-KnownAt(p, t) ==
+CachedPresentAt(p, t) ==
     /\ cache_state[p] = "PRESENT"
-    /\ cache_lo[p] <= t /\ t <= cache_hi[p] - 1
+    /\ cache_lo[p] <= t /\ t < cache_hi[p]
 
-\* The host knows (p, t) is unreadable: an ABSENT point covers t.
 \* @type: (Int, Int) => Bool;
-KnownAbsentAt(p, t) ==
+CachedAbsentAt(p, t) ==
     /\ cache_state[p] = "ABSENT"
-    /\ cache_lo[p] <= t /\ t <= cache_hi[p] - 1
+    /\ cache_lo[p] <= t /\ t < cache_hi[p]
 
-\* The host lacks page p's index at t (the D2 dependency rule fires first:
-\* scan the page before fetching it).
 \* @type: (Int, Int) => Bool;
-NeedsIndex(p, t) ==
-    \/ ~idx_known[p]
-    \/ t > idx_F[p]
+NeedsIndex(p, t) == ~idx_known[p] \/ t > idx_F[p]
 
-\* A hole in the jigsaw: the host can say nothing about (p, t) — this is
-\* what the next FetchPage closes.
 \* @type: (Int, Int) => Bool;
-GapAt(p, t) ==
-    /\ ~KnownAt(p, t)
-    /\ ~KnownAbsentAt(p, t)
+UnobservableFrontierWrite(p, t) ==
+    /\ t = frontier
+    /\ \E i \in 1..MaxPos :
+         i <= Len(wr_pos) /\ wr_addr[i] = p /\ wr_pos[i] = frontier
+
+\* @type: (Int, Int) => Bool;
+KnowledgeDomain(p, t) ==
+    /\ 0 <= t /\ t <= frontier
+    /\ ~NeedsIndex(p, t)
+    /\ ~UnobservableFrontierWrite(p, t)
+
+\* @type: (Int, Int) => Bool;
+KnownAt(p, t) == KnowledgeDomain(p, t) /\ CachedPresentAt(p, t)
+
+\* @type: (Int, Int) => Bool;
+KnownAbsentAt(p, t) == KnowledgeDomain(p, t) /\ CachedAbsentAt(p, t)
+
+\* @type: (Int, Int) => Str;
+PageKnowledge(p, t) ==
+    IF KnownAt(p, t) THEN "KNOWN"
+    ELSE IF KnownAbsentAt(p, t) THEN "ABSENT" ELSE "UNKNOWN"
+
+\* A gap may need an index scan before a read. An unobservable frontier
+\* write stays UNKNOWN: a read cannot make its post-write value available.
+\* @type: (Int, Int) => Bool;
+GapAt(p, t) == PageKnowledge(p, t) = "UNKNOWN"
 
 \* ---- Environment: recording & commit changes (ReplayApi's; client state
 \*      untouched). RecordOrNav carries PIN 1: writes only on committed
@@ -203,7 +235,7 @@ ScanStart(p) ==
     /\ scan_on' = TRUE
     /\ scan_page' = p
     /\ UNCHANGED <<idx_known, idx_F, cache_state, cache_val, cache_lo, cache_hi,
-                   cache_req, cache_e>>
+                   cache_req, cache_obs, cache_first_e, cache_e, cache_reply>>
 
 \* A genuine masked hit before the frontier (WatchStopsFirst: a watched
 \* write AT the stop position, none strictly between) — the walk
@@ -225,7 +257,7 @@ ScanFinish ==
     /\ idx_known' = [idx_known EXCEPT ![scan_page] = TRUE]
     /\ idx_F'     = [idx_F     EXCEPT ![scan_page] = frontier]
     /\ scan_on' = FALSE
-    /\ UNCHANGED <<cache_state, cache_val, cache_lo, cache_hi, cache_req, cache_e,
+    /\ UNCHANGED <<cache_state, cache_val, cache_lo, cache_hi, cache_req, cache_obs, cache_first_e, cache_e, cache_reply,
                    scan_page>>
 
 \* Degenerate completion: positioned at the frontier already (empty trace
@@ -238,17 +270,17 @@ ScanFinishEmpty ==
     /\ idx_F'     = [idx_F     EXCEPT ![scan_page] = frontier]
     /\ scan_on' = FALSE
     /\ UNCHANGED <<vars, rvars,
-                   cache_state, cache_val, cache_lo, cache_hi, cache_req, cache_e,
+                   cache_state, cache_val, cache_lo, cache_hi, cache_req, cache_obs, cache_first_e, cache_e, cache_reply,
                    scan_page>>
 
 \* ---- Page fetch: READ_AT = SetPos(e) ∘ GloballyConservative query ----
 
 \* Fetch one page for model query position t (D2/D3 + Implementation
 \* notes). Dependency rule: the page's index first, and t within the
-\* horizon. The probe is a GloballyConservative query at the p+1-clamped
+\* full static frontier. The probe is a GloballyConservative query at the p+1-clamped
 \* engine position e (the QueryExact contract): succeeds iff the page is
 \* committed there, the value is the engine truth at e. On failure, the P3
-\* fallback probes the next known write's materialization position e2 and
+\* fallback probes a next known write strictly below the frontier at e2 and
 \* caches at the honest model position e2−1; otherwise the piece is ABSENT
 \* at the point [t, t]. (Trace/Client.lean fetchPage.)
 FetchPage(p, t) ==
@@ -256,11 +288,12 @@ FetchPage(p, t) ==
     /\ t \in 0..MaxPos
     /\ ~scan_on                    \* one outstanding client op (D6)
     /\ idx_known[p]
-    /\ t <= idx_F[p]               \* queries beyond the horizon are refused
+    /\ idx_F[p] = frontier         \* ensurePages fetches the full static horizon
     /\ t <= frontier
+    /\ ~UnobservableFrontierWrite(p, t) \* return UNKNOWN without cache mutation
     /\ LET e  == FetchPos(t)
            nw == NextKnownWrite(p, t)
-           e2 == IF nw <= frontier THEN FetchPos(nw) ELSE 0
+           e2 == IF nw < frontier THEN FetchPos(nw) ELSE 0
        IN
        IF CmAt(p, e)
        THEN \* PRESENT: value is engine truth at e; validity from the index
@@ -269,7 +302,10 @@ FetchPage(p, t) ==
             /\ cache_lo'    = [cache_lo    EXCEPT ![p] = LastKnownWrite(p, t)]
             /\ cache_hi'    = [cache_hi    EXCEPT ![p] = NextKnownWrite(p, t)]
             /\ cache_req'   = [cache_req   EXCEPT ![p] = t]
+            /\ cache_obs'   = [cache_obs   EXCEPT ![p] = t]
+            /\ cache_first_e' = [cache_first_e EXCEPT ![p] = e]
             /\ cache_e'     = [cache_e     EXCEPT ![p] = e]
+            /\ cache_reply' = [cache_reply EXCEPT ![p] = "KNOWN"]
        ELSE IF LastKnownWrite(p, t) # 0 /\ e2 # 0
             THEN \* P3 fallback: probe at the next write's materialization
                  IF CmAt(p, e2)
@@ -278,21 +314,30 @@ FetchPage(p, t) ==
                       \* cached at the fallback's honest model position e2−1
                       /\ cache_lo'    = [cache_lo  EXCEPT ![p] = LastKnownWrite(p, e2 - 1)]
                       /\ cache_hi'    = [cache_hi  EXCEPT ![p] = NextKnownWrite(p, e2 - 1)]
-                      /\ cache_req'   = [cache_req EXCEPT ![p] = e2 - 1]
+                      /\ cache_req'   = [cache_req EXCEPT ![p] = t]
+                      /\ cache_obs'   = [cache_obs EXCEPT ![p] = e2 - 1]
+                      /\ cache_first_e' = [cache_first_e EXCEPT ![p] = e]
                       /\ cache_e'     = [cache_e   EXCEPT ![p] = e2]
+                      /\ cache_reply' = [cache_reply EXCEPT ![p] = "ABSENT"]
                  ELSE \* ABSENT point at t (both probes failed)
                       /\ cache_state' = [cache_state EXCEPT ![p] = "ABSENT"]
                       /\ cache_lo'    = [cache_lo    EXCEPT ![p] = t]
                       /\ cache_hi'    = [cache_hi    EXCEPT ![p] = t + 1]
                       /\ cache_req'   = [cache_req   EXCEPT ![p] = t]
+                      /\ cache_obs'   = [cache_obs   EXCEPT ![p] = t]
+                      /\ cache_first_e' = [cache_first_e EXCEPT ![p] = e]
                       /\ cache_e'     = [cache_e     EXCEPT ![p] = e]
+                      /\ cache_reply' = [cache_reply EXCEPT ![p] = "ABSENT"]
                       /\ UNCHANGED cache_val
             ELSE \* ABSENT point at t (no fallback applicable)
                  /\ cache_state' = [cache_state EXCEPT ![p] = "ABSENT"]
                  /\ cache_lo'    = [cache_lo    EXCEPT ![p] = t]
                  /\ cache_hi'    = [cache_hi    EXCEPT ![p] = t + 1]
                  /\ cache_req'   = [cache_req   EXCEPT ![p] = t]
+                 /\ cache_obs'   = [cache_obs   EXCEPT ![p] = t]
+                 /\ cache_first_e' = [cache_first_e EXCEPT ![p] = e]
                  /\ cache_e'     = [cache_e     EXCEPT ![p] = e]
+                 /\ cache_reply' = [cache_reply EXCEPT ![p] = "ABSENT"]
                  /\ UNCHANGED cache_val
     /\ UNCHANGED <<vars, rvars, idx_known, idx_F, scan_on, scan_page>>
 
@@ -302,7 +347,7 @@ Evict(p) ==
     /\ cache_state[p] # "EMPTY"
     /\ cache_state' = [cache_state EXCEPT ![p] = "EMPTY"]
     /\ UNCHANGED <<vars, rvars, idx_known, idx_F, cache_val, cache_lo,
-                   cache_hi, cache_req, cache_e, scan_on, scan_page>>
+                   cache_hi, cache_req, cache_obs, cache_first_e, cache_e, cache_reply, scan_on, scan_page>>
 
 \* ---- Invariants ----
 
@@ -312,6 +357,9 @@ JigSawTypes ==
          /\ 0 <= cache_lo[p] /\ cache_lo[p] <= MaxPos
          /\ 1 <= cache_hi[p] /\ cache_hi[p] <= MaxPos + 1
          /\ 0 <= cache_req[p] /\ cache_req[p] <= MaxPos
+         /\ 0 <= cache_obs[p] /\ cache_obs[p] <= MaxPos
+         /\ 0 <= cache_first_e[p] /\ cache_first_e[p] <= MaxPos
+         /\ cache_reply[p] \in KnowledgeStates
          /\ 0 <= cache_e[p] /\ cache_e[p] <= MaxPos
          /\ 0 <= idx_F[p] /\ idx_F[p] <= frontier
          /\ cache_state[p] # "EMPTY" => idx_known[p]
@@ -320,24 +368,58 @@ JigSawTypes ==
     \* commit-log shape and cursor typing now live in ReplayApi's
     \* ReplayTypes (checked alongside — see JigSawSpawner.cfg).
 
-\* The money property (D2/D5), now against the API probe semantics: a
-\* cached PRESENT piece agrees with ValueAt at every committed model
-\* position inside its validity interval — EXCEPT the one documented
-\* position-level divergence: a write exactly AT the frontier never
-\* materializes in any engine state, so a piece fetched at the clamped
-\* head (recognizable by cache_req = cache_e with a write recorded at
-\* cache_req) can lag that one write (design Implementation notes
-\* 2026-08-12: the eager model applies it, the proxy cannot).
+\* Public known values agree with Timeline's write-log value at every
+\* queried position, with no exemption for stale clamped bytes. Frontier
+\* writes are UNKNOWN in PageKnowledge and FetchPage never stores them.
+\* This is byte equality within ReplayApi's oracle, not a verification of
+\* lifecycle/zero-fill behavior; see the external NoRecommitWithin gap.
 CacheSound ==
     \A p \in 1..MaxAddr :
       \A t \in 0..MaxPos :
-        (cache_state[p] = "PRESENT" /\ cache_lo[p] <= t /\ t <= cache_hi[p] - 1
-         /\ CmAt(p, t)
-         /\ ~(cache_req[p] = cache_e[p]
-              /\ \E i \in 1..MaxPos :
-                   i <= Len(wr_pos) /\ wr_pos[i] = cache_req[p]
-                     /\ wr_addr[i] = p)) =>
-          cache_val[p] = ValueAt(p, t)
+        KnownAt(p, t) => cache_val[p] = ValueAt(p, t)
+
+KnowledgeSound ==
+    \A p \in 1..MaxAddr :
+      \A t \in 0..MaxPos + 1 :
+        /\ PageKnowledge(p, t) \in KnowledgeStates
+        /\ (NeedsIndex(p, t) \/ t > frontier \/ UnobservableFrontierWrite(p, t))
+             => PageKnowledge(p, t) = "UNKNOWN"
+        /\ ~(KnownAt(p, t) /\ KnownAbsentAt(p, t))
+
+\* The probe fields are specification instrumentation, not new protocol
+\* fields or an unbounded client-side knowledge ledger.
+ProbeSound ==
+    \A p \in 1..MaxAddr :
+      cache_state[p] # "EMPTY" =>
+        /\ cache_req[p] <= cache_obs[p]
+        /\ cache_obs[p] <= idx_F[p]
+        /\ cache_req[p] <= cache_first_e[p]
+        /\ cache_first_e[p] <= cache_req[p] + 1
+        /\ cache_first_e[p] <= cache_e[p]
+        /\ cache_obs[p] <= cache_e[p]
+        /\ cache_e[p] <= cache_obs[p] + 1
+        /\ cache_e[p] <= frontier
+        /\ (cache_state[p] = "PRESENT" =>
+              /\ CmAt(p, cache_e[p])
+              /\ cache_val[p] = EngineValueAt(p, cache_e[p]))
+        /\ (cache_reply[p] = "ABSENT" => ~CmAt(p, cache_first_e[p]))
+        /\ (cache_reply[p] = "KNOWN" =>
+              /\ cache_req[p] = cache_obs[p]
+              /\ cache_state[p] = "PRESENT")
+
+\* A P3 piece is useful only from the later write onward. In particular,
+\* neither a clamped frontier retry nor a wide inferred interval may make
+\* the original NOT_COMMITTED point appear PRESENT. The per-request
+\* result retains ABSENT even though the bounded cache retains future bytes.
+FallbackIsolation ==
+    \A p \in 1..MaxAddr :
+      (cache_state[p] = "PRESENT" /\ cache_req[p] < cache_obs[p]) =>
+        /\ cache_reply[p] = "ABSENT"
+        /\ cache_first_e[p] = cache_req[p] + 1
+        /\ cache_e[p] = cache_obs[p] + 1
+        /\ cache_req[p] < cache_lo[p]
+        /\ ~CachedPresentAt(p, cache_req[p])
+        /\ PageKnowledge(p, cache_req[p]) = "UNKNOWN"
 
 \* Absent is a fact, not an error (D3): an ABSENT piece witnesses that the
 \* probed engine position was uncommitted. cache_e records WHICH position
@@ -377,6 +459,9 @@ JigSawInvariant ==
     /\ CacheSound
     /\ AbsentSound
     /\ HorizonBounded
+    /\ KnowledgeSound
+    /\ ProbeSound
+    /\ FallbackIsolation
 
 \* ---- Specification ----
 
@@ -389,6 +474,9 @@ JInit ==
     /\ cache_lo    = [p \in 1..MaxAddr |-> 0]
     /\ cache_hi    = [p \in 1..MaxAddr |-> 1]
     /\ cache_req   = [p \in 1..MaxAddr |-> 0]
+    /\ cache_obs   = [p \in 1..MaxAddr |-> 0]
+    /\ cache_first_e = [p \in 1..MaxAddr |-> 0]
+    /\ cache_reply = [p \in 1..MaxAddr |-> "UNKNOWN"]
     /\ cache_e     = [p \in 1..MaxAddr |-> 0]
     /\ scan_on = FALSE
     /\ scan_page = 1

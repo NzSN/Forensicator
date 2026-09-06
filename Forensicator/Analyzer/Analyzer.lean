@@ -5,7 +5,7 @@
    is bounds-guarded), so the panic-isolation branch is unreachable. -/
 import Forensicator.Model.Structs
 import Forensicator.Spec.AddressSpace
-import Forensicator.Model.Dump
+import Forensicator.Model.Execution
 import Forensicator.Util.Json
 import Forensicator.Util.Pdb
 
@@ -38,12 +38,15 @@ def AnalyzerOutput.count (o : AnalyzerOutput) : Nat :=
     loading lives in Main/Session. -/
 structure SymbolsCtx where
   publics : Option Util.Publics := none
+  /-- Base of the active module whose identity was verified by the loader.
+      Unbound tables are retained for explicit synthetic callers. -/
+  moduleBase : Option VA := none
   deriving Inhabited
 
 structure Analyzer where
   name : String
   description : String := "no description"
-  run : SymbolsCtx → Dump → AddressSpace → AnalyzerOutput
+  run : SymbolsCtx → AnalysisInput → AnalyzerOutput
 
 structure StructureCatalog where
   outputs : List AnalyzerOutput
@@ -65,11 +68,11 @@ def allShapeClusters (c : StructureCatalog) : List ShapeGroup :=
   c.outputs.flatMap (·.shapeClusters)
 end StructureCatalog
 
-def runPipeline (ctx : SymbolsCtx) (analyzers : List Analyzer) (dump : Dump)
-    (space : AddressSpace) (filter : List String) : StructureCatalog :=
+def runPipeline (ctx : SymbolsCtx) (analyzers : List Analyzer) (input : AnalysisInput)
+    (filter : List String) : StructureCatalog :=
   let selected :=
     if filter.isEmpty then analyzers
     else analyzers.filter fun a => filter.contains a.name
-  ⟨selected.map fun a => a.run ctx dump space⟩
+  ⟨selected.map fun a => a.run ctx input⟩
 
 end Forensicator

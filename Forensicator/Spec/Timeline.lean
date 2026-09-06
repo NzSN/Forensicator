@@ -1,6 +1,6 @@
-/- Forensicator.Spec.Timeline — mechanization of specs/Timeline.tla +
-   Snapshot.tla: ordering invariants as predicates, the spec-level forward
-   fold of writes, and the theorems linking the executable views to it. -/
+/- Timeline and execution-state contracts: log ordering, byte-fold agreement,
+   bounded source-scoped points, and exact/interval event query laws.
+   The historical Snapshot.tla Dump projection is no longer a shipping view. -/
 import Forensicator.Model.Trace
 
 namespace Forensicator.Spec
@@ -131,8 +131,8 @@ def OpenIntervalsAtFrontier (tr : Trace) : Prop :=
   ∀ id iv, (id, iv) ∈ tr.threads → iv.stop = none →
     ∀ t, iv.start ≤ t → t ≤ tr.frontier → Interval.contains iv t
 
-/-- Spec-level memory view (Snapshot.tla's ModelAt memory conjunct): fold the
-    writes forward over the initial byte; each covering write overwrites. -/
+/-- Spec-level memory view: fold writes forward over the initial byte;
+    each covering write overwrites, and unavailable payload makes it unknown. -/
 def byteFold (va : VA) (init : Option UInt8) (ws : List WriteRecord) : Option UInt8 :=
   ws.foldl (fun acc w => if w.covers va then w.byteAt va else acc) init
 
@@ -152,7 +152,7 @@ theorem lastCoveringWrite_cons (w : WriteRecord) (ws : List WriteRecord) (va : V
 
 /-- Forward fold over `ws` equals the last covering write's byte (else the
     initial value) — the "reverse scan == forward fold" lemma. Holds for any
-    order; last-wins is order-independent. -/
+    list order; the two traversal algorithms agree on the same last writer. -/
 theorem byteFold_eq_lastCovering (va : VA) (init : Option UInt8) (ws : List WriteRecord) :
     byteFold va init ws =
       match lastCoveringWrite ws va with
@@ -169,8 +169,8 @@ theorem byteFold_eq_lastCovering (va : VA) (init : Option UInt8) (ws : List Writ
       by_cases hw : w.covers va <;> simp [hw]
     | some w' => rfl
 
-/-- `Trace.valueAt` agrees with the spec forward fold (Timeline.tla ValueAt
-    ≡ Snapshot.tla memory fold), within a covered init region. -/
+/-- `Trace.valueAt` agrees with the spec forward fold (Timeline.tla ValueAt),
+    within a covered initial region. This is not a completeness assertion. -/
 theorem valueAt_agrees_with_fold (tr : Trace) (va : VA) (t : Position) (region : MemoryRegionInfo)
     (hreg : tr.initMem.find? (fun r => decide (r.covers va)) = some region) :
     tr.valueAt va t =
@@ -182,15 +182,111 @@ theorem valueAt_agrees_with_fold (tr : Trace) (va : VA) (t : Position) (region :
   rw [byteFold_eq_lastCovering]
   rfl
 
-/-- Timeline.tla CursorBounded / Snapshot.tla SnapshotsAreModels (existence
-    half): every position at or below the frontier materializes. -/
-theorem snapshot_isSome (tr : Trace) (t : Position) (ht : t ≤ tr.frontier) :
-    (tr.snapshot t).isSome := by
-  have ht' : t.toNat ≤ tr.frontier.toNat := ht
-  have hnot : ¬ tr.frontier < t := by
-    intro hc
-    have : tr.frontier.toNat < t.toNat := hc
-    omega
-  simp [Trace.snapshot, hnot]
+/-- Every position within the recorded domain has an execution view. This
+    proves existence only, not complete byte, mapping or stack knowledge. -/
+theorem pointAt_isSome (tr : Trace) (t : Position) (source : String)
+    (ht : t ≤ tr.frontier) : (tr.pointAt t source).isSome := by
+  have hnot : ¬ tr.frontier < t := UInt64.not_lt.mpr ht
+  simp [Trace.pointAt, hnot]
+
+theorem pointAt_isNone_of_past_frontier (tr : Trace) (t : Position) (source : String)
+    (ht : tr.frontier < t) : tr.pointAt t source = none := by
+  simp [Trace.pointAt, ht]
+
+/-- A successful point retains its source and exact trace coordinate. -/
+theorem pointAt_identity (tr : Trace) (t : Position) (source : String) (point : ExecutionPoint)
+    (hp : tr.pointAt t source = some point) :
+    point.id = { source, position := .trace t } := by
+  unfold Trace.pointAt at hp
+  split at hp
+  · contradiction
+  · cases Option.some.inj hp
+    rfl
+
+/-- Event membership means exact position equality, never accumulated history. -/
+theorem eventsAt_mem (tr : Trace) (t : Position) (e : TraceEvent) :
+    e ∈ tr.eventsAt t ↔ e ∈ tr.events ∧ e.pos = t := by
+  simp [Trace.eventsAt]
+
+/-- The payload list at a point is exactly the projection of events at its
+    coordinate. Exception history is not copied into later points. -/
+theorem pointAt_events (tr : Trace) (t : Position) (source : String) (point : ExecutionPoint)
+    (hp : tr.pointAt t source = some point) :
+    point.events = (tr.eventsAt t).map (·.toExecutionEvent) := by
+  unfold Trace.pointAt at hp
+  split at hp
+  · contradiction
+  · cases Option.some.inj hp
+    rfl
+
+theorem validateBounds_ok (tr : Trace) (a b : Position)
+    (hab : a ≤ b) (hbf : b ≤ tr.frontier) : tr.validateBounds a b = .ok () := by
+  have hba : ¬ b < a := UInt64.not_lt.mpr hab
+  have hfb : ¬ tr.frontier < b := UInt64.not_lt.mpr hbf
+  simp [Trace.validateBounds, hba, hfb]
+
+/-- A valid range query preserves recorded order through a filter. -/
+theorem eventsBetween_eq_filter (tr : Trace) (a b : Position)
+    (hab : a ≤ b) (hbf : b ≤ tr.frontier) :
+    tr.eventsBetween a b = .ok (tr.events.filter fun e => decide (a < e.pos ∧ e.pos ≤ b)) := by
+  simp [Trace.eventsBetween, validateBounds_ok tr a b hab hbf]
+
+/-- The left endpoint is exclusive and the right endpoint inclusive. -/
+theorem eventsBetween_mem (tr : Trace) (a b : Position) (events : List TraceEvent)
+    (hq : tr.eventsBetween a b = .ok events) (e : TraceEvent) :
+    e ∈ events ↔ e ∈ tr.events ∧ a < e.pos ∧ e.pos ≤ b := by
+  unfold Trace.eventsBetween at hq
+  cases hv : tr.validateBounds a b with
+  | error err => simp [hv] at hq
+  | ok u =>
+    cases u
+    simp [hv] at hq
+    subst events
+    simp
+
+/-- Equal endpoints are a valid empty history. -/
+theorem eventsBetween_same (tr : Trace) (t : Position) (ht : t ≤ tr.frontier) :
+    tr.eventsBetween t t = .ok [] := by
+  rw [eventsBetween_eq_filter tr t t UInt64.le_rfl ht]
+  congr 1
+  apply List.filter_eq_nil_iff.mpr
+  intro e _
+  simp only [decide_eq_true_eq, UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le]
+  omega
+
+/-- Splitting an interval partitions membership, including events that share
+    its split coordinate. They belong exclusively to the earlier interval. -/
+theorem eventsBetween_partition (tr : Trace) (a b c : Position)
+    (whole left right : List TraceEvent)
+    (hab : a ≤ b) (hbc : b ≤ c)
+    (hw : tr.eventsBetween a c = .ok whole)
+    (hl : tr.eventsBetween a b = .ok left)
+    (hr : tr.eventsBetween b c = .ok right) (e : TraceEvent) :
+    e ∈ whole ↔ e ∈ left ∨ e ∈ right := by
+  rw [eventsBetween_mem tr a c whole hw e, eventsBetween_mem tr a b left hl e,
+      eventsBetween_mem tr b c right hr e]
+  constructor
+  · intro ⟨he, ha, hc⟩
+    by_cases hb : e.pos ≤ b
+    · exact Or.inl ⟨he, ha, hb⟩
+    · exact Or.inr ⟨he, UInt64.not_le.mp hb, hc⟩
+  · intro he
+    rcases he with ⟨he, ha, hb⟩ | ⟨he, hb, hc⟩
+    · exact ⟨he, ha, UInt64.le_trans hb hbc⟩
+    · have hae : a < e.pos := by
+        change a.toNat < e.pos.toNat
+        change a.toNat ≤ b.toNat at hab
+        change b.toNat < e.pos.toNat at hb
+        omega
+      exact ⟨he, hae, hc⟩
+
+theorem eventsBetween_partition_disjoint (tr : Trace) (a b c : Position)
+    (left right : List TraceEvent)
+    (hl : tr.eventsBetween a b = .ok left)
+    (hr : tr.eventsBetween b c = .ok right) (e : TraceEvent) :
+    ¬ (e ∈ left ∧ e ∈ right) := by
+  rw [eventsBetween_mem tr a b left hl e, eventsBetween_mem tr b c right hr e]
+  intro ⟨⟨_, _, hle⟩, ⟨_, hlt, _⟩⟩
+  exact (UInt64.not_lt.mpr hle) hlt
 
 end Forensicator.Spec

@@ -452,13 +452,14 @@ private def refineType (frameType : V8FrameType) (hasJsFunction : Bool) (returnA
 
 /-- Static walker context. -/
 private structure WalkCtx where
-  dump : Dump
+  input : AnalysisInput
   space : AddressSpace
   isolateVa : Option VA
   layout : V8Layout
   moduleRanges : List (VA × UInt64)
   cage : Option VA
   publics : Option Util.Publics
+  moduleBase : Option VA
   thread : Thread
   stackVa : VA
   stackEnd : VA
@@ -502,7 +503,9 @@ private def walkGo (ctx : WalkCtx) (st : WalkState) (acc : List V8StackFrame)
           | some pubs =>
             match (ctx.moduleRanges.find? fun (b, s) =>
               decide (rip ≥ b && rip.toNat < b.toNat + s.toNat)) with
-            | some (base, _) => (Util.Publics.symbol pubs base rip).getD (hexUpper rip)
+            | some (base, _) =>
+              if ctx.moduleBase.isSome && ctx.moduleBase != some base then hexUpper rip
+              else (Util.Publics.symbol pubs base rip).getD (hexUpper rip)
             | none => hexUpper rip
         let frame : V8StackFrame :=
           { threadId := ctx.thread.id, depth := st.depth, frameType := frameType
@@ -543,7 +546,7 @@ where
 private def walkThread (ctx : WalkCtx) (init : UnwindTables) :
     List V8StackFrame × UnwindTables :=
   let regs0 :=
-    match ctx.dump.exception with
+    match ctx.input.exception with
     | some exc =>
       if exc.threadId == ctx.thread.id then (exc.context.getD ctx.thread.registers)
       else ctx.thread.registers
@@ -551,31 +554,44 @@ private def walkThread (ctx : WalkCtx) (init : UnwindTables) :
   walkGo ctx { regs := regs0, depth := 0, seen := Std.HashSet.emptyWithCapacity
                viaLeaf := false, eptBase := none, tables := init } [] 256
 
+/-- An exact, selected exception context can supply missing thread registers.
+    A known stack range is still required for bounded stack walking. -/
+private def stackThread (input : AnalysisInput) (t : ThreadState) : Option Thread :=
+  let registers := match input.exception with
+    | some exc =>
+      if exc.threadId == t.id then
+        match exc.context with
+        | some regs => Knowledge.known regs
+        | none => t.registers
+      else t.registers
+    | none => t.registers
+  { t with registers }.observedThread
+
 /-- Walk all threads' stacks (v8.rs walk_thread_stacks). Overflow candidates
     in the EPT scan are skipped, never raised (upstream fix bd46529, v8.rs:539
     checked_add), so no exception channel survives. -/
-def walkThreadStacks (publics : Option Util.Publics) (dump : Dump)
-    (space : AddressSpace) : List V8StackFrame :=
-  let layout := V8Layout.detect dump
-  let isolateVa := Cause.annotationHex dump "v8_isolate_address"
-  let cage := Cause.annotationHex dump "v8_ro_space_firstpage_address"
-  let moduleRanges := dump.modules.map fun m => (m.baseVa, m.size)
+def walkThreadStacks (publics : Option Util.Publics) (input : AnalysisInput)
+    (space : AddressSpace) (moduleBase : Option VA := none) : List V8StackFrame :=
+  let layout := V8Layout.detect input
+  let isolateVa := Cause.annotationHex input "v8_isolate_address"
+  let cage := Cause.annotationHex input "v8_ro_space_firstpage_address"
+  let moduleRanges := input.modules.map fun m => (m.baseVa, m.size)
   let rec go (threads : List Thread) (tables : UnwindTables) (acc : List V8StackFrame) :
       List V8StackFrame :=
     match threads with
     | [] => acc
     | t :: rest =>
       let ctx : WalkCtx :=
-        { dump := dump, space := space, isolateVa := isolateVa, layout := layout
-          moduleRanges := moduleRanges, cage := cage, publics := publics, thread := t
+        { input := input, space := space, isolateVa := isolateVa, layout := layout
+          moduleRanges := moduleRanges, cage := cage, publics := publics, moduleBase, thread := t
           stackVa := t.stackVa, stackEnd := t.stackVa + t.stackSize }
       let (frames, tables') := walkThread ctx tables
       go rest tables' (acc ++ frames)
-  go dump.threads (UnwindTables.new dump.modules) []
+  go (input.point.threads.filterMap (stackThread input)) (UnwindTables.new input.modules) []
 
 /-- Disassemble up to 10 instructions at the exception address. -/
-def disassembleException (dump : Dump) (space : AddressSpace) : Option Json := do
-  let exc ← dump.exception
+def disassembleException (input : AnalysisInput) (space : AddressSpace) : Option Json := do
+  let exc ← input.exception
   let fs := FastSpace.ofSpace space
   let rec collect (ip : VA) (n : Nat) (acc : List Json) : List Json :=
     if n ≥ 10 then acc
@@ -592,9 +608,10 @@ def disassembleException (dump : Dump) (space : AddressSpace) : Option Json := d
 def analyzer : Forensicator.Analyzer where
   name := "v8"
   description := "Recovers JS stack traces by walking native stacks and classifying V8 frames"
-  run ctx dump space := analyzerOk dump space (walkThreadStacks ctx.publics dump space)
+  run ctx input := analyzerOk input input.space
+    (walkThreadStacks ctx.publics input input.space ctx.moduleBase)
 where
-  analyzerOk (dump : Dump) (space : AddressSpace) (frames : List V8StackFrame) :
+  analyzerOk (input : AnalysisInput) (space : AddressSpace) (frames : List V8StackFrame) :
       Forensicator.AnalyzerOutput :=
     let framesJson := frames.map fun f =>
       Json.obj [
@@ -609,14 +626,19 @@ where
         ("script_name", match f.scriptName with | some s => .str s | none => .null),
         ("script_line", match f.scriptLine with | some l => .ofNat l.toNat | none => .null)]
     let heapCaptured :=
-      match Cause.annotationHex dump "v8_ro_space_firstpage_address" with
+      match Cause.annotationHex input "v8_ro_space_firstpage_address" with
       | some cage => (space.regionAt cage).isSome
       | none => false
     let custom : List (String × Json) :=
       [("v8_frames", .arr framesJson), ("v8_frame_count", .ofNat frames.length)]
-        ++ (match disassembleException dump space with
+        ++ (match disassembleException input space with
             | some d => [("crash_disasm", d)] | none => [])
         ++ [("v8_heap_captured", .bool heapCaptured)]
+    let unavailable := input.point.threads.filter fun t => (stackThread input t).isNone
+    let custom := if unavailable.isEmpty then custom else custom ++
+      [("v8_unavailable_threads", .arr (unavailable.map fun t => .obj
+        [("thread_id", .ofNat t.id.toNat),
+         ("reason", .str "register context or stack bounds unavailable")]))]
     { Forensicator.AnalyzerOutput.new "v8" with custom := custom }
 
 end Forensicator.Analyzer.V8

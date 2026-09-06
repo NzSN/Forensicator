@@ -1,6 +1,5 @@
-/- forensicator (Lean) — CLI. Lean-only since 2026-08-13: the Rust oracle
-   is gone and the eager .ttfx v1 trace path is removed; trace sessions
-   (proxy) await the Lean client follow-up plan. -/
+/- forensicator — capture inspection and execution analysis. Trace sessions
+   expose lazy execution points through the proxy. -/
 import Forensicator
 
 open Forensicator Forensicator.Parse Forensicator.Model
@@ -43,7 +42,7 @@ private def diagnosisJson (d : Dump) : Json :=
   | none => .null
   | some _ =>
     let space := buildAddressSpace d
-    let dg := Analyzer.Cause.diagnose d space
+    let dg := Analyzer.Cause.diagnose (AnalysisInput.ofDump d space) space
     .obj [("verdict", .str dg.verdict.debug),
           ("confidence", .str dg.confidence.debug),
           ("evidence", .arr (dg.evidence.map .str)),
@@ -87,7 +86,8 @@ private def inspectText (d : Dump) : IO Unit := do
   IO.println s!"├── Memory regions: {d.memoryRegions.length}"
   if let some exc := d.exception then
     IO.println s!"├── Exception: code 0x{hexPadUpper exc.code.toUInt64 8} at 0x{hexPadUpper exc.address 16} (thread {exc.threadId})"
-    let dg := Analyzer.Cause.diagnose d (buildAddressSpace d)
+    let space := buildAddressSpace d
+    let dg := Analyzer.Cause.diagnose (AnalysisInput.ofDump d space) space
     let detail := match dg.fatalMessage with
       | some m => m
       | none => dg.evidence.head? |>.getD ""
@@ -167,12 +167,12 @@ private def supplementImages (space : Spec.AddressSpace) (dump : Dump) (path : S
   let space := if images.images.isEmpty then space else space.setBacking images
   pure (space, images.images.length)
 
-private def analyzePrint (dump : Dump) (space : Spec.AddressSpace)
+private def analyzePrint (input : AnalysisInput)
     (plugin : Option String) (json : Bool) (ctx : SymbolsCtx) : IO Unit := do
     let filter := match plugin with
       | none => []
       | some p => (p.splitOn ",").map (String.trimAscii · |>.toString)
-    let catalog := runPipeline ctx defaultPipeline dump space filter
+    let catalog := runPipeline ctx defaultPipeline input filter
     if json then
       IO.println (Json.render (analyzeJson catalog.outputs))
     else
@@ -198,13 +198,14 @@ private def cmdAnalyze (path : String) (plugin : Option String) (json : Bool)
   match Minidump.fromBytes data with
   | .error f => IO.eprintln f.render; pure 1
   | .ok dump =>
-    let ctx ← Session.loadSymbolsCtxFor dump symbols
     let (space, imageCount) ← supplementImages (buildAddressSpace dump) dump path
+    let input := AnalysisInput.ofDump dump space path
+    let ctx ← Session.loadSymbolsCtxFor input symbols
     if !json then
       let kind := match classifyDump dump with
         | .FullMemory => "full-memory" | .StackOnly => "stack-only"
       IO.eprintln s!"dump: {kind}, {imageCount} image(s) supplemented"
-    analyzePrint dump space plugin json ctx
+    analyzePrint input plugin json ctx
     pure 0
 
 
@@ -260,7 +261,8 @@ private def compareStr (field : String) (dumpSide fileSide : Option String)
 private def eqIgnoreCase (a b : String) : Bool :=
   a.toLower == b.toLower
 
-private def matchRunDump (dump : Dump) (exes pdbs : List String) (json : Bool) : IO UInt32 := do
+private def matchRunModules (modules : List Module) (exes pdbs : List String)
+    (json : Bool) (sourceLabel : String := "dump") : IO UInt32 := do
     let mut items : List MatchItem := []
     for exe in exes do
       let bytes ← IO.FS.readBinFile exe
@@ -270,7 +272,7 @@ private def matchRunDump (dump : Dump) (exes pdbs : List String) (json : Bool) :
         let rsds := img.rsds
         let peChecksum := img.peChecksum
         let want := basenameOf exe
-        match dump.modules.find? fun m => eqIgnoreCase (basenameOf m.name) want with
+        match modules.find? fun m => eqIgnoreCase (basenameOf m.name) want with
         | none =>
           items := items ++ [{ kind := "exe", path := exe, modul := none, checks := [] }]
         | some module =>
@@ -290,7 +292,7 @@ private def matchRunDump (dump : Dump) (exes pdbs : List String) (json : Bool) :
               { field := "checksum", result := .unknown
                 fileValue := (peChecksum.map fun c => "0x" ++ hexPadUpper c.toUInt64 8).getD "-"
                 dumpValue := "-"
-                note := some "dump module checksum is 0" }
+                note := some s!"{sourceLabel} module checksum is 0" }
           items := items ++ [{ kind := "exe", path := exe, modul := some module.name
                                checks := [guidCheck, ageCheck, checksumCheck] }]
     for pdb in pdbs do
@@ -299,7 +301,7 @@ private def matchRunDump (dump : Dump) (exes pdbs : List String) (json : Bool) :
       | .error e => IO.eprintln s!"{pdb}: {e}"; return 1
       | .ok (age, guid) =>
         let want := basenameOf pdb
-        match dump.modules.find? fun m =>
+        match modules.find? fun m =>
             (m.pdbName.map (fun n => eqIgnoreCase (basenameOf n) want)).getD false with
         | none =>
           items := items ++ [{ kind := "pdb", path := pdb, modul := none, checks := [] }]
@@ -322,7 +324,7 @@ private def matchRunDump (dump : Dump) (exes pdbs : List String) (json : Bool) :
     if json then
       let checkJson (c : Check) : Json :=
         .obj [("field", .str c.field), ("result", .str c.result.asStr),
-              ("file", .str c.fileValue), ("dump", .str c.dumpValue),
+              ("file", .str c.fileValue), (sourceLabel, .str c.dumpValue),
               ("note", match c.note with | some n => .str n | none => .null)]
       let itemJson (i : MatchItem) : Json :=
         .obj [("kind", .str i.kind),
@@ -340,9 +342,9 @@ private def matchRunDump (dump : Dump) (exes pdbs : List String) (json : Bool) :
           IO.println s!"{i.kind.toUpper} {i.path} ↔ module {m}"
           for c in i.checks do
             let note := (c.note.map ("  (" ++ · ++ ")")).getD ""
-            IO.println s!"  {(c.field ++ "         ").take 9} {(c.result.upper ++ "         ").take 9} file={c.fileValue}  dump={c.dumpValue}{note}"
+            IO.println s!"  {(c.field ++ "         ").take 9} {(c.result.upper ++ "         ").take 9} file={c.fileValue}  {sourceLabel}={c.dumpValue}{note}"
         | none =>
-          IO.println s!"{i.kind.toUpper} {i.path} ↔ no matching module in dump"
+          IO.println s!"{i.kind.toUpper} {i.path} ↔ no matching module in {sourceLabel}"
       IO.println s!"overall: {overall.upper}"
     pure (if failed then 2 else 0)
 
@@ -357,8 +359,90 @@ private def cmdMatch (path : String) (exes pdbs : List String) (json : Bool) : I
   let data ← IO.FS.readBinFile path
   match Minidump.fromBytes data with
   | .error f => IO.eprintln f.render; pure 1
-  | .ok dump => matchRunDump dump exes pdbs json
+  | .ok dump => matchRunModules dump.modules exes pdbs json
 
+
+private def coverageName : Coverage → String
+  | .unknown => "unknown" | .incomplete => "partial" | .complete => "complete"
+
+private def knowledgeJson (k : Knowledge α) (render : α → Json) : Json :=
+  match k with
+  | .unknown => .obj [("status", .str "unknown")]
+  | .unavailable reason => .obj [("status", .str "unavailable"), ("reason", .str reason)]
+  | .known value => .obj [("status", .str "known"), ("value", render value)]
+
+private def knowledgeName : Knowledge α → String
+  | .unknown => "unknown"
+  | .unavailable reason => "unavailable (" ++ reason ++ ")"
+  | .known _ => "known"
+
+private def eventKindName : ExecutionEventKind → String
+  | .Exception => "exception" | .ModuleLoad => "module_load" | .ModuleUnload => "module_unload"
+
+private def eventJson (e : ExecutionEvent) : Json :=
+  .obj [("kind", .str (eventKindName e.kind)), ("code", .str (hexUpper e.code.toUInt64)),
+    ("address", .str (hexUpper e.address)), ("thread_id", .ofUInt32 e.threadId),
+    ("name", .str e.name), ("size", .ofUInt64 e.size)]
+
+private def pointInspectPrint (input : AnalysisInput) (frontier : Position)
+    (json quiet : Bool) : IO Unit := do
+  let point := input.point
+  let position := match point.id.position with
+    | .capture => "capture"
+    | .trace p => hexUpper p
+  if json then
+    let threadJson (t : ThreadState) : Json :=
+      .obj [("id", .ofUInt32 t.id),
+        ("lifetime", match t.lifetime with
+          | none => .null
+          | some iv => .obj [("start", .str (hexUpper iv.start)),
+              ("stop", match iv.stop with | none => .null | some e => .str (hexUpper e))]),
+        ("registers", knowledgeJson t.registers fun r =>
+          .obj [("rip", .str (hexUpper r.rip)), ("rsp", .str (hexUpper r.rsp))]),
+        ("stack_range", knowledgeJson t.stackRange fun r =>
+          .obj [("va", .str (hexUpper r.va)), ("size", .ofUInt64 r.size)]),
+        ("frames", knowledgeJson t.frames fun f =>
+          .obj [("count", .ofNat f.frames.length),
+            ("coverage", .str (coverageName f.coverage)), ("confidence", .ofFloat f.confidence)])]
+    IO.println (Json.render (.obj [
+      ("source", .str point.id.source), ("position", .str position),
+      ("frontier", .str (hexUpper frontier)),
+      ("memory", .obj [("known_regions", .ofNat input.space.regions.length),
+        ("byte_coverage", .str (coverageName point.memory.byteCoverage)),
+        ("mapping_coverage", .str (coverageName point.memory.mappingCoverage)),
+        ("known_absent_ranges", .ofNat point.memory.absentRanges.length)]),
+      ("events", .arr (point.events.map eventJson)),
+      ("event_coverage", .str (coverageName point.eventCoverage)),
+      ("threads", .arr (point.threads.map threadJson)),
+      ("thread_coverage", .str (coverageName point.threadCoverage)),
+      ("context", .obj [("modules", .arr (input.modules.map moduleJson))]),
+      ("anomalies", .arr (point.anomalies.map (fun a => .str a.description)))]))
+  else if quiet then
+    IO.println s!"position: {position}  memory_regions: {input.space.regions.length}  events: {point.events.length}  threads: {point.threads.length}  byte_coverage: {coverageName point.memory.byteCoverage}"
+  else
+    IO.println s!"Execution point {position} / frontier {hexUpper frontier}"
+    IO.println s!"Memory: {input.space.regions.length} known regions; bytes {coverageName point.memory.byteCoverage}; mappings {coverageName point.memory.mappingCoverage}"
+    IO.println s!"Events at this position: {point.events.length}"
+    for (e, i) in point.events.zipIdx do
+      IO.println s!"  [{i}] {eventKindName e.kind} @ {hexUpper e.address} (thread {e.threadId})"
+    IO.println s!"Threads: {point.threads.length}"
+    for t in point.threads do
+      IO.println s!"  TID {t.id}: registers {knowledgeName t.registers}; stack {knowledgeName t.stackRange}; frames {knowledgeName t.frames}"
+    IO.println s!"Active modules: {input.modules.length}"
+    for a in point.anomalies do IO.println s!"  anomaly: {a.description}"
+
+private def selectAnalysisEvent (input : AnalysisInput) (args : List String) :
+    Except String AnalysisInput := do
+  match args.dropWhile (· != "--event") with
+  | [] => pure input
+  | [_] => .error "--event needs an event index from inspect"
+  | _ :: value :: _ =>
+    let index ← parseU64 value
+    match input.point.events[index.toNat]? with
+    | some event =>
+      if event.kind == .Exception then pure { input with selectedEvent := some index.toNat }
+      else .error "selected event is not an exception"
+    | none => .error "event index out of range"
 
 private def shellDispatch (s : Session) (args : List String) : IO (Session × Bool) := do
   match args with
@@ -366,19 +450,18 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
     s.closeProxy
     pure (s, false)
   | "inspect" :: rest =>
-    match (← s.currentIO) with
-    | .error e => IO.eprintln s!"error: {e}"
-    | .ok (dump, _) =>
-      if (match s.target with | .trace _ _ => true | _ => false) then
-        match s.target with
-        | .trace t cursor => IO.println s!"position {hexUpper cursor} / frontier {hexUpper t.frontier}"
-        | _ => pure ()
+    match s.target with
+    | .dump (dump, _, _) _ =>
       inspectPrint dump ("--json" ∈ rest) ("--quiet" ∈ rest)
+    | .trace t _ =>
+      match (← s.currentIO) with
+      | .error e => IO.eprintln s!"error: {e}"
+      | .ok input => pointInspectPrint input t.frontier ("--json" ∈ rest) ("--quiet" ∈ rest)
     pure (s, true)
   | "analyze" :: rest =>
-    match (← s.currentIO) with
+    match (← s.prepareAnalysis) with
     | .error e => IO.eprintln s!"error: {e}"
-    | .ok (dump, space) =>
+    | .ok input =>
       let plugin := match rest.find? (· == "--plugin") with
         | some _ => (rest.dropWhile (· != "--plugin")).drop 1 |>.head?
         | none => none
@@ -386,15 +469,18 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
       if (match s.target with | .trace _ _ => true | _ => false) && !json then
         match s.target with
         | .trace t cursor =>
-          IO.eprintln s!"position {hexUpper cursor} / frontier {hexUpper t.frontier}, dump: stack-only"
+          IO.eprintln s!"position {hexUpper cursor} / frontier {hexUpper t.frontier}, memory coverage: {coverageName input.point.memory.byteCoverage}"
         | _ => pure ()
-      let ctx ← Session.loadSymbolsCtxFor dump s.symbols
-      analyzePrint dump space plugin json ctx
+      match selectAnalysisEvent input rest with
+      | .error e => IO.eprintln s!"error: {e}"
+      | .ok selected =>
+        let ctx ← Session.loadSymbolsCtxFor selected s.symbols
+        analyzePrint selected plugin json ctx
     pure (s, true)
   | "match" :: rest =>
     match (← s.currentIO) with
     | .error e => IO.eprintln s!"error: {e}"
-    | .ok (dump, _) =>
+    | .ok input =>
       let rec collect (xs : List String) (exes pdbs : List String) : List String × List String :=
         match xs with
         | [] => (exes, pdbs)
@@ -402,7 +488,8 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
         | "--pdb" :: p :: r => collect r exes (pdbs ++ [p])
         | _ :: r => collect r exes pdbs
       let (exes, pdbs) := collect rest [] []
-      let _ ← matchRunDump dump exes pdbs ("--json" ∈ rest)
+      let label := match s.target with | .dump _ _ => "dump" | .trace _ _ => "point"
+      let _ ← matchRunModules input.modules exes pdbs ("--json" ∈ rest) label
     pure (s, true)
   | ["list-plugins"] =>
     let _ ← cmdListPlugins
@@ -437,7 +524,7 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
     | .error e => IO.eprintln s!"error: {e}"; pure (s, true)
     | .ok pos =>
       match s.target with
-      | .dump _ _ => IO.eprintln "error: not a trace session (trace support removed; the proxy-based Lean client is a follow-up)"; pure (s, true)
+      | .dump _ _ => IO.eprintln "error: not a trace session (use shell --proxy or load --proxy)"; pure (s, true)
       | .trace t _ =>
         if pos > t.frontier then
           IO.eprintln s!"error: position {hexUpper pos} beyond frontier {hexUpper t.frontier}"
@@ -446,30 +533,67 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
           pure ({ s with target := .trace t pos }, true)
   | "t+" :: _ | "forward" :: _ =>
     match s.target with
-    | .dump _ _ => IO.eprintln "error: not a trace session (trace support removed; the proxy-based Lean client is a follow-up)"; pure (s, true)
+    | .dump _ _ => IO.eprintln "error: not a trace session (use shell --proxy or load --proxy)"; pure (s, true)
     | .trace t cursor =>
       let cursor' := if cursor < t.frontier then cursor + 1 else cursor
       IO.println s!"position {hexUpper cursor'}"
       pure ({ s with target := .trace t cursor' }, true)
   | "t-" :: _ | "back" :: _ =>
     match s.target with
-    | .dump _ _ => IO.eprintln "error: not a trace session (trace support removed; the proxy-based Lean client is a follow-up)"; pure (s, true)
+    | .dump _ _ => IO.eprintln "error: not a trace session (use shell --proxy or load --proxy)"; pure (s, true)
     | .trace t cursor =>
       let cursor' := if cursor > 0 then cursor - 1 else cursor
       IO.println s!"position {hexUpper cursor'}"
       pure ({ s with target := .trace t cursor' }, true)
   | ["position"] =>
     match s.target with
-    | .dump _ _ => IO.eprintln "error: not a trace session (trace support removed; the proxy-based Lean client is a follow-up)"
+    | .dump _ _ => IO.eprintln "error: not a trace session (use shell --proxy or load --proxy)"
     | .trace t cursor =>
       IO.println s!"position {hexUpper cursor} / frontier {hexUpper t.frontier}"
+    pure (s, true)
+  | "events" :: bounds =>
+    match bounds, s.target with
+    | [], _ =>
+      match ← s.currentIO with
+      | .error e => IO.eprintln s!"error: {e}"
+      | .ok input =>
+        for (event, i) in input.point.events.zipIdx do
+          IO.println s!"[{i}] {eventKindName event.kind} @ {hexUpper event.address} (thread {event.threadId})"
+        if input.point.events.isEmpty then IO.println "no events recorded at this point"
+    | [a, b], .trace t _ =>
+      match parseU64 a, parseU64 b with
+      | .ok lo, .ok hi =>
+        match t.eventsBetween lo hi with
+        | .error e => IO.eprintln s!"error: {e}"
+        | .ok events =>
+          for event in events do
+            IO.println s!"@{hexUpper event.pos} {eventKindName event.kind} @ {hexUpper event.address} (thread {event.threadId})"
+          if events.isEmpty then IO.println "no events recorded in interval"
+      | _, _ => IO.eprintln "error: invalid event interval"
+    | [_, _], .dump _ _ => IO.eprintln "error: a capture has no recorded event history"
+    | _, _ => IO.eprintln "usage: events [from-position to-position]"
+    pure (s, true)
+  | ["read", vaStr, lenStr] =>
+    match parseU64 vaStr, parseU64 lenStr with
+    | .ok va, .ok len =>
+      if len > 65536 then IO.eprintln "error: read length must be at most 65536 bytes"
+      else
+        match ← s.readMemory va len with
+        | .error e => IO.eprintln s!"error: {e}"
+        | .ok (.known bytes) => IO.println (byteDebug bytes)
+        | .ok .absent => IO.println "<known absent>"
+        | .ok .unknown => IO.println "<unknown>"
+    | _, _ => IO.eprintln "error: invalid address or read length"
     pure (s, true)
   | "writes" :: vaStr :: lenStr :: _ =>
     match parseU64 vaStr, parseU64 lenStr with
     | .ok va, .ok len =>
       match s.target with
-      | .dump _ _ => IO.eprintln "error: not a trace session (trace support removed; the proxy-based Lean client is a follow-up)"
+      | .dump _ _ => IO.eprintln "error: not a trace session (use shell --proxy or load --proxy)"
       | .trace t cursor =>
+        if va.toNat + len.toNat ≥ 2^64 then
+          IO.eprintln "error: write-query address range exceeds the supported bounds"
+          return (s, true)
         let printWrites (writes : List Model.WriteRecord) (last : Option Model.WriteRecord)
             (payloads : List (Option ByteArray)) : IO Unit := do
           if writes.isEmpty then
@@ -482,7 +606,7 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
               | none => ""
             let dataStr := match payload with
               | some bs => byteDebug bs
-              | none => "<uncommitted>"
+              | none => "<unavailable>"
             IO.println s!"  @{hexUpper w.pos}  [{hexUpper w.va}, {hexUpper (UInt64.ofNat (min w.endVaNat (2^64-1)))})  {dataStr}{marker}"
         match s.proxy with
         | none =>
@@ -501,7 +625,7 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
     pure (s, true)
   | ["intervals"] =>
     match s.target with
-    | .dump _ _ => IO.eprintln "error: not a trace session (trace support removed; the proxy-based Lean client is a follow-up)"
+    | .dump _ _ => IO.eprintln "error: not a trace session (use shell --proxy or load --proxy)"
     | .trace t cursor =>
       for (id, iv) in t.threads do
         let alive := match iv.stop with
@@ -516,7 +640,8 @@ private def shellDispatch (s : Session) (args : List String) : IO (Session × Bo
         IO.println s!"   call on {c.threadId}: [{hexUpper c.interval.start}, {state})"
     pure (s, true)
   | "help" :: _ =>
-    IO.println "commands: inspect analyze match list-plugins load symbols seek t+ t- position writes intervals quit"
+    IO.println "commands: inspect analyze match list-plugins load symbols seek t+ t- position events read writes intervals quit"
+    IO.println "events [from to]  |  read <address> <length>  |  analyze [--event <index>]"
     pure (s, true)
   | [] => pure (s, true)
   | cmd :: _ =>

@@ -62,13 +62,14 @@ private def detect (cfg : Config) (candidates : List CandidatePointer) : List St
   let adj := buildAdj candidates
   outer cfg adj.toArray (adj.map (·.1)) Std.HashSet.emptyWithCapacity []
 
-/-- Chases pointer chains to find linked lists in heap memory. -/
+/-- Chases pointer chains to find linked lists in known memory. -/
 def analyzer (cfg : Config := {}) : Analyzer where
   name := "lists"
-  description := "Chases pointer chains to find linked lists in heap memory"
-  run _ctx dump space :=
+  description := "Chases pointer chains to find linked lists in known memory"
+  run _ctx input :=
+    let space := input.space
     { AnalyzerOutput.new "lists" with
       linkedLists := detect cfg
-        (pointerScan space dump [PointerPattern.heapReferences]) }
+        (pointerScan space input [PointerPattern.heapReferences]) }
 
 end Forensicator.Analyzer.Lists

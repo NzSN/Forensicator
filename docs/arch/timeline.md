@@ -1,133 +1,148 @@
-# Timeline: TTD Trace Support
+# Timeline: execution points and lazy knowledge
 
-Spec: `specs/Timeline.tla` (Apalache-verified); mechanized theorems in
-`Forensicator/Spec/Timeline.lean` and `Forensicator/Model/Trace.lean`.
-Design: `docs/trace/2026-08-07-timeline-design.md`.
-Code: `Forensicator/Model/Trace.lean` (model + views + `snapshot`).
+Current design: [execution timeline](../trace/2026-09-06-execution-timeline-design.md).
+Implementation and verification: [plan](../../Drafts/2026-09-06-execution-timeline-plan.md).
 
-**Pivot state (2026-08-13):** the eager `.ttfx` v1 path is **removed**
-(decoder/encoder, `trace` subcommand, fixture — plan:
-`docs/plans/2026-08-13-remove-eager-trace-path.md`), and trace consumption
-returned the same day as the **shipped** lazy jigsaw proxy client (plan:
-`docs/plans/2026-08-13-lean-trace-client.md`; design authority:
-`docs/trace/2026-08-12-lazy-trace-proxy-design.md`, D1–D9 +
-Implementation notes; loading-path spec `specs/JigSawSpawner.tla`,
-Apalache-verified). A resident Windows proxy (`ttfx-proxy.exe`,
-`D:\Codebase\JigsawSpawner`) serves positioned memory on demand; the Lean
-client (`Forensicator/Trace/`) accumulates pieces with validity intervals.
-The `.ttfx` v1 format doc survives as historical reference for a possible v2
-jigsaw-persistence format ([ttfx-format.md](ttfx-format.md), design §D8).
+## Model and analysis interface
 
-## Loading path (the Lean trace client)
+`Model/Execution.lean` defines a source-scoped `ExecutionPoint` containing memory
+knowledge, events occurring at the point, and thread execution/stack knowledge.
+`AnalysisInput` adds separately scoped system, active-module and runtime context.
+The point and analyzer interface contain no `Dump` aggregate.
 
-`Forensicator/Trace/` mirrors `JigSawSpawner.tla`: everything checkable is
-pure and total; IO is confined to `Client.lean` (`IO.Process` spawn, one
-outstanding request, blocking with no read timeout in v1).
+`Model/ExecutionTypes.lean` holds neutral process records. `Model/Dump.lean` retains
+the parsed capture aggregate; `Model/Capture.lean` adapts it to one capture point.
+A capture is not assigned a fictitious TTD position or a thread lifetime.
 
-| Module | Role |
+| Information | Representation |
 |---|---|
-| `Trace/Proto.lean` | Wire protocol v1 (D6): pure total frame codec; golden vectors byte-pinned against the proxy's `proto.rs` tests |
-| `Trace/Index.lean` | Windowed write index (D1): per-page horizons `idx_F`, `mergeWindow` (dedup by `(pos, va, len)`, `index window gap` + beyond-frontier anomalies) |
-| `Trace/Jigsaw.lean` | Page cache (D2/D3): validity intervals from the index, ABSENT point intervals, LRU cap, p+1-clamped fetch positions, P3 next-write fallback positions |
-| `Trace/Client.lean` | The only IO: spawn (local interop / ssh), handshake → skeleton, request loop, two-phase `valueAt`/`writesBetween`/`writeBytes`/`snapshotAt`, session-fatal poisoning |
+| Point identity | Source key plus `capture` or packed TTD `trace position` |
+| Memory | `AddressSpace` known bytes, mapping observations, independent coverage and positive absence ranges |
+| Events | Payloads at the exact point, with explicit exception selection when ambiguous |
+| Threads | ID/lifetime, known/unknown/unavailable registers and stack ranges, recovered-frame knowledge |
+| Supporting facts | Active module projection and exact-point runtime observations in `AnalysisContext` |
 
-Host-side position knowledge (D9) computes `KnownAt`/`KnownAbsentAt`/
-`NeedsIndex`/`GapAt` from skeleton + index + cache. Two-phase snapshots
-(D4) derive regions — never enumerate (P3): closure pages from the index at
-the cursor ∪ probed pages, adjacent committed pages merged, `prot` R|W
-approximate. The mechanized counterpart of `CacheSound`'s pure half is
-`Spec/JigSaw.lean`'s `IndexState.history_agree` (the known write history is
-constant over a piece's validity interval), with `mergeRecords`/
-`mergeWindow` order/dedup/membership invariants — all `sorry`-free.
+Unknown bytes are not zero bytes or proof of absence. Captured register validity
+survives parsing; missing/invalid contexts remain unavailable. A valid zero-valued
+context is still known. MemoryInfoList uses native Windows layout/constants and
+rejects invalid states instead of turning them into positive free-memory evidence.
 
-Documented position-level divergences (Implementation notes): a write
-exactly at the frontier never materializes in any engine state (p+1 clamp);
-page-lifecycle staleness (free/recommit without write records) is a
-residual risk — the cache trusts the index (`NoRecommitWithin` assumption)
-until the proxy-side N-mask watchpoint exists.
+## Pure timeline queries
 
-## Why a separate container
+`Model/Trace.lean` retains the trace logs and initial memory model:
 
-Microsoft's `.run` trace format is proprietary and its only readers
-(`TTDReplay.dll` / the dbgeng stack) are Windows-only. Forensicator never
-parses `.run`. A Windows-side component produces our own versioned container,
-and everything downstream is pure Lean, specifiable, and testable with
-synthetic fixtures. `Timeline.tla` is the formal contract the Windows side's
-output must satisfy — the same capture-side/analysis-side split as the V8HE
-crash handler.
+| Query | Contract |
+|---|---|
+| `pointAt t source` | Optional execution point; no result beyond frontier |
+| `analysisAt t source` | Point plus its active contextual projection |
+| `eventsAt t` | Events exactly at `t` |
+| `eventsBetween a b` | Checked `(a,b]` event query |
+| `writesBetweenChecked va len a b` | Checked overlapping-write query in `(a,b]` |
+| `modulesAt t` | Active modules after events through `t`; conflicting evidence is excluded with anomalies |
+| `threadsAt t` | Active, unambiguous thread lifetimes with context availability |
+| `valueAt va t` | Pure last-write byte view within initial backing |
 
-## Model (`Model/Trace.lean`) — Timeline.tla realized
+Equal interval endpoints return no events/writes; invalid bounds are errors.
+Thread lifetimes are `[start,stop)`. Pure event/write lists retain list order.
+The proxy write index instead retains its established `(position, address, length)`
+ordering and deduplication; v1 has no record identity for resolving simultaneous
+writes across windows. Do not infer writer identity or instruction succession
+from packed position arithmetic alone.
 
-```lean
-structure Trace where
-  initMem  : List MemoryRegionInfo   -- contents at position 0
-  writes   : List WriteRecord        -- (pos, va, data) — append-only, ordered
-  events   : List TraceEvent         -- Exception / ModuleLoad / ModuleUnload
-  threads  : List (UInt32 × Interval)  -- lifetimes; stop = none while alive
-  calls    : List CallSpan           -- [start, end) per thread
-  frontier : Position                -- record head
-  anomalies : List Anomaly
+## Proxy loading and materialization
+
+The proxy path is the only trace input path. Forensicator does not parse `.run`,
+and eager `.ttfx` loading remains removed. `Proto`, `Index` and `Jigsaw` remain pure;
+`Client` owns the `IO.Process` transport and two-phase acquisition.
+
+| Client operation | Work performed |
+|---|---|
+| `viewAt t` | Reads current cache/index knowledge and eager inventory; sends no requests |
+| `materializeRanges t ranges` | Fetches requested pages and their index dependencies |
+| `prepareAnalysisAt t` | Explicit full-index discovery and touched/probed-page preparation for batch analyzers |
+| `writesBetween ...` / `writeBytes` | Write-history and payload acquisition |
+
+Each prepared page is added immediately to the returned immutable result, so
+subsequent cache eviction cannot erase successful reads. Derived pages retain
+unknown mapping protections/classification. Strings and pointer inference scan
+known bytes regardless of unknown class; class-specific heap/vtable inference
+still requires corresponding evidence.
+
+A page affected by an unobservable frontier write remains unknown. A P3 fallback
+must reach a write strictly before the frontier; its later bytes cannot satisfy
+an earlier point. A finite cache may forget evidence; completed query results
+retain their evidence. UInt64-maximum frontier and unrepresentable final-page
+requests are rejected before unsupported arithmetic can wrap.
+
+Protocol v1 supplies no registers, stack bounds, recovered frames, writer thread
+IDs or complete mapping inventory. Those capabilities are explicitly unavailable.
+Untouched, unprobed memory remains unknown. Free/recommit without indexed writes
+remains an external completeness assumption; local tests do not establish it.
+
+## Session and shell
+
+`Session.currentIO` obtains a cache-only execution view. `Session.prepareAnalysis`
+explicitly acquires the finite region set needed by batch analyzers. Parsed dump
+inspection remains capture-specific; trace inspection reports point knowledge.
+Matching consumes the active module projection, and verified symbols are loaded
+for the current input and bound to the selected module base.
+
+```text
+shell --proxy <trace.run>       attach to the trace
+seek <position>               select an encoded position
+t+ / t- / position             navigate or display the cursor
+inspect [--json|--quiet]       inspect current point knowledge without fetching
+read <address> <length>        acquire up to 65536 bytes for display
+events                        occurrences exactly at the current point
+events <from> <to>             recorded events in (from,to]
+writes <address> <length>      write history through the cursor
+intervals                     thread/call lifetime inventory
+analyze [--event <index>]      explicitly prepare memory, then run analyzers
 ```
 
-`Position = UInt64` packs TTD's `Major:Minor` pair (`(major <<< 32) ||| minor`,
-`Basic.lean`). Spec's `end = -1` ↔ Lean `Interval.stop = none`.
+`--event` indexes the current point's event list. Missing/ambiguous exception
+context does not reuse an older exception. An unavailable write payload prints
+`<unavailable>` rather than asserting that its memory was uncommitted.
 
-### Views (spec operators → defs)
+## Verification
 
-| Timeline.tla | `Trace` def | Meaning |
-|---|---|---|
-| `LastWriter(a,t)` | `lastWriter tr va t` | last write covering `va` at/before `t` |
-| `ValueAt(a,t)` | `valueAt tr va t` | byte at `va` at `t` (snapshot-faithful: out-of-region writes never mask valid ones) |
-| `WritesBetween(a,t1,t2)` | `writesBetween tr va len t1 t2` | "who wrote this range" |
-| `ExceptionsAt(t)` | `exceptionsAt tr t` | CrashCause input, time-indexed |
-| — | `snapshot tr t` | materialize position into `Snapshot { dump, space, pos }`; `none` for `t > frontier` (CursorBounded) |
+`Spec/Timeline.lean` preserves ordered-list and byte-fold proofs and adds point
+identity/bounds, exact event membership and interval partition laws. These prove
+properties of the shipping pure functions, not complete recovery of process state.
+`Spec/JigSaw.lean` continues to prove write-index and cache-history arithmetic.
 
-`snapshot` builds: memory = initMem overlaid with writes ≤ t (last write per
-byte wins); modules = loads − unloads ≤ t; exception = last exception ≤ t;
-then a standard `AddressSpace` (`Pipeline.buildAddressSpace`). The existing 8
-analyzers consume it unchanged. Byte-level faithfulness is proved:
-`valueAt_agrees_with_fold` (the `SnapshotConsistent` counterpart) and
-`snapshot_isSome` live in `Spec/Timeline.lean`; divergences from Rust are
-Nat-lifted (`endVaNat`, overlap bounds — no `u64` wrap edges).
+The active TLA+ contracts are:
 
-## Wire format (`.ttfx`, v1) — historical
+| Spec | Contract |
+|---|---|
+| `Timeline.tla` | Recorded memory, exact events, checked intervals and half-open thread lifetimes |
+| `ExecutionState.tla` | Stored source/position-scoped knowledge, tagged capture points, per-thread context availability, complete ordered events and explicit selection |
+| `Snapshot.tla` | Explicit acquisition into an execution point, partial completion, and a retained published result independent of the cache |
+| `JigSawSpawner.tla` | Index/engine-backed cache knowledge, unobservable frontier suppression and strictly observable P3 fallback |
+| `SnapshotRegression.tla` | Loaded trace/capture materialization, including two requested cells in a one-cell cache |
+| `JigSawSpawnerRegression.tla` | Real write/commit-log cases for ordinary and frontier fallback |
 
-The eager container (32-byte header → fixed-record sections `INITMEM`,
-`WRITES`, `EVENTS`, `THREADS`, `CALLS` → payload pool) is documented in
-[ttfx-format.md](ttfx-format.md) for the record; the decoder/encoder were
-removed with the eager path (2026-08-13). A v2 jigsaw-persistence format
-(design §D8 `DUMP CACHE`) may reuse the section ideas.
+`Snapshot.tla` no longer instantiates `Model` or produces a Dump-shaped record.
+`SnapshotMBT.tla/.cfg` are compatibility entry names for this current contract;
+the obsolete Rust echo state has been removed. `Model.tla` remains the separate
+capture aggregate used by parsing/workflow specs.
 
-## Invariants as load-time validation
+Run `./scripts/check-timeline-specs.sh` for the bounded gates and
+`python3 scripts/test-timeline-spec-mutations.py` to verify that intentionally
+incorrect variants fail. The latter uses temporary copies and requires actual
+invariant counterexamples; parser/type errors do not count as detected defects.
+See the plan for bounds and completed results.
 
-On the proxy path the Timeline invariants are enforced client-side as the
-skeleton/index windows arrive and recorded in `anomalies` (degrade, never
-abort): `events out of order`, `event beyond frontier`, `thread interval
-inverted`/`beyond frontier`, `index record beyond frontier`,
-`index window gap`, `piece outside frontier`, `piece invalid interval`.
-`JigSawSpawner.tla`'s `JigSawInvariant` (`CacheSound`, `AbsentSound`,
-`HorizonBounded`) is the loading-path counterpart; its pure halves are
-proved in `Spec/JigSaw.lean` and exercised by the guard suite's
-property checks (random fetch/query against a pure engine oracle).
+The materialization model distinguishes attempted cells from positively observed
+cells. Unknown reads can finish without becoming zero bytes or absence. The last
+published point remains valid while another request acquires pages; publishing
+its replacement ends that result's modeled lifetime. Multiple caller-held result
+objects, native register layouts, address-range encoding, and replay lifecycle
+completeness are explicit abstraction limits. Memory/context adapter observations
+are assumed truthful; the cache model separately checks its engine/index mapping.
 
-## Cursor ownership
-
-The cursor is *not* part of `Trace` — it belongs to the consumer. The
-interactive shell owns it (`seek`/`t+`/`t-`/`position` move it,
-`writes`/`intervals` query at it, `inspect`/`analyze`/`match` operate on
-the cursor snapshot) — reachable via `shell --proxy` / `load --proxy`
-(`Session.lean`, `Target.trace` + `Session.proxy`). Cursor commands are
-pure over the skeleton; memory-reading commands are two-phase through the
-proxy (see "Loading path" above).
-
-## Boundaries and non-goals
-
-- No `.run` parsing, no live debugging, no per-position register files
-  (the public Replay API's `GetCrossPlatformContext` makes them cheap —
-  design P0′; candidate for the proxy era).
-- Cross-position reasoning (verdict timelines, corruption provenance — the
-  Rust-era `TemporalAnalyzer` sketch) is designed but not implemented.
-- The write index is windowed (design D1): the host fetches per-range
-  windows with per-page horizons; `snapshotAt` collapses to one full-space
-  window past the fan-out limit (435k records ≈ 10 MB on the fixture —
-  eager-carryable).
+`Test/Execution.lean`, `Test/Timeline.lean`, `Test/ExecutionProxy.lean`, and
+`Test/ExecutionAnalyzers.lean` cover the new contracts inside the full guard
+runner. `python3 scripts/test-execution-shell.py` exercises the real CLI and
+transport against a deterministic stdio proxy. The fixture golden/live gates
+remain separate; see the plan for their actual availability and results.

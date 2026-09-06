@@ -4,12 +4,13 @@ EXTENDS Integers, Sequences, FiniteSets
 \* ── Model — the abstract structure of a decoded minidump (Dump) ─────────
 \*
 \* WHAT THIS SPEC MODELS
-\*   The *content* of a parsed minidump: the normalized collection of facts
-\*   that S2 analyzers consume (Rust counterpart: model::Dump). It is a
-\*   time-point spec — one frozen instant of one process. It models neither
-\*   the file's byte layout nor the parse *process* (that is
-\*   ParsePipeline.tla), and memory regions carry metadata only: byte
-\*   contents first appear in Timeline.tla (init_mem / wr_*).
+\*   The content of a parsed minidump: the capture aggregate represented by
+\*   Model.Dump in Lean. Capture adaptation supplies execution knowledge and
+\*   separately scoped analysis context; analyzers do not consume this whole
+\*   aggregate. ExecutionState.tla defines timeline execution views separately.
+\*   This module models neither the file byte layout nor the parse process
+\*   (ParsePipeline.tla). Its memory regions carry metadata only; recorded
+\*   payload byte semantics belong to Timeline.tla (init_mem / wr_*).
 \*
 \* STATE FORMAT
 \*   Entities are stored as flat parallel sequences (Apalache-friendly —
@@ -43,15 +44,14 @@ EXTENDS Integers, Sequences, FiniteSets
 \*     is empty → non-empty (one-shot latches for sysinfo/exc_info).
 \*   * Bounds (Max* below) keep the state space tiny for exhaustive
 \*     checking; they are verification artifacts, not format limits.
-\*   * Timeline.tla re-indexes this state by position t to model TTD
-\*     traces; nothing here knows about time.
+\*   * This aggregate has capture identity, not a fabricated TTD coordinate.
+\*     Timeline/ExecutionState do not re-index it or construct it at positions.
 
-\* Normalized data types for S1 — what S2+ consume.
+\* Normalized captured data types for S1 and the capture adapter.
 \* Every fact carries Provenance: which stream + offset it came from.
 \* Crash annotations from CommentStreamA/W are modeled as key-value pairs.
 
-MaxModules    == 3  \* raised from 2 for Snapshot.tla: Timeline admits
-                    \* MaxEvents = 3 simultaneous open module loads
+MaxModules    == 3  \* bounded capture module inventory
 MaxThreads    == 2
 MaxRegions    == 2
 MaxAnomalies  == 4

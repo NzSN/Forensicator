@@ -1,29 +1,26 @@
 ---- MODULE Timeline ----
 EXTENDS Integers, Sequences, FiniteSets
 
-\* ── Timeline — TTD-style time-travel extension of the time-point specs ──
+\* Timeline -- recorded memory, events, and thread/call lifetime foundation.
 \*
-\* The existing specs (Model, AddressSpace, Arch, CrashCause) describe one
-\* frozen snapshot of the target process. This module adds the time-line
-\* dimension they can be re-indexed by, modelling the public structure of a
-\* time-travel trace (WinDbg TTD ".run" data model):
+\* The append-only trace records initial payload memory, writes, and events;
+\* frontier bounds its positions, while cursor selects an investigation point.
+\* ValueAt supplies the recorded memory semantics. EventsAt is exact-position;
+\* checked interval queries use (a,b], and thread lifetimes use [start,end).
+\* Sequence indices identify event records and lifetime instances. They retain
+\* recorded order without conflating potentially reused operating-system IDs.
 \*
-\*   * recorded trace   — initial memory + append-only write log
-\*                        (position, address, value) + event log; the
-\*                        abstract trace file. Grows only at the frontier.
-\*   * frontier/cursor  — record head vs. view position. Navigation
-\*                        (Advance/Retreat/Seek) is !tt / t- / g-.
-\*   * intervals        — thread lifetimes and call spans [start, end]:
-\*                        the TTD.Threads / TTD.Calls objects.
-\*   * snapshot views   — ValueAt(a, t) reconstructs memory at any position
-\*                        from the delta chain: timeline[t] is a *view*,
-\*                        not N stored copies.
+\* ExecutionState.tla layers source-scoped memory knowledge and thread execution
+\* views on this foundation. A timeline point does not construct a Model.tla
+\* capture aggregate. Model.tla describes decoded minidump facts separately.
 \*
-\* TTD positions (Major:Minor pairs) are abstracted to a single monotone
-\* Int: only the total order matters for these properties.
+\* Abstraction limits: positions are ordered integers rather than packed TTD
+\* Major:Minor keys; cells 1..MaxAddr stand for payload bytes. RecordStep emits
+\* at most one write and one event at each new position. Query definitions
+\* preserve log indices and support equal-position records, but this transition
+\* generator does not explore multiple events at the same position. Lean tests
+\* cover that case, module descriptors/reuse, and malformed source observations.
 \*
-\* Memory cells are 1..MaxAddr so they double as Seq indices.
-
 \* ---- Model-checking bounds ----
 
 MaxPos     == 4     \* positions 0..MaxPos
@@ -65,7 +62,7 @@ VARIABLES
 vars == <<init_mem, wr_pos, wr_addr, wr_val, ev_pos, ev_kind,
           frontier, cursor, threads, calls>>
 
-\* ---- Derived views (what a position materializes to) ----
+\* ---- Recorded-memory and temporal queries ----
 
 \* Index of the last write to cell a at or before position t, or 0.
 \* WritesOrdered makes "last" the greatest log index.
@@ -75,20 +72,58 @@ LastWriter(a, t) ==
     IN IF idxs = {} THEN 0
        ELSE CHOOSE i \in idxs : \A j \in idxs : j <= i
 
-\* Memory contents at position t — the snapshot view. A time-point spec
-\* (Model/AddressSpace/Arch) re-indexed by t would read through this.
+\* Recorded payload byte at t. ExecutionState exposes only acquired evidence
+\* about this value; this operator makes no claim about complete live mappings.
 ValueAt(a, t) ==
     LET i == LastWriter(a, t)
     IN IF i = 0 THEN init_mem[a] ELSE wr_val[i]
 
-\* All writes to cell a in (t1, t2]: "who wrote this VA between t1 and t2"
-\* (TTD.Memory(addr, addr+1, "w")).
+\* Recorded writes to cell a in (t1,t2]. The current proxy write metadata
+\* does not identify the responsible thread. Checked callers validate bounds.
 WritesBetween(a, t1, t2) ==
     {i \in 1..MaxPos : i <= Len(wr_pos) /\ wr_addr[i] = a /\ t1 < wr_pos[i] /\ wr_pos[i] <= t2}
 
-\* Exception events at or before t — CrashCause's input, time-indexed.
+\* Exact-position events and historical exceptions are separate queries.
+\* @type: Int => Set(Int);
+EventsAt(t) ==
+    {i \in 1..MaxEvents : i <= Len(ev_pos) /\ ev_pos[i] = t}
+
+\* @type: Int => Set(Int);
 ExceptionsAt(t) ==
+    {i \in 1..MaxEvents : i <= Len(ev_pos) /\ ev_kind[i] = "EXCEPTION" /\ ev_pos[i] = t}
+
+\* @type: Int => Set(Int);
+ExceptionsThrough(t) ==
     {i \in 1..MaxEvents : i <= Len(ev_pos) /\ ev_kind[i] = "EXCEPTION" /\ ev_pos[i] <= t}
+
+\* @type: (Int, Int) => Bool;
+ValidInterval(a, b) == 0 <= a /\ a <= b /\ b <= frontier
+
+\* Log indices retain identity and recorded order in the selected interval.
+\* @type: (Int, Int) => Set(Int);
+EventsIn(a, b) ==
+    {i \in 1..MaxEvents : i <= Len(ev_pos) /\ a < ev_pos[i] /\ ev_pos[i] <= b}
+
+\* Invalid bounds report an error, distinct from a valid empty interval.
+\* @type: (Int, Int) => [ok: Bool, events: Set(Int)];
+EventsBetweenChecked(a, b) ==
+    [ok |-> ValidInterval(a, b),
+     events |-> IF ValidInterval(a, b) THEN EventsIn(a, b) ELSE {}]
+
+\* A cell models a nonempty address range; address 0 and MaxAddr+1 are invalid.
+\* Byte-range overflow/empty-range checks are exercised by the Lean tests.
+\* @type: (Int, Int, Int) => [ok: Bool, writes: Set(Int)];
+WritesBetweenChecked(addr, a, b) ==
+    [ok |-> ValidInterval(a, b) /\ addr \in 1..MaxAddr,
+     writes |-> IF ValidInterval(a, b) /\ addr \in 1..MaxAddr
+                THEN WritesBetween(addr, a, b) ELSE {}]
+
+\* Half-open lifetimes; -1 denotes an open end. Empty lifetimes are not live.
+\* @type: Int => Set(Int);
+LiveThreads(t) ==
+    {i \in 1..MaxThreads : i <= Len(threads)
+       /\ threads[i].start <= t
+       /\ (threads[i].end = -1 \/ t < threads[i].end)}
 
 \* Indices of open calls on thread thr.
 OpenCallIdx(thr) ==
@@ -194,10 +229,10 @@ TraceOrdered ==
 CursorBounded ==
     /\ 0 <= cursor /\ cursor <= frontier /\ frontier <= MaxPos
 
-\* Snapshot views are faithful: an unwritten cell shows its initial
-\* contents at every position; a written cell shows its last write.
-\* This is what licenses treating timeline[t] as a time-point snapshot.
-SnapshotConsistent ==
+\* The recorded-memory view agrees with the last covering payload write,
+\* falling back to the initial value only when there is no covering write.
+\* This is a byte-value property, not complete execution-state recovery.
+MemoryViewConsistent ==
     \A a \in 1..MaxAddr :
       \A t \in 0..MaxPos :
         t <= frontier =>
@@ -238,13 +273,61 @@ CallsWithinThreads ==
              /\ threads[calls[i].thr].end = -1
                   \/ calls[i].end <= threads[calls[i].thr].end
 
+\* Exact exceptions cannot persist at later positions merely because no newer
+\* exception exists. Historical queries retain those records explicitly.
+ExactEventQueries ==
+    \A t \in 0..MaxPos, i \in 1..MaxEvents :
+      (t <= frontier /\ i <= Len(ev_pos)) =>
+        /\ (i \in EventsAt(t) <=> ev_pos[i] = t)
+        /\ (i \in ExceptionsAt(t) <=>
+              ev_pos[i] = t /\ ev_kind[i] = "EXCEPTION")
+        /\ (i \in ExceptionsThrough(t) <=>
+              ev_pos[i] <= t /\ ev_kind[i] = "EXCEPTION")
+        /\ (i \in ExceptionsAt(t) => i \in ExceptionsThrough(t))
+
+\* Constant domains include both sides of the valid temporal/address domain,
+\* so this checks rejection as well as valid and equal-endpoint intervals.
+QueryBounds ==
+    \A a \in (-1)..(MaxPos + 1), b \in (-1)..(MaxPos + 1) :
+      /\ (EventsBetweenChecked(a, b).ok <=> ValidInterval(a, b))
+      /\ (~ValidInterval(a, b) => EventsBetweenChecked(a, b).events = {})
+      /\ \A addr \in 0..(MaxAddr + 1) :
+           /\ (WritesBetweenChecked(addr, a, b).ok <=>
+                 ValidInterval(a, b) /\ addr \in 1..MaxAddr)
+           /\ (~WritesBetweenChecked(addr, a, b).ok =>
+                 WritesBetweenChecked(addr, a, b).writes = {})
+
+QueryIntervalEndpoints ==
+    /\ \A t \in 0..MaxPos : t <= frontier =>
+         /\ EventsBetweenChecked(t, t).ok
+         /\ EventsBetweenChecked(t, t).events = {}
+         /\ \A addr \in 1..MaxAddr :
+              /\ WritesBetweenChecked(addr, t, t).ok
+              /\ WritesBetweenChecked(addr, t, t).writes = {}
+    /\ \A a \in 0..MaxPos, b \in 0..MaxPos : ValidInterval(a, b) =>
+         /\ EventsBetweenChecked(a, b).events \cap EventsAt(a) = {}
+         /\ (a < b => EventsAt(b) \subseteq EventsBetweenChecked(a, b).events)
+
+ThreadViewEndpoints ==
+    \A i \in 1..MaxThreads : i <= Len(threads) =>
+      /\ (i \in LiveThreads(threads[i].start) <=>
+            threads[i].end = -1 \/ threads[i].start < threads[i].end)
+      /\ (threads[i].end # -1 => i \notin LiveThreads(threads[i].end))
+      /\ \A t \in 0..MaxPos : t <= frontier =>
+           (i \in LiveThreads(t) <=>
+             threads[i].start <= t /\ (threads[i].end = -1 \/ t < threads[i].end))
+
 TimelineInvariant ==
     /\ TraceOrdered
     /\ CursorBounded
-    /\ SnapshotConsistent
+    /\ MemoryViewConsistent
     /\ ThreadIntervals
     /\ CallNesting
     /\ CallsWithinThreads
+    /\ ExactEventQueries
+    /\ QueryBounds
+    /\ QueryIntervalEndpoints
+    /\ ThreadViewEndpoints
 
 \* ---- Specification ----
 

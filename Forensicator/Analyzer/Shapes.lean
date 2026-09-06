@@ -46,12 +46,13 @@ private def detect (candidates : List CandidatePointer) : List ShapeGroup :=
        members := members.reverse } : ShapeGroup)
   groups.mergeSort fun a b => decide (b.memberCount ≤ a.memberCount)
 
-/-- Clusters heap nodes by structural signature (offset→target_class edges). -/
+/-- Clusters pointer-bearing nodes by structural signature (offset→target_class edges). -/
 def analyzer : Analyzer where
   name := "shapes"
-  description := "Clusters heap nodes by structural signature (offset→target_class edges)"
-  run _ctx dump space :=
+  description := "Clusters pointer-bearing nodes by structural signature (offset→target_class edges)"
+  run _ctx input :=
+    let space := input.space
     { AnalyzerOutput.new "shapes" with
-      shapeClusters := detect (pointerScan space dump [PointerPattern.heapReferences]) }
+      shapeClusters := detect (pointerScan space input [PointerPattern.heapReferences]) }
 
 end Forensicator.Analyzer.Shapes

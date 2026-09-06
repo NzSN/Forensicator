@@ -188,21 +188,21 @@ def runAll : IO UInt32 := do
     ((tr.writesBetween 0x1004 1 0 3).length == 2
       && (tr.writesBetween 0x1004 1 0 1).length == 1
       && (tr.writesBetween 0x1005 1 0 1).length == 1)
-  check ctx "trace snapshot cursor bounded"
-    ((tr.snapshot 4).isNone && (tr.snapshot 3).isSome)
+  check ctx "trace execution point cursor bounded"
+    ((tr.analysisAt 4).isNone && (tr.analysisAt 3).isSome)
   let trE : Model.Trace := { tr with events := [
     { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "app.exe", size := 0x1000,
       provenance := { streamType := Model.TTFX_STREAM_TYPE } },
     { pos := 2, kind := .Exception, code := 0xC0000005, address := 0xDEAD, threadId := 7,
       provenance := { streamType := Model.TTFX_STREAM_TYPE } }] }
-  check ctx "trace snapshot materializes memory/modules/exception"
-    (match trE.snapshot 2, trE.snapshot 0 with
+  check ctx "trace execution point materializes memory/modules/exception"
+    (match trE.analysisAt 2, trE.analysisAt 0 with
      | some snap, some snap0 =>
-       snap.dump.modules.length == 1
-         && snap.dump.modules.head?.map (·.name == "app.exe") == some true
-         && snap.dump.exception.map (fun e => e.code == 0xC0000005 && e.threadId == 7) == some true
+       snap.modules.length == 1
+         && snap.modules.head?.map (·.name == "app.exe") == some true
+         && snap.exception.map (fun e => e.code == 0xC0000005 && e.threadId == 7) == some true
          && snap.space.read 0x1004 1 == some (ba [0x33])
-         && snap0.dump.exception.isNone && snap0.dump.modules.isEmpty
+         && snap0.exception.isNone && snap0.modules.isEmpty
      | _, _ => false)
   let trU : Model.Trace := { tr with events := [
     { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "app.exe", size := 0x1000,
@@ -210,21 +210,21 @@ def runAll : IO UInt32 := do
     { pos := 2, kind := .ModuleUnload, address := 0x70000000,
       provenance := { streamType := Model.TTFX_STREAM_TYPE } }] }
   check ctx "trace module unload removes"
-    ((trU.snapshot 1).map (·.dump.modules.length) == some 1
-      && (trU.snapshot 2).map (·.dump.modules.length) == some 0)
-  check ctx "trace clean snapshot no anomalies"
-    ((tr.snapshot 3).map (·.dump.anomalies.isEmpty) == some true)
+    ((trU.analysisAt 1).map (·.modules.length) == some 1
+      && (trU.analysisAt 2).map (·.modules.length) == some 0)
+  check ctx "trace clean execution point no anomalies"
+    ((tr.analysisAt 3).map (·.anomalies.isEmpty) == some true)
   let trO : Model.Trace := { tr with events := [
     { pos := 1, kind := .ModuleLoad, address := 0x70000000, name := "m1", size := 0x1000,
       provenance := { streamType := Model.TTFX_STREAM_TYPE } },
     { pos := 2, kind := .ModuleLoad, address := 0x70000800, name := "m2", size := 0x1000,
       provenance := { streamType := Model.TTFX_STREAM_TYPE } }] }
   check ctx "trace overlapping module anomaly"
-    (match trO.snapshot 2, trO.snapshot 1 with
+    (match trO.analysisAt 2, trO.analysisAt 1 with
      | some snap, some snap1 =>
-       snap.dump.modules.length == 2
-         && (snap.dump.anomalies.filter (·.description == "overlapping module")).length == 1
-         && snap1.dump.anomalies.isEmpty
+       snap.modules.isEmpty
+         && (snap.anomalies.filter (·.description == "overlapping module")).length == 1
+         && snap1.anomalies.isEmpty
      | _, _ => false)
   check ctx "trace thread_at"
     (tr.threadAt 7 2 == some { start := 0, stop := none }
@@ -711,26 +711,32 @@ def runAll : IO UInt32 := do
     let exc : Model.ExceptionInfo :=
       { code := 0xC0000005, address := codeVa, threadId := 1
         parameters := [0, faultVa], context := some regs, provenance := tprov }
-    (({ exception := some exc, annotations := anns } : Model.Dump), space)
+    -- These fixtures positively observed a reserved fault address. Sparse
+    -- byte coverage alone no longer establishes that a page is uncommitted.
+    let mappingEvidence : List Model.MemoryInfoEntry :=
+      if (space.regionAt faultVa).isNone then
+        [{ vaStart := faultVa, size := 1, protection := 0, state := .Reserve, memType := .Private }]
+      else []
+    (({ exception := some exc, annotations := anns, memoryInfo := mappingEvidence } : Model.Dump), space)
   let faultUnc : UInt64 := cage2 + 0xEEC1190A
   -- strong: movzx r12d, BYTE [r14+r12*1+0xa] with r14=cage (nicholas crash)
   let (dStrong, sStrong) := mkCauseFixture [0x47, 0x0F, 0xB6, 0x64, 0x26, 0x0A] 0x7FF700000000 faultUnc true
-  let dgStrong := Analyzer.Cause.diagnose dStrong sStrong
+  let dgStrong := Analyzer.Cause.diagnose (Model.AnalysisInput.ofDump dStrong sStrong) sStrong
   check ctx "cause cage: decompression idiom is V8TagConfusion/High"
     (dgStrong.verdict == .v8TagConfusion && dgStrong.confidence == .high)
   -- weak: fault in cage uncommitted but the instruction is not the idiom
   let (dWeak, sWeak) := mkCauseFixture [0x48, 0x8B, 0x00] 0x7FF700000000 faultUnc true
-  let dgWeak := Analyzer.Cause.diagnose dWeak sWeak
+  let dgWeak := Analyzer.Cause.diagnose (Model.AnalysisInput.ofDump dWeak sWeak) sWeak
   check ctx "cause cage: non-idiom is DecompressedGarbagePointer/Medium"
     (dgWeak.verdict == .decompressedGarbagePointer && dgWeak.confidence == .medium)
   -- non-firing: fault covered by a committed cage region -> falls through
   let (dCom, sCom) := mkCauseFixture [0x48, 0x8B, 0x00] 0x7FF700000000 (cage2 + 0x800) true
-  let dgCom := Analyzer.Cause.diagnose dCom sCom
+  let dgCom := Analyzer.Cause.diagnose (Model.AnalysisInput.ofDump dCom sCom) sCom
   check ctx "cause cage: committed fault does not fire the rule"
     (dgCom.verdict == .wildAccess)
   -- non-firing: no cage annotation -> no cage reasoning at all
   let (dNoAnn, sNoAnn) := mkCauseFixture [0x47, 0x0F, 0xB6, 0x64, 0x26, 0x0A] 0x7FF700000000 faultUnc false
-  let dgNoAnn := Analyzer.Cause.diagnose dNoAnn sNoAnn
+  let dgNoAnn := Analyzer.Cause.diagnose (Model.AnalysisInput.ofDump dNoAnn sNoAnn) sNoAnn
   check ctx "cause cage: no cage annotation does not fire the rule"
     (dgNoAnn.verdict == .wildAccess)
 
@@ -744,20 +750,20 @@ def runAll : IO UInt32 := do
     { name := "electron.exe", baseVa := 0x140000000, size := 0x10000, provenance := tprov }
   let (dSym0, sSym) := mkCauseFixture [0x47, 0x0F, 0xB6, 0x64, 0x26, 0x0A] 0x140001000 faultUnc true
   let dSym : Model.Dump := { dSym0 with modules := [mod] }
-  let dgSym := Analyzer.Cause.diagnoseWith (some pubs) dSym sSym
+  let dgSym := Analyzer.Cause.diagnoseWith (some pubs) (Model.AnalysisInput.ofDump dSym sSym) sSym
   check ctx "cause cage: rule evidence carries faulting-IP symbol (W1.4)"
     (dgSym.verdict == .v8TagConfusion && dgSym.confidence == .high
       && dgSym.evidence.any (· == "faulting IP 0x1000 = Builtins_TypedArrayMergeSort+0x0")
       && dgSym.evidence.any (· == "crash site is inside embedded builtin Builtins_TypedArrayMergeSort+0x0 — V8-internal defect evidence"))
   let (dWSym0, sWSym) := mkCauseFixture [0x48, 0x8B, 0x00] 0x140001030 faultUnc true
-  let dgWSym := Analyzer.Cause.diagnoseWith (some pubs) { dWSym0 with modules := [mod] } sWSym
+  let dgWSym := Analyzer.Cause.diagnoseWith (some pubs) (Model.AnalysisInput.ofDump { dWSym0 with modules := [mod] } sWSym) sWSym
   check ctx "cause cage: weak form carries faulting-IP symbol too (W1.4)"
     (dgWSym.verdict == .decompressedGarbagePointer
       && dgWSym.evidence.any (· == "faulting IP 0x1030 = Builtins_TypedArrayPrototypeFindLastIndex+0xc"))
-  let dgNoPubs := Analyzer.Cause.diagnoseWith none dSym sSym
+  let dgNoPubs := Analyzer.Cause.diagnoseWith none (Model.AnalysisInput.ofDump dSym sSym) sSym
   check ctx "cause cage: no publics means no symbol lines (W1.4)"
     (!dgNoPubs.evidence.any (·.startsWith "faulting IP"))
-  let aout := Analyzer.Cause.analyzer.run { publics := some pubs } dSym sSym
+  let aout := Analyzer.Cause.analyzer.run { publics := some pubs } (Model.AnalysisInput.ofDump dSym sSym)
   let ipCount := match aout.custom.find? (·.1 == "crash_diagnosis") with
     | some (_, .obj fields) =>
       match fields.find? (·.1 == "evidence") with
@@ -814,7 +820,7 @@ def runAll : IO UInt32 := do
     annotations := [("ver", "41.0.0"), ("v8_isolate_address", "0x1001C0000"),
                     ("v8_ro_space_firstpage_address", "0x100000000")] }
   check ctx "v8 js frame resolution (synthetic heap)"
-    (match (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) jsDump jsSpace |>.custom with
+    (match (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) (Model.AnalysisInput.ofDump jsDump jsSpace) |>.custom with
      | cs =>
        match cs.find? (·.1 == "v8_frames") with
        | some (_, .arr (f0 :: _)) =>
@@ -879,7 +885,7 @@ def runAll : IO UInt32 := do
                   tebVa := 0, provenance := {} }]
     annotations := [("ver", "41.0.0"), ("v8_isolate_address", "0x1001C0000"),
                     ("v8_ro_space_firstpage_address", "0x100000000")] }
-  let jitOut := (Analyzer.Jit.analyzer).run ({ } : SymbolsCtx) jsDumpJit jsSpaceJit
+  let jitOut := (Analyzer.Jit.analyzer).run ({ } : SymbolsCtx) (Model.AnalysisInput.ofDump jsDumpJit jsSpaceJit)
   check ctx "jit frame count (synthetic FeedbackVector)"
     (match jitOut.custom.find? (·.1 == "jit_frame_count") with
      | some (_, .int n) => n == 1
@@ -1083,7 +1089,7 @@ def runAll : IO UInt32 := do
     , mkStack eptCage ]
   let eptSpace := mkEptDump eptRegions
   let eptDump := mkEptDumpDoc "0x200000000"
-  let eptOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) eptDump eptSpace
+  let eptOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) (Model.AnalysisInput.ofDump eptDump eptSpace)
   check ctx "v8 ept: external name + script url + script line (synthetic EPT)"
     (match v8Frames eptOut with
      | f0 :: _ =>
@@ -1120,7 +1126,7 @@ def runAll : IO UInt32 := do
     , mkStack bCage ]
   let bSpace := mkEptDump bRegions
   let bDump := mkEptDumpDoc "0x400000000"
-  let bOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) bDump bSpace
+  let bOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) (Model.AnalysisInput.ofDump bDump bSpace)
   check ctx "v8 ept: uncached external resolves via resource+16 fallback"
     (match v8Frames bOut with
      | f0 :: _ =>
@@ -1157,7 +1163,7 @@ def runAll : IO UInt32 := do
     , mkStack cCage ]
   let cSpace := mkEptDump cRegions
   let cDump := mkEptDumpDoc "0x600000000"
-  let cOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) cDump cSpace
+  let cOut := (Analyzer.V8.analyzer).run ({ } : SymbolsCtx) (Model.AnalysisInput.ofDump cDump cSpace)
   check ctx "v8 ept: isolate-resident false table rejected"
     (match v8Frames cOut with
      | f0 :: _ =>

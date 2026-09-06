@@ -50,10 +50,180 @@ structure ProxySession where
   /-- set on a session-fatal transport/protocol error (plan C4: ERROR
       frames, framing violations, EOF are session-fatal — fail closed). -/
   dead : IO.Ref (Option String)
+  /-- Evidence identity is the loaded trace path, independent of cursor. -/
+  source : String := ""
 
 /-- Above this many outstanding page-index fetches, `ensurePages` collapses
     to one wide window (plan task 3 fan-out limit). -/
 def fanoutLimit : Nat := 256
+
+/-- v1 cache intervals need the representable sentinel `frontier + 1`. -/
+def validateFrontier (frontier : Position) : Except String Unit :=
+  if frontier == 0xFFFFFFFFFFFFFFFF then
+    .error "proxy v1 does not support the maximum UInt64 frontier"
+  else .ok ()
+
+/-- Validate before IO. A v1 index window cannot express an exclusive end
+    of 2^64, so that boundary is unsupported rather than silently wrapped. -/
+def validateAddressRange (va : VA) (len : UInt64) : Except String Unit :=
+  if va.toNat + len.toNat > 2^64 - 1 then
+    .error "proxy address range exceeds the representable exclusive end"
+  else .ok ()
+
+def validateWriteQuery (frontier : Position) (va : VA) (len : UInt64)
+    (t1 t2 : Position) : Except String Unit := do
+  validateFrontier frontier
+  if t2 < t1 then throw "reversed timeline interval"
+  if frontier < t1 || frontier < t2 then throw "timeline interval beyond frontier"
+  validateAddressRange va len
+
+/-- A frontier write has no observable post-write engine position. Its page
+    is unknown in execution views, even if the wire cache holds clamped bytes. -/
+def unobservableFrontierWrite (st : IndexState) (page : VA)
+    (t frontier : Position) : Bool :=
+  t == frontier && st.records.any (fun w => w.pos == frontier && w.overlapsPage page)
+
+/-- Pure page knowledge, including positive absence. A future P3 piece cannot
+    answer an earlier query and cached bytes never outrun index knowledge. -/
+def pageKnowledge (c : Jigsaw) (st : IndexState) (page : VA)
+    (t frontier : Position) : Model.MemoryRead :=
+  if frontier == 0xFFFFFFFFFFFFFFFF || frontier < t || !st.known page t
+      || unobservableFrontierWrite st page t frontier then .unknown
+  else match c.bytesAt page t with
+    | some bytes => if bytes.size == pageSize.toNat then .known bytes else .unknown
+    | none => if c.knownAbsentAt page t then .absent else .unknown
+
+/-- Immutable request result. It owns bytes as each page is obtained, so cache
+    capacity changes the cost of later requests rather than this result. -/
+structure PageMaterialization where
+  pages : List (VA × ByteArray) := []
+  absent : List Model.AddressRange := []
+  anomalies : List Anomaly := []
+  seen : Std.HashSet UInt64 := {}
+  deriving Inhabited
+
+def PageMaterialization.hasPage (m : PageMaterialization) (page : VA) : Bool :=
+  m.seen.contains page
+
+def PageMaterialization.add (m : PageMaterialization) (page : VA)
+    (observation : Model.MemoryRead) : PageMaterialization :=
+  if m.hasPage page then m
+  else match observation with
+    | .known bytes =>
+      if pageBaseOf page != page || bytes.size != pageSize.toNat then
+        { m with anomalies := (Anomaly.ofProv { streamType := PROXY_STREAM_TYPE }
+            "invalid materialized page") :: m.anomalies }
+      else { m with pages := (page, bytes) :: m.pages, seen := m.seen.insert page }
+    | .absent =>
+      { m with
+        absent := { va := page, size := pageSize } :: m.absent
+        seen := m.seen.insert page }
+    | .unknown => m
+
+/-- Controllable acquisition seam used by explicit materialization and tests.
+    The accumulator is updated before requesting the next page. -/
+def collectPages (pages : List VA) (read : VA → IO Model.MemoryRead)
+    (initial : PageMaterialization := {}) : IO PageMaterialization := do
+  let mut result := initial
+  for page in pages do
+    if !result.hasPage page then
+      result := result.add page (← read page)
+  pure result
+
+def cachedMaterialization (c : Jigsaw) (st : IndexState)
+    (t frontier : Position) : PageMaterialization :=
+  c.lru.foldl (init := {}) fun result page =>
+    result.add page (pageKnowledge c st page t frontier)
+
+/-- Sorted page observations become contiguous regions. Unknown mapping flags
+    and classification stay unknown; successful byte reads prove only bytes. -/
+def PageMaterialization.memory (m : PageMaterialization) : Model.MemoryState := Id.run do
+  let sorted := m.pages.mergeSort fun a b => decide (a.1 ≤ b.1)
+  let merged := (sorted.foldl (init := ([] : List (VA × ByteArray))) fun acc (base, data) =>
+    match acc with
+    | (b0, d0) :: rest =>
+      if b0.toNat + d0.size == base.toNat then (b0, d0 ++ data) :: rest
+      else (base, data) :: acc
+    | [] => [(base, data)]).reverse
+  let regions := merged.map fun (base, data) =>
+    ({ vaStart := base, size := UInt64.ofNat data.size, data
+       protection := 0, classification := .Other } : Spec.AddressRegion)
+  return { space := { regions, maxRegions := max 1000000 regions.length }
+           absentRanges := m.absent, mappingCoverage := .unknown
+           byteCoverage := .incomplete }
+
+/-- Pure assembly shared by cache-only views and prepared results. No capture
+    aggregate is constructed and no system or runtime observations are invented. -/
+def executionView (skel : Model.Trace) (source : String) (t : Position)
+    (st : IndexState) (cache : Jigsaw) (materialized : PageMaterialization) :
+    Option Model.AnalysisInput := do
+  if skel.frontier == 0xFFFFFFFFFFFFFFFF then none else do
+    let input ← skel.analysisAt t source
+    let frontierAnomalies :=
+      if t == skel.frontier && st.records.any (fun w => w.pos == t) then
+        [Anomaly.ofProv { streamType := PROXY_STREAM_TYPE }
+          "frontier writes have no observable post-write state; affected pages remain unknown"]
+      else []
+    let point := { input.point with
+      memory := materialized.memory
+      anomalies := input.point.anomalies ++ st.anomalies ++ cache.anomalies
+        ++ materialized.anomalies ++ frontierAnomalies }
+    pure { input with point }
+
+/-- Enumerate only explicitly requested pages. Validate the whole request before
+    acquiring anything; huge requests and the unrepresentable last page fail. -/
+def requestedPages (ranges : List Model.AddressRange) : Except String (List VA) := do
+  let mut pages : List VA := []
+  for r in ranges do
+    validateAddressRange r.va r.size
+    if r.size != 0 then
+      let first := pageBaseOf r.va
+      let last := pageBaseOf (UInt64.ofNat (r.va.toNat + r.size.toNat - 1))
+      if last.toNat + pageSize.toNat > 2^64 - 1 then
+        throw "proxy v1 cannot index the final UInt64 address page"
+      let count := (last.toNat - first.toNat) / pageSize.toNat + 1
+      if count > maxMarkPages.toNat then
+        throw s!"requested range exceeds {maxMarkPages} pages"
+      pages := pages ++ (List.range count).map (fun i => first + UInt64.ofNat (i * pageSize.toNat))
+  let sorted := pages.mergeSort fun a b => decide (a ≤ b)
+  pure ((sorted.foldl (init := ([] : List VA)) fun acc p =>
+    if acc.head? == some p then acc else p :: acc).reverse)
+
+/-- Fetch/cache with a controllable reader. The returned observation is taken
+    before eviction, including when cache capacity is zero. -/
+def fetchPageWith (cache : IO.Ref Jigsaw) (st : IndexState) (frontier : Position)
+    (page : VA) (t : Position) (read : Position → IO (Option ByteArray)) :
+    IO Model.MemoryRead := do
+  match validateFrontier frontier with
+  | .error e => throw (IO.Error.userError e)
+  | .ok () => pure ()
+  if frontier < t then throw (IO.Error.userError "position beyond frontier")
+  if pageBaseOf page != page || page.toNat + pageSize.toNat > 2^64 - 1 then
+    throw (IO.Error.userError "proxy page is unaligned or has an unsupported exclusive end")
+  if !st.known page t then throw (IO.Error.userError "page write index is incomplete")
+  if unobservableFrontierWrite st page t frontier then return .unknown
+  let record (observedAt : Position) (outcome : Option ByteArray) : IO Model.MemoryRead := do
+    if let some bytes := outcome then
+      if bytes.size != pageSize.toNat then
+        throw (IO.Error.userError "proxy protocol error: invalid page size")
+    cache.modify fun c => c.insertFetched page observedAt frontier outcome st
+    let observation := ({} : Jigsaw).insertFetched page observedAt frontier outcome st
+    pure (pageKnowledge observation st page t frontier)
+  match ← read (fetchPosition t frontier) with
+  | some bytes => record t (some bytes)
+  | none =>
+    if st.lastKnownWrite page t != 0 then
+      match fallbackPosition st page t frontier with
+      | some e2 =>
+        match ← read e2 with
+        | some bytes =>
+          let _ ← record (e2 - 1) (some bytes)
+          -- The first response established absence at the requested point.
+          -- Retain it even though the cache now stores useful future bytes.
+          pure .absent
+        | none => record t none
+      | none => record t none
+    else record t none
 
 namespace ProxySession
 
@@ -155,6 +325,9 @@ def spawn (tracePath : String) : IO ProxySession := do
       | .ok (.error msg) => throw (IO.Error.userError s!"proxy refused HELLO: {msg}")
       | .ok _ => throw (IO.Error.userError "proxy handshake: expected HELLO_ACK")
       | .error e => throw (IO.Error.userError s!"proxy protocol error: {e}")
+    match validateFrontier frontier with
+    | .error e => throw (IO.Error.userError e)
+    | .ok () => pure ()
     let (t2, p2) ← recvFrame child
     let threads ← match parseResponse t2 p2 with
       | .ok (.threads ts) => pure ts
@@ -165,7 +338,8 @@ def spawn (tracePath : String) : IO ProxySession := do
       | .ok (.events es) => pure es
       | .ok (.error msg) => throw (IO.Error.userError s!"proxy error: {msg}")
       | _ => throw (IO.Error.userError "proxy handshake: expected EVENTS")
-    pure { child, frontier, skel := skeleton frontier threads events, index, cache, dead }
+    pure { child, frontier, skel := skeleton frontier threads events, index, cache, dead
+           source := tracePath }
   catch e =>
     try child.kill catch _ => pure ()
     throw e
@@ -176,15 +350,13 @@ def fetchWindow (ps : ProxySession) (win : IndexWindow) : IO Unit := do
   | .index recs => ps.index.modify fun st => st.mergeWindow win recs ps.frontier
   | _ => throw (IO.Error.userError "proxy protocol error: expected INDEX")
 
-/-- Clamp a VA-range end into u64 (Nat-lifted, documented: a range crossing
-    2⁶⁴ loses its top byte — nonsense input, fail-bounded not fail-wild). -/
-private def rangeEnd (va : VA) (len : UInt64) : VA :=
-  UInt64.ofNat (min (va.toNat + len.toNat) (2^64 - 1))
-
 /-- Fetch write metadata for `[va, va+len)` over `[0, frontier]` (one
     window). Pages already known at the frontier are skipped only when the
     whole range is known; the window merge dedups regardless. -/
 def ensureRange (ps : ProxySession) (va : VA) (len : UInt64) : IO Unit := do
+  match validateAddressRange va len with
+  | .error e => throw (IO.Error.userError e)
+  | .ok () => pure ()
   if len == 0 then return
   let st ← ps.index.get
   let lastByte := va + (len - 1)
@@ -193,13 +365,17 @@ def ensureRange (ps : ProxySession) (va : VA) (len : UInt64) : IO Unit := do
     && (List.range pageCount).all fun i =>
       st.known (pageBaseOf va + UInt64.ofNat (i * pageSize.toNat)) ps.frontier
   if allKnown then return
-  ps.fetchWindow { vaLo := va, vaHi := rangeEnd va len, t1 := 0, t2 := ps.frontier }
+  ps.fetchWindow { vaLo := va, vaHi := UInt64.ofNat (va.toNat + len.toNat)
+                   t1 := 0, t2 := ps.frontier }
 
 /-- Ensure the index knows every page in `pages` (page bases) up to the
     frontier (design D2 dependency rule). Missing pages are fetched as
     consecutive-run windows; beyond `fanoutLimit` pages, one wide window
     `[minBase, maxBase + pageSize)` instead. -/
 def ensurePages (ps : ProxySession) (pages : List VA) : IO Unit := do
+  for page in pages do
+    if pageBaseOf page != page || page.toNat + pageSize.toNat > 2^64 - 1 then
+      throw (IO.Error.userError "proxy page is unaligned or has an unsupported exclusive end")
   let st ← ps.index.get
   let sorted := (pages.filter fun p => !st.known p ps.frontier).mergeSort
     fun a b => decide (a ≤ b)
@@ -241,24 +417,23 @@ private def readPageRaw (ps : ProxySession) (page : VA) (engPos : Position) :
     is cached at the fallback's honest model position), ABSENT point
     otherwise. -/
 def fetchPage (ps : ProxySession) (page : VA) (t : Position) : IO Unit := do
+  if ps.frontier < t then throw (IO.Error.userError "position beyond frontier")
   ps.ensurePages [page]
   let st ← ps.index.get
-  match ← ps.readPageRaw page (fetchPosition t ps.frontier) with
-  | some bytes =>
-    ps.cache.modify fun c => c.insertFetched page t ps.frontier (some bytes) st
-  | none =>
-    if st.lastKnownWrite page t != 0 then
-      match fallbackPosition st page t ps.frontier with
-      | some e2 =>
-        match ← ps.readPageRaw page e2 with
-        | some bytes2 =>
-          ps.cache.modify fun c => c.insertFetched page (e2 - 1) ps.frontier (some bytes2) st
-        | none =>
-          ps.cache.modify fun c => c.insertFetched page t ps.frontier none st
-      | none =>
-        ps.cache.modify fun c => c.insertFetched page t ps.frontier none st
-    else
-      ps.cache.modify fun c => c.insertFetched page t ps.frontier none st
+  let _ ← fetchPageWith ps.cache st ps.frontier page t (ps.readPageRaw page)
+  pure ()
+
+/-- Acquire one page's knowledge, returning fetched evidence independently of
+    cache retention. This is the explicit two-phase read used by preparation. -/
+def readPageAt (ps : ProxySession) (page : VA) (t : Position) : IO Model.MemoryRead := do
+  if ps.frontier < t then throw (IO.Error.userError "position beyond frontier")
+  let st ← ps.index.get
+  match pageKnowledge (← ps.cache.get) st page t ps.frontier with
+  | .known bytes => pure (.known bytes)
+  | .absent => pure .absent
+  | .unknown =>
+    ps.ensurePages [page]
+    fetchPageWith ps.cache (← ps.index.get) ps.frontier page t (ps.readPageRaw page)
 
 /-- Run a two-phase action under the session-fatal policy: a dead proxy
     refuses work; a transport/protocol error poisons the session (fail
@@ -286,17 +461,20 @@ def ensureFullIndex (ps : ProxySession) : IO Unit := do
 def valueAt (ps : ProxySession) (va : VA) (t : Position) : IO (Option UInt8) := do
   if ps.frontier < t then return none
   let page := pageBaseOf va
-  if (← ps.cache.get).gapAt page t then ps.fetchPage page t
-  match (← ps.cache.get).bytesAt page t with
-  | some bytes =>
+  match ← ps.readPageAt page t with
+  | .known bytes =>
     let off := (va - page).toNat
     pure (if off < bytes.size then some (bytes.get! off) else none)
-  | none => pure none
+  | _ => pure none
 
 /-- Writes overlapping `[va, va+len)` in `(t1, t2]` (two-phase: index
     window fetch, then the pure filter). -/
 def writesBetween (ps : ProxySession) (va : VA) (len : UInt64) (t1 t2 : Position) :
     IO (List Model.WriteRecord) := do
+  match validateWriteQuery ps.frontier va len t1 t2 with
+  | .error e => throw (IO.Error.userError e)
+  | .ok () => pure ()
+  if t1 == t2 || len == 0 then return []
   ps.ensureRange va len
   pure ((← ps.index.get).writesBetween va len t1 t2)
 
@@ -308,18 +486,21 @@ def writesBetween (ps : ProxySession) (va : VA) (len : UInt64) (t1 t2 : Position
     Implementation notes). Capped at 4096 pages per record. -/
 def writeBytes (ps : ProxySession) (w : Model.WriteRecord) : IO (Option ByteArray) := do
   if w.len == 0 then return some w.data
+  if ps.frontier ≤ w.pos then return none
   let endVa := w.endVaNat
   if endVa ≤ w.va.toNat then return none
   let firstPage := pageBaseOf w.va
   let pageCount := (endVa - 1 - firstPage.toNat) / pageSize.toNat + 1
   if pageCount > 4096 then return none
-  let st ← ps.index.get
   let mut out := ByteArray.empty
   for i in [:pageCount] do
     let pbase := firstPage + UInt64.ofNat (i * pageSize.toNat)
     let subLo := max w.va.toNat pbase.toNat
     let subHi := min endVa (pbase.toNat + pageSize.toNat)
     ps.fetchPage pbase w.pos
+    -- Fetching this page may have discovered writes needed by the fallback
+    -- overlap check; inspect the updated index, never the pre-fetch snapshot.
+    let st ← ps.index.get
     match (← ps.cache.get).pieces[pbase]? with
     | none => return none
     | some pc =>
@@ -336,40 +517,40 @@ def writeBytes (ps : ProxySession) (w : Model.WriteRecord) : IO (Option ByteArra
       else return none
   pure (some out)
 
-/-- Two-phase snapshot (design D4): full index → referenced-closure page
-    set at `t` ∪ probed pages → batch-fetch gaps at `t` → pure
-    materialization. Regions are derived, never enumerated (P3): committed
-    pages only, adjacent pages merged, protection approximate (R|W). -/
-def snapshotAt (ps : ProxySession) (t : Position) : IO (Option Model.Snapshot) := do
+/-- Cache-only point view: reads references and eager metadata, issuing no
+    index or page request. Positive absence and unknown bytes remain distinct. -/
+def viewAt (ps : ProxySession) (t : Position) : IO (Option Model.AnalysisInput) := do
+  if ps.frontier < t then return none
+  let st ← ps.index.get
+  let cache ← ps.cache.get
+  pure (executionView ps.skel ps.source t st cache
+    (cachedMaterialization cache st t ps.frontier))
+
+/-- Explicit targeted preparation. All ranges are validated before IO; only
+    their page indexes are discovered. Already observed pages are retained in
+    the result even if acquiring the request evicts them from the cache. -/
+def materializeRanges (ps : ProxySession) (t : Position)
+    (ranges : List Model.AddressRange) : IO (Option Model.AnalysisInput) := do
+  if ps.frontier < t then return none
+  let pages ← match requestedPages ranges with
+    | .ok pages => pure pages
+    | .error e => throw (IO.Error.userError e)
+  let initial := cachedMaterialization (← ps.cache.get) (← ps.index.get) t ps.frontier
+  ps.ensurePages pages
+  let result ← collectPages pages (fun page => ps.readPageAt page t) initial
+  pure (executionView ps.skel ps.source t (← ps.index.get) (← ps.cache.get) result)
+
+/-- Explicit batch-analyzer preparation: discover the write-touched closure
+    through `t` and retain already probed evidence. This is a partial discovery
+    policy, never a claim that untouched memory is absent. -/
+def prepareAnalysisAt (ps : ProxySession) (t : Position) :
+    IO (Option Model.AnalysisInput) := do
   if ps.frontier < t then return none
   ps.ensureFullIndex
   let st ← ps.index.get
-  let closure := st.closurePages t
-  for p in closure do
-    if (← ps.cache.get).gapAt p t then ps.fetchPage p t
-  let c ← ps.cache.get
-  let closureSet : Std.HashSet UInt64 :=
-    closure.foldl (init := ({} : Std.HashSet UInt64)) (·.insert ·)
-  let probed := c.lru.filter fun p =>
-    !(closureSet.contains p) && c.knownAt p t
-  let mut segs : List (VA × ByteArray) := []
-  for p in closure ++ probed do
-    match c.bytesAt p t with
-    | some b => segs := (p, b) :: segs
-    | none => pure ()
-  let sorted := segs.mergeSort fun a b => decide (a.1 ≤ b.1)
-  let merged := (sorted.foldl (init := ([] : List (VA × ByteArray))) fun acc (base, data) =>
-    match acc with
-    | (b0, d0) :: rest =>
-      if b0.toNat + d0.size == base.toNat then (b0, d0 ++ data) :: rest
-      else (base, data) :: acc
-    | [] => [(base, data)]).reverse
-  let prov : Provenance := { streamType := PROXY_STREAM_TYPE }
-  let regions := merged.map fun (base, data) =>
-    ({ vaStart := base, size := UInt64.ofNat data.size, data
-       protection := 3, state := .Commit, memType := .Private
-       provenance := prov, regionClass := some .Private } : Model.MemoryRegionInfo)
-  pure (({ ps.skel with initMem := regions } : Model.Trace).snapshot t)
+  let initial := cachedMaterialization (← ps.cache.get) st t ps.frontier
+  let result ← collectPages (st.closurePages t) (fun page => ps.readPageAt page t) initial
+  pure (executionView ps.skel ps.source t (← ps.index.get) (← ps.cache.get) result)
 
 /-- Orderly shutdown: CLOSE frame, then reap (the proxy terminates itself
     on CLOSE). Errors are swallowed — the session is over either way. -/

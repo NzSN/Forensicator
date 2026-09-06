@@ -7,6 +7,8 @@ import Forensicator.Util.Json
 import Forensicator.Model.Types
 import Forensicator.Spec.AddressSpace
 import Forensicator.Model.Dump
+import Forensicator.Model.Execution
+import Forensicator.Model.Capture
 import Forensicator.Model.Trace
 import Forensicator.Spec.Timeline
 import Forensicator.Spec.JigSaw

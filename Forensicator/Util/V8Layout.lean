@@ -2,7 +2,7 @@
    port). Everything that can change between V8 releases lives here. -/
 import Forensicator.Model.Structs
 import Forensicator.Util.Text
-import Forensicator.Model.Dump
+import Forensicator.Model.Execution
 
 namespace Forensicator.Util
 
@@ -213,9 +213,9 @@ def V8Layout.chromiumToV8 (chromiumMajor : UInt32) : Option (UInt32 × UInt32) :
     some (14, chromiumMajor - 132)
   else none
 
-/-- Select layout from dump annotations (`ver` = Electron version); falls
+/-- Select layout from input annotations (`ver` = Electron version); falls
     back to v14_6 when unknown (structural validation fails closed). -/
-def V8Layout.detect (dump : Dump) : V8Layout :=
+def V8Layout.detect (input : AnalysisInput) : V8Layout :=
   let rec go : List (String × String) → V8Layout
     | [] => V8Layout.v14_6
     | (k, v) :: rest =>
@@ -230,7 +230,7 @@ def V8Layout.detect (dump : Dump) : V8Layout :=
           | some (vmaj, vmin) => (V8Layout.forV8Version vmaj vmin).getD V8Layout.v14_6
           | none => V8Layout.v14_6
         | none => V8Layout.v14_6
-  go dump.annotations
+  go input.annotations
 
 def V8Layout.markerFrameType (_l : V8Layout) (marker : UInt64) : Option V8FrameType :=
   markerTypeV14_6 marker

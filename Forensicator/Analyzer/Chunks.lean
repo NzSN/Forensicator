@@ -64,8 +64,9 @@ where
 def analyzer (cfg : Config := {}) : Analyzer where
   name := "chunks"
   description := "Identifies heap allocation chunks by pointer density in Private regions"
-  run _ctx dump space :=
+  run _ctx input :=
+    let space := input.space
     { AnalyzerOutput.new "chunks" with
-      chunks := detect cfg space (pointerScan space dump [PointerPattern.heapReferences]) }
+      chunks := detect cfg space (pointerScan space input [PointerPattern.heapReferences]) }
 
 end Forensicator.Analyzer.Chunks

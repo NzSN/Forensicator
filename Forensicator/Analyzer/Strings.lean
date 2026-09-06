@@ -95,14 +95,15 @@ private def detectGo (cfg : Config) (region : AddressRegion) (fuel i : Nat)
         else detectGo cfg region fuel (i + 1) acc
     else acc
 
-/-- Scans committed memory for null-terminated strings (ASCII, UTF-16LE). -/
+/-- Scans known memory bytes for null-terminated strings (ASCII, UTF-16LE).
+    String evidence does not depend on mapping class or protection metadata. -/
 def analyzer (cfg : Config := {}) : Analyzer where
   name := "strings"
-  description := "Scans committed memory for null-terminated strings (ASCII, UTF-16LE)"
-  run _ctx _dump space :=
+  description := "Scans known memory bytes for null-terminated strings (ASCII, UTF-16LE)"
+  run _ctx input :=
+    let space := input.space
     { AnalyzerOutput.new "strings" with
       strings := space.regions.foldl (init := []) fun acc region =>
-        if region.classification == .Other then acc
-        else acc ++ detectGo cfg region (min region.data.size cfg.maxScanPerRegion + 1) 0 [] }
+        acc ++ detectGo cfg region (min region.data.size cfg.maxScanPerRegion + 1) 0 [] }
 
 end Forensicator.Analyzer.Strings

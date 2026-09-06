@@ -23,7 +23,7 @@ def check (ctx : Ctx) (name : String) (ok : Bool) : IO Unit := do
 /-- A ctx-ignoring dummy analyzer for the threading checks. -/
 def dummy : Analyzer :=
   { name := "dummy"
-    run := fun _ctx _dump _space => AnalyzerOutput.new "dummy" }
+    run := fun _ctx _input => AnalyzerOutput.new "dummy" }
 
 def runAll : IO UInt32 := do
   let ctx : Ctx := ⟨← IO.mkRef 0⟩
@@ -35,10 +35,10 @@ def runAll : IO UInt32 := do
   -- runPipeline threads the ctx into every analyzer.
   let dump : Model.Dump := { }
   let space : Spec.AddressSpace := .new 64
-  let catalog := runPipeline ({ } : SymbolsCtx) [dummy] dump space []
+  let catalog := runPipeline ({ } : SymbolsCtx) [dummy] (Model.AnalysisInput.ofDump dump space) []
   check ctx "runPipeline threads ctx to analyzers"
     (catalog.outputs.length == 1 && catalog.outputs[0]!.pluginName == "dummy")
-  let filtered := runPipeline ({ } : SymbolsCtx) [dummy] dump space ["nope"]
+  let filtered := runPipeline ({ } : SymbolsCtx) [dummy] (Model.AnalysisInput.ofDump dump space) ["nope"]
   check ctx "runPipeline filter still applies with ctx"
     (filtered.outputs.isEmpty)
 
@@ -72,27 +72,27 @@ def runAll : IO UInt32 := do
     { modules := [crashMod]
       exception := some { code := 0xC0000005, address := 0x140000800,
                           threadId := 1, provenance := { } } }
-  match ← Session.loadSymbolsCtxFor crashDump (some "tmp") with
+  match ← Session.loadSymbolsCtxFor (Model.AnalysisInput.ofDump crashDump space) (some "tmp") with
   | ctx2 =>
     check ctx "symbols ctx loads publics from verified PDB"
       (match ctx2.publics with
        | some pubs => pubs.entries.size == 4
            && Util.Publics.nearest pubs 0x1004 == some ("alpha", 4)
        | none => false)
-  let noSymbols ← Session.loadSymbolsCtxFor crashDump none
+  let noSymbols ← Session.loadSymbolsCtxFor (Model.AnalysisInput.ofDump crashDump space) none
   check ctx "symbols ctx without dir stays none"
     (match noSymbols.publics with | none => true | some _ => false)
-  let badDir ← Session.loadSymbolsCtxFor crashDump (some "tmp2-missing")
+  let badDir ← Session.loadSymbolsCtxFor (Model.AnalysisInput.ofDump crashDump space) (some "tmp2-missing")
   check ctx "symbols ctx missing dir stays none"
     (match badDir.publics with | none => true | some _ => false)
   let mismatched : Model.Module := { crashMod with codeviewAge := some 8 }
   let badDump : Model.Dump := { crashDump with modules := [mismatched] }
-  let badCtx ← Session.loadSymbolsCtxFor badDump (some "tmp")
+  let badCtx ← Session.loadSymbolsCtxFor (Model.AnalysisInput.ofDump badDump space) (some "tmp")
   check ctx "symbols ctx identity mismatch is none"
     (match badCtx.publics with | none => true | some _ => false)
   let noinfo : Model.Module := { crashMod with codeviewGuid := none, codeviewAge := none }
   let infoDump : Model.Dump := { crashDump with modules := [noinfo] }
-  let infoCtx ← Session.loadSymbolsCtxFor infoDump (some "tmp")
+  let infoCtx ← Session.loadSymbolsCtxFor (Model.AnalysisInput.ofDump infoDump space) (some "tmp")
   check ctx "symbols ctx unverifiable module is none"
     (match infoCtx.publics with | none => true | some _ => false)
   IO.FS.removeFile pdbPath

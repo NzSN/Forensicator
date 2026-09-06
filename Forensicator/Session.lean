@@ -8,6 +8,7 @@
    missing files / bad flags are emitted by our CLI in its own wording and
    never diffed against the Rust binary's `error: {e}` output. -/
 import Forensicator.Model.Trace
+import Forensicator.Model.Capture
 import Forensicator.Parse.Minidump
 import Forensicator.Pipeline
 import Forensicator.Util.Image
@@ -110,28 +111,59 @@ def Session.prompt (s : Session) : String :=
   | .trace t cursor =>
     s!"forensicator[{Session.baseName s.path} @ {hexUpper cursor}/{hexUpper t.frontier}]> "
 
-/-- The (Dump, AddressSpace) view commands consume. -/
-def Session.current (s : Session) : Except String (Dump × AddressSpace) :=
+/-- Pure execution input for captures and in-memory traces. Live proxy views
+    use `currentIO` so the result reflects current knowledge. -/
+def Session.current (s : Session) : Except String AnalysisInput :=
   match s.target with
-  | .dump (dump, space, _) _ => .ok (dump, space)
+  | .dump (dump, space, _) _ => .ok (AnalysisInput.ofDump dump space s.path)
   | .trace t cursor =>
-    match t.snapshot cursor with
+    if s.proxy.isSome then .error "lazy trace requires currentIO"
+    else match t.analysisAt cursor s.path with
     | none => .error "cursor out of recorded range"
-    | some snap => .ok (snap.dump, snap.space)
+    | some input => .ok input
 
-/-- IO variant of `current`: for a lazy trace this is the two-phase
-    snapshot (design D4 — closure fetch, then pure materialize); dumps and
-    proxy-less skeletons take the pure path. -/
-def Session.currentIO (s : Session) : IO (Except String (Dump × AddressSpace)) := do
+/-- Obtain currently known execution state without discovering/fetching pages. -/
+def Session.currentIO (s : Session) : IO (Except String AnalysisInput) := do
   match s.target, s.proxy with
   | .trace _ cursor, some ps =>
+    if cursor > ps.frontier then return .error "cursor out of recorded range"
     match (← ps.guarded (do
-        match ← ps.snapshotAt cursor with
-        | some snap => pure (snap.dump, snap.space)
+        match ← ps.viewAt cursor with
+        | some input => pure input
         | none => throw (IO.Error.userError "cursor out of recorded range"))) with
     | .ok r => pure (.ok r)
     | .error e => pure (.error e)
   | _, _ => pure (s.current)
+
+/-- Batch analysis explicitly prepares touched/probed memory. The resulting
+    view remains partial; untouched memory is not thereby known absent. -/
+def Session.prepareAnalysis (s : Session) : IO (Except String AnalysisInput) := do
+  match s.target, s.proxy with
+  | .trace _ cursor, some ps =>
+    if cursor > ps.frontier then return .error "cursor out of recorded range"
+    ps.guarded (do
+      match ← ps.prepareAnalysisAt cursor with
+      | some input => pure input
+      | none => throw (IO.Error.userError "cursor out of recorded range"))
+  | _, _ => pure s.current
+
+/-- Explicit targeted acquisition. Validate user bounds before the transport
+    guard so an invalid address cannot poison an otherwise usable session. -/
+def Session.readMemory (s : Session) (va : VA) (len : UInt64) :
+    IO (Except String MemoryRead) := do
+  if va.toNat + len.toNat > 2^64 then return .error "address range overflows"
+  if len == 0 then return .ok (.known ByteArray.empty)
+  match s.target, s.proxy with
+  | .trace _ cursor, some ps =>
+    if cursor > ps.frontier then return .error "cursor out of recorded range"
+    match Trace.requestedPages [⟨va, len⟩] with
+    | .error e => return .error e
+    | .ok _ => pure ()
+    ps.guarded (do
+      match ← ps.materializeRanges cursor [⟨va, len⟩] with
+      | none => throw (IO.Error.userError "cursor out of recorded range")
+      | some input => pure (input.point.memory.read va len.toNat))
+  | _, _ => pure (s.current.map fun input => input.point.memory.read va len.toNat)
 
 /-- Split a command line into argv, honoring double quotes. -/
 def Session.tokenize (line : String) : List String :=
@@ -152,11 +184,17 @@ def Session.tokenize (line : String) : List String :=
 
 /-- The module owning the exception address (the crashed module); the
     first loaded module when no exception is recorded. -/
-def Session.crashModule (dump : Dump) : Option Module :=
-  match dump.exception with
-  | some exc => dump.modules.find? fun m =>
-      exc.address ≥ m.baseVa && exc.address < m.baseVa + m.size
-  | none => dump.modules.head?
+def Session.crashModule (input : AnalysisInput) : Option Module :=
+  match input.exception with
+  | some exc =>
+    match input.modules.filter (fun m =>
+      decide (m.baseVa.toNat ≤ exc.address.toNat
+        ∧ exc.address.toNat < m.baseVa.toNat + m.size.toNat)) with
+    | [m] => some m
+    | _ => none
+  | none =>
+    if (input.point.events.filterMap ExecutionEvent.exceptionInfo).length > 1
+      then none else input.modules.head?
 
 /-- Candidate PDB paths in `dir` for a module: the module's own
     pdb_name basename first, then its image basename with the `.exe`
@@ -198,7 +236,7 @@ def Session.loadPublicsFromPdb (pdb : String) : IO (Except String Util.Publics) 
   | .error e => pure (.error e)
   | .ok recs => pure (.ok (Util.Publics.ofRecords recs none))
 
-/-- Build the symbol context for a dump (design §W2.3): with
+/-- Build the symbol context for the current execution input: with
     `--symbols <dir>`, pick the crashed module's PDB — its pdb_name
     basename, else its image basename with the extension swapped to `.pdb`
     — that exists in `dir`, verify the identity (age + GUID via
@@ -206,11 +244,11 @@ def Session.loadPublicsFromPdb (pdb : String) : IO (Except String Util.Publics) 
     once. Any failure — no dir, no module, no candidate, identity
     mismatch, malformed PDB, I/O error — yields `{ publics := none }` and
     analyzers behave exactly as today (fail closed). -/
-def Session.loadSymbolsCtxFor (dump : Dump) (dir : Option String) : IO SymbolsCtx := do
+def Session.loadSymbolsCtxFor (input : AnalysisInput) (dir : Option String) : IO SymbolsCtx := do
   match dir with
   | none => pure { publics := none }
   | some dir =>
-    match Session.crashModule dump with
+    match Session.crashModule input with
     | none => pure { publics := none }
     | some m =>
       let mut out : Option Util.Publics := none
@@ -229,6 +267,6 @@ def Session.loadSymbolsCtxFor (dump : Dump) (dir : Option String) : IO SymbolsCt
                 | .error _ => pure ()
             | .error _ => pure ()
           catch _ => pure ()
-      pure { publics := out }
+      pure { publics := out, moduleBase := if out.isSome then some m.baseVa else none }
 
 end Forensicator

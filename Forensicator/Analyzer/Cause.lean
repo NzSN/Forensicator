@@ -12,8 +12,8 @@ namespace Forensicator.Analyzer.Cause
 open Forensicator.Model Forensicator.Spec Forensicator.Util
 
 /-- Hex-valued annotation lookup (v8.rs annotation_hex). -/
-def annotationHex (dump : Dump) (key : String) : Option UInt64 :=
-  (dump.annotations.find? fun (k, _) => k == key).bind fun (_, v) =>
+def annotationHex (input : AnalysisInput) (key : String) : Option UInt64 :=
+  (input.annotations.find? fun (k, _) => k == key).bind fun (_, v) =>
     let hex := (v.dropPrefix? "0x" <|> v.dropPrefix? "0X").map (·.toString) |>.getD v
     (hex.toList.foldlM (fun acc c => (hexVal c).map fun d => acc * 16 + d) 0)
 
@@ -90,13 +90,14 @@ private structure Hit where
   evidence : List String
 
 private structure Ctx where
-  dump : Dump
+  input : AnalysisInput
   space : AddressSpace
   fast : FastSpace
   faultVa : Option VA
   disasm : Option Instruction
   cageBase : Option VA
   publics : Option Util.Publics := none
+  moduleBase : Option VA := none
 
 private def isOomMessage (msg : String) : Bool :=
   ["Out of memory", "out of memory", "CALL_AND_RETRY_LAST", "Allocation failed"].any fun n =>
@@ -104,21 +105,21 @@ private def isOomMessage (msg : String) : Bool :=
 
 /-- Fatal message from: V8HE v2 ext, crashpad annotation, or a string scan
     of the crashed thread's stack region. -/
-private def fatalMessage (dump : Dump) (space : AddressSpace) (threadId : UInt32) : Option String :=
-  match dump.v8heapExt with
-  | some ext => if ext.fatalMessage.isSome then ext.fatalMessage else rest dump space threadId
-  | none => rest dump space threadId
+private def fatalMessage (input : AnalysisInput) (space : AddressSpace) (threadId : UInt32) : Option String :=
+  match input.v8heapExt with
+  | some ext => if ext.fatalMessage.isSome then ext.fatalMessage else rest input space threadId
+  | none => rest input space threadId
 where
-  rest (dump : Dump) (space : AddressSpace) (threadId : UInt32) : Option String :=
-    match (dump.annotations.find? fun (k, v) => k == "v8_fatal_message" && !v.isEmpty) with
+  rest (input : AnalysisInput) (space : AddressSpace) (threadId : UInt32) : Option String :=
+    match (input.annotations.find? fun (k, v) => k == "v8_fatal_message" && !v.isEmpty) with
     | some (_, v) => some v
-    | none => scanStackForFatal dump space threadId
-  scanStackForFatal (dump : Dump) (space : AddressSpace) (threadId : UInt32) : Option String :=
+    | none => scanStackForFatal input space threadId
+  scanStackForFatal (input : AnalysisInput) (space : AddressSpace) (threadId : UInt32) : Option String :=
     let needles := ["Check failed:", "Fatal error in", "# Fatal", "Out of memory"]
-    match dump.threads.find? (·.id == threadId) with
+    match input.stackRanges.find? (·.1 == threadId) with
     | none => none
-    | some thread =>
-      match space.regionAt thread.stackVa with
+    | some (_, stackVa, _) =>
+      match space.regionAt stackVa with
       | none => none
       | some region =>
         needles.findSome? fun needle =>
@@ -149,15 +150,15 @@ where
 -- ── the ten rules ───────────────────────────────────────────────────
 
 private def ruleFatalMessage (c : Ctx) : Option Hit :=
-  c.dump.exception.bind fun exc =>
-    (fatalMessage c.dump c.space exc.threadId).map fun msg =>
+  c.input.exception.bind fun exc =>
+    (fatalMessage c.input c.space exc.threadId).map fun msg =>
       { rule := 1
         verdict := if isOomMessage msg then .v8OutOfMemory else .v8CheckFailure
         confidence := .high
         evidence := [s!"captured fatal message: {msg}"] }
 
 private def ruleBreakpoint (c : Ctx) : Option Hit :=
-  c.dump.exception.bind fun exc =>
+  c.input.exception.bind fun exc =>
     let codeHit := exc.code == EXCEPTION_BREAKPOINT
     let disasmHit := match c.disasm.map (·.kind) with
       | some .int3 | some .ud2 => true
@@ -173,17 +174,16 @@ private def ruleBreakpoint (c : Ctx) : Option Hit :=
              evidence := ev1 ++ ev2 }
 
 private def ruleStackOverflow (c : Ctx) : Option Hit :=
-  c.dump.exception.bind fun exc =>
+  c.input.exception.bind fun exc =>
     if exc.code == EXCEPTION_STACK_OVERFLOW then
       some { rule := 3, verdict := .stackOverflow, confidence := .high
              evidence := [s!"exception code 0x{hexPadUpper EXCEPTION_STACK_OVERFLOW.toUInt64 8} (stack overflow)"] }
     else
       c.faultVa.bind fun fault =>
-        (c.dump.memoryInfo.find? fun mi =>
+        (c.input.memoryInfo.find? fun mi =>
           mi.protection &&& PAGE_GUARD != 0 && inRange fault mi.vaStart mi.size).map fun guard =>
-          let nearStack := c.dump.threads.any fun t =>
-            let s := t.stackVa
-            let e := t.stackVa + t.stackSize
+          let nearStack := c.input.stackRanges.any fun (_, s, size) =>
+            let e := s + size
             decide (guard.vaStart + 0x10000 ≥ s ∧ guard.vaStart ≤ e + 0x10000)
           { rule := 3, verdict := .stackOverflow
             confidence := if nearStack then .high else .medium
@@ -191,10 +191,10 @@ private def ruleStackOverflow (c : Ctx) : Option Hit :=
 
 private def ruleWasmGuard (c : Ctx) : Option Hit := do
   let fault ← c.faultVa
-  let reserved ← c.dump.memoryInfo.find? fun mi =>
+  let reserved ← c.input.memoryInfo.find? fun mi =>
     mi.state == .Reserve && mi.size ≥ (1 : UInt64) <<< 30
       && mi.protection &&& PAGE_NOACCESS != 0 && inRange fault mi.vaStart mi.size
-  let codeNearby := c.dump.memoryInfo.any fun mi =>
+  let codeNearby := c.input.memoryInfo.any fun mi =>
     mi.state == .Commit && mi.protection &&& PAGE_EXECUTE_ANY != 0
       && (if mi.vaStart ≥ reserved.vaStart then mi.vaStart - reserved.vaStart
           else reserved.vaStart - mi.vaStart) < ((4 : UInt64) <<< 30)
@@ -204,7 +204,7 @@ private def ruleWasmGuard (c : Ctx) : Option Hit := do
 
 private def ruleSmiConfusion (c : Ctx) : Option Hit := do
   let fault ← c.faultVa
-  let exc ← c.dump.exception
+  let exc ← c.input.exception
   let regs ← exc.context
   let (base, index, _scale, disp) ← match c.disasm.map (·.kind) with
     | some (Util.InstrKind.memRead b i s d) | some (Util.InstrKind.memWrite b i s d) => some (b, i, s, d)
@@ -225,7 +225,7 @@ private def ruleObjectAccess (c : Ctx) : Option Hit := do
   let cage ← c.cageBase
   if fault < cage || fault ≥ cage + ((1 : UInt64) <<< 32) then none
   else
-    let exc ← c.dump.exception
+    let exc ← c.input.exception
     let regs ← exc.context
     let (base, index, _scale, disp) ← match c.disasm.map (·.kind) with
       | some (Util.InstrKind.memRead (some b) i s d) | some (Util.InstrKind.memWrite (some b) i s d) => some (b, i, s, d)
@@ -243,7 +243,7 @@ private def ruleObjectAccess (c : Ctx) : Option Hit := do
           else
             let itype ← v8InstanceType c.space cage heap
             some { rule := 6, verdict := .v8ObjectAccess itype, confidence := .medium
-                   evidence := [s!"fault VA {hexUpper fault} = object {hexUpper heap} {dispTextRust disp}; instance type 0x{hexPadUpper itype.toUInt64 4} (layout {layoutName c.dump})"] }
+                   evidence := [s!"fault VA {hexUpper fault} = object {hexUpper heap} {dispTextRust disp}; instance type 0x{hexPadUpper itype.toUInt64 4} (layout {layoutName c.input})"] }
 where
   dispTextRust (d : Int) : String :=
     -- Rust {disp:+#x}: lowercase hex with 0x and explicit sign
@@ -260,8 +260,8 @@ where
         match space.read (map + 8) 2 with
         | none => none
         | some b2 => some (readU16leAt b2 0)
-  layoutName (dump : Dump) : String :=
-    match dump.annotations.find? fun (k, _) => k == "ver" with
+  layoutName (input : AnalysisInput) : String :=
+    match input.annotations.find? fun (k, _) => k == "ver" with
     | some (_, v) => s!"electron {v}"
     | none => "generic"
 
@@ -271,14 +271,15 @@ where
     a V8 builtin (a builtin crash site is itself evidence for a V8-internal
     defect). Fail closed: no module covers the address or no symbol sits at
     or below the rva → no lines. -/
-private def crashIpSymbolLines (pubs : Util.Publics) (dump : Dump)
-    (exc : ExceptionInfo) : List String :=
-  match dump.modules.find? fun m =>
+private def crashIpSymbolLines (pubs : Util.Publics) (input : AnalysisInput)
+    (exc : ExceptionInfo) (moduleBase : Option VA) : List String :=
+  match input.modules.find? fun m =>
     decide (exc.address ≥ m.baseVa
       && exc.address.toNat < m.baseVa.toNat + m.size.toNat) with
   | none => []
   | some m =>
-    match Util.Publics.symbol pubs m.baseVa exc.address with
+    if moduleBase.isSome && moduleBase != some m.baseVa then []
+    else match Util.Publics.symbol pubs m.baseVa exc.address with
     | none => []
     | some sym =>
       let line := s!"faulting IP {hexUpper (exc.address - m.baseVa)} = {sym}"
@@ -295,13 +296,14 @@ private def ruleCageDecompression (c : Ctx) : Option Hit := do
   -- compressed value rides the SIB index register ([cage_reg + idx*scale +
   -- disp]), with the effective address matching the fault VA.
   let fault ← c.faultVa
-  let exc ← c.dump.exception
+  let exc ← c.input.exception
   if exc.code != EXCEPTION_ACCESS_VIOLATION then none
   else
     let cage ← c.cageBase
     let cageEnd := cage + ((1 : UInt64) <<< 32)
     if fault < cage || fault ≥ cageEnd then none
-    else if (c.space.regionAt fault).isSome then none  -- committed → rules 5/6
+    -- Missing captured bytes alone do not establish an uncommitted address.
+    else if !c.input.point.memory.knownAbsent fault then none
     else
       let inCage := c.space.regions.filter fun r => r.vaStart ≥ cage && r.vaStart < cageEnd
       let pastText :=
@@ -310,11 +312,11 @@ private def ruleCageDecompression (c : Ctx) : Option Hit := do
         | some r =>
           let e := r.vaStart + r.size
           if fault ≥ e then
-            s!"; fault is 0x{String.ofList (Nat.toDigits 16 (fault - e).toNat)} past the highest committed cage region (end {hexUpper e})"
+            s!"; fault is 0x{String.ofList (Nat.toDigits 16 (fault - e).toNat)} past the highest observed cage region (end {hexUpper e})"
           else ""
       let symLines : List String := match c.publics with
         | none => []
-        | some pubs => crashIpSymbolLines pubs c.dump exc
+        | some pubs => crashIpSymbolLines pubs c.input exc c.moduleBase
       let idiom : Option (UInt64 × UInt8 × Int) :=
         match c.disasm, exc.context with
         | some instr, some regs =>
@@ -343,7 +345,7 @@ private def ruleCageDecompression (c : Ctx) : Option Hit := do
                evidence := [s!"access violation at fault VA {hexUpper fault}: inside the 4GB V8 cage reservation (base {hexUpper cage}) but uncommitted — decompressed garbage 32-bit value{pastText}"] ++ symLines }
 
 private def ruleOomState (c : Ctx) : Option Hit := do
-  let ext ← c.dump.v8heapExt
+  let ext ← c.input.v8heapExt
   if ext.allocTopVa == 0 || ext.allocLimitVa == 0 then none
   else
     let headroom := if ext.allocLimitVa ≥ ext.allocTopVa then ext.allocLimitVa - ext.allocTopVa else 0
@@ -355,19 +357,23 @@ private def ruleOomState (c : Ctx) : Option Hit := do
                   evidence := [s!"allocation area exhausted: top {hexUpper ext.allocTopVa}, limit {hexUpper ext.allocLimitVa} (headroom 0x{String.ofList (Nat.toDigits 16 headroom.toNat)}), fault VA {hexUpper fault}"] }
 
 private def ruleCorruptedCodePointer (c : Ctx) : Option Hit := do
-  let exc ← c.dump.exception
+  let exc ← c.input.exception
   if exc.code == EXCEPTION_BREAKPOINT || exc.code == EXCEPTION_STACK_OVERFLOW then none
   else
-    let inModule := c.dump.modules.any fun m =>
+    let inModule := c.input.modules.any fun m =>
       decide (m.baseVa ≤ exc.address ∧ exc.address.toNat < m.baseVa.toNat + m.size.toNat)
     if inModule then none
     else
-      let badTarget := match c.space.regionAt exc.address with
-        | none => true
-        | some r => r.protection &&& PAGE_EXECUTE_ANY == 0
+      -- Mapping metadata carries native Windows page protections. AddressSpace
+      -- may include supplemental disk bytes or proxy pages with unknown
+      -- protections, neither of which proves a non-executable live mapping.
+      let badTarget := c.input.point.memory.knownAbsent exc.address
+        || c.input.memoryInfo.any fun r =>
+          r.state == .Commit && inRange exc.address r.vaStart r.size
+            && ([0x01, 0x02, 0x04, 0x08] : List UInt32).contains (r.protection &&& 0xFF)
       if !badTarget then none
       else some { rule := 8, verdict := .corruptedCodePointer, confidence := .high
-                  evidence := [s!"RIP {hexUpper exc.address} is outside all modules and in unmapped/non-executable memory"] }
+                  evidence := [s!"RIP {hexUpper exc.address} has observed absent/non-executable memory backing"] }
 
 private def ruleNullDeref (c : Ctx) : Option Hit := do
   let fault ← c.faultVa
@@ -376,7 +382,7 @@ private def ruleNullDeref (c : Ctx) : Option Hit := do
               evidence := [s!"fault VA {hexUpper fault} is in the null page"] }
 
 private def ruleWildAccess (c : Ctx) : Option Hit := do
-  let exc ← c.dump.exception
+  let exc ← c.input.exception
   if exc.code != EXCEPTION_ACCESS_VIOLATION then none
   else some { rule := 10, verdict := .wildAccess, confidence := .low
               evidence := [match c.faultVa with
@@ -386,12 +392,15 @@ private def ruleWildAccess (c : Ctx) : Option Hit := do
 /-- Diagnose with an optional publics table (design §W1.4): the cage rule
     enriches its evidence with crash-IP symbolization when symbols are
     available; none behaves exactly as diagnose. -/
-def diagnoseWith (publics : Option Util.Publics) (dump : Dump)
-    (space : AddressSpace) : CrashDiagnosis :=
-  match dump.exception with
+def diagnoseWith (publics : Option Util.Publics) (input : AnalysisInput)
+    (space : AddressSpace) (moduleBase : Option VA := none) : CrashDiagnosis :=
+  match input.exception with
   | none =>
-    { verdict := .noException, confidence := .high
-      evidence := ["no exception stream in dump"]
+    let hasExceptions := input.point.events.any (·.kind == .Exception)
+    { verdict := if hasExceptions then .unknown else .noException
+      confidence := if hasExceptions || input.point.eventCoverage != .complete then .low else .high
+      evidence := [if hasExceptions then "no unique exception selected at this execution point"
+                   else "no exception event available at this execution point"]
       faultVa := none, access := none, fatalMessage := none, alternatives := [] }
   | some exc =>
     let faultVa :=
@@ -406,13 +415,13 @@ def diagnoseWith (publics : Option Util.Publics) (dump : Dump)
         | _ => none
       else none
     let ctx : Ctx :=
-      { dump := dump
+      { input := input
         space := space
         fast := FastSpace.ofSpace space
         faultVa := faultVa
         disasm := decodeFirst (FastSpace.ofSpace space) exc.address
-        cageBase := annotationHex dump "v8_ro_space_firstpage_address"
-        publics := publics }
+        cageBase := annotationHex input "v8_ro_space_firstpage_address"
+        publics := publics, moduleBase }
     let rules : List (Ctx → Option Hit) :=
       [ruleFatalMessage, ruleBreakpoint, ruleStackOverflow, ruleWasmGuard,
        ruleSmiConfusion, ruleObjectAccess, ruleCageDecompression, ruleOomState, ruleCorruptedCodePointer,
@@ -420,7 +429,7 @@ def diagnoseWith (publics : Option Util.Publics) (dump : Dump)
     let hits := rules.filterMap fun r => r ctx
     let hits := hits.mergeSort fun a b =>
       decide (b.confidence.rank ≤ a.confidence.rank) -- desc confidence; ties: rule order asc (stable sort preserves it)
-    let fatal := fatalMessage dump space exc.threadId
+    let fatal := fatalMessage input space exc.threadId
     match hits with
     | [] =>
       { verdict := .unknown, confidence := .low
@@ -433,9 +442,9 @@ def diagnoseWith (publics : Option Util.Publics) (dump : Dump)
         faultVa := faultVa, access := access, fatalMessage := fatal
         alternatives := rest.map fun h => (h.verdict, h.confidence) }
 
-/-- Diagnose the dump's exception into a ranked verdict (cause.rs diagnose). -/
-def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
-  diagnoseWith none dump space
+/-- Diagnose the input's exception into a ranked verdict (cause.rs diagnose). -/
+def diagnose (input : AnalysisInput) (space : AddressSpace) : CrashDiagnosis :=
+  diagnoseWith none input space
 
 /-- Append crash-IP symbolization to the evidence when a publics table is
     present (design §W1.4), but only when the verdict's own rule has not
@@ -444,12 +453,12 @@ def diagnose (dump : Dump) (space : AddressSpace) : CrashDiagnosis :=
     DecompressedGarbagePointer evidence rather than trailing (T7).
     Fail closed: no change when there is no exception, no module covers
     the exception address, or no symbol is at or below it. -/
-private def symbolEvidence (pubs : Util.Publics) (dump : Dump)
-    (d : CrashDiagnosis) : CrashDiagnosis :=
-  match dump.exception with
+private def symbolEvidence (pubs : Util.Publics) (input : AnalysisInput)
+    (d : CrashDiagnosis) (moduleBase : Option VA) : CrashDiagnosis :=
+  match input.exception with
   | none => d
   | some exc =>
-    let extra := crashIpSymbolLines pubs dump exc
+    let extra := crashIpSymbolLines pubs input exc moduleBase
     if extra.isEmpty || d.evidence.any (·.startsWith "faulting IP") then d
     else { d with evidence := d.evidence ++ extra }
 
@@ -457,11 +466,12 @@ private def symbolEvidence (pubs : Util.Publics) (dump : Dump)
 def analyzer : Analyzer where
   name := "cause"
   description := "Diagnoses why the process crashed: exception semantics, disassembly, cage fault analysis"
-  run ctx dump space :=
-    let d := diagnoseWith ctx.publics dump space
+  run ctx input :=
+    let space := input.space
+    let d := diagnoseWith ctx.publics input space ctx.moduleBase
     let d := match ctx.publics with
       | none => d
-      | some pubs => symbolEvidence pubs dump d
+      | some pubs => symbolEvidence pubs input d ctx.moduleBase
     { AnalyzerOutput.new "cause" with
       custom := [("crash_diagnosis", .obj [
         ("verdict", .str d.verdict.debug),
@@ -474,4 +484,3 @@ def analyzer : Analyzer where
           .str s!"{v.debug}/{c.debug}"))])] }
 
 end Forensicator.Analyzer.Cause
-

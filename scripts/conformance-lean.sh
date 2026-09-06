@@ -153,7 +153,7 @@ else
     # P3 documented limitation: the probe-verified never-readable record's
     # payload exists only in the eager .ttfx (probe_page.py, design notes)
     if printf '%s' "$session" | grep -qF \
-        "@0x1A60DBE00002057  [0x9F4C2BDB60, 0x9F4C2BDB68)  <uncommitted>"; then
+        "@0x1A60DBE00002057  [0x9F4C2BDB60, 0x9F4C2BDB68)  <unavailable>"; then
       echo "ok   proxy gate: P3 record fails closed"
     else echo "FAIL proxy gate: P3 record"; fail=1; fi
   fi

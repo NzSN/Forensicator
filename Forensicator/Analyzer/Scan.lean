@@ -61,15 +61,16 @@ where
         else go fuel (off + 8) acc
     else acc
 
-/-- Scan committed regions for pattern-matching pointer values
-    (scan.rs pointer_scan). -/
-def pointerScan (space : AddressSpace) (dump : Dump) (patterns : List PointerPattern) :
+/-- Scan known region bytes for pattern-matching pointer values. Unclassified
+    pages retain neutral source/target contexts and receive no image bonus;
+    unavailable mapping metadata must not hide otherwise available bytes. -/
+def pointerScan (space : AddressSpace) (input : AnalysisInput) (patterns : List PointerPattern) :
     List CandidatePointer :=
   if patterns.isEmpty then []
   else
     let fs := FastSpace.ofSpace space
-    let stackRanges := dump.threads.map fun t => (t.id, t.stackVa, t.stackSize)
-    (space.regions.filter fun region => region.classification != .Other).flatMap fun region =>
+    let stackRanges := input.stackRanges
+    space.regions.flatMap fun region =>
       scanRegion fs stackRanges patterns region
 
 /-- Candidates grouped by source VA: sorted-ascending keys, candidates in

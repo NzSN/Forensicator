@@ -45,7 +45,8 @@ private def detectGo (cfg : Config) (space : FastSpace) (region : AddressRegion)
 def analyzer (cfg : Config := {}) : Analyzer where
   name := "vtables"
   description := "Scans Image-region data for aligned function pointers forming vtables"
-  run _ctx _dump space :=
+  run _ctx input :=
+    let space := input.space
     let fs := FastSpace.ofSpace space
     { AnalyzerOutput.new "vtables" with
       vtables := space.regions.foldl (init := []) fun acc region =>

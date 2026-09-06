@@ -50,7 +50,11 @@ private def go (cfg : Config) (space : FastSpace) (adj : Array (VA × List (VA �
           else
             let (j, elements) := extend cfg space adj vas stride aClass aOut (vas.size + 1) (i + 2) b [a, b]
             if elements.length ≥ cfg.minCount then
-              let conf := if elements.length ≥ 5 then 0.85 else 0.6
+              -- Unknown class equality supplies no corroborating mapping
+              -- evidence; the regular stride/out-degree evidence still stands.
+              let conf := if aClass == .Other then
+                  (if elements.length ≥ 5 then 0.70 else 0.45)
+                else if elements.length ≥ 5 then 0.85 else 0.6
               let entry : StructArray :=
                 { startVa := a, elementSize := stride, count := elements.length
                   outDegree := aOut, regionClass := aClass
@@ -70,9 +74,10 @@ private def detect (cfg : Config) (space : FastSpace) (candidates : List Candida
 def analyzer (cfg : Config := {}) : Analyzer where
   name := "arrays"
   description := "Groups pointer targets with regular stride into arrays"
-  run _ctx dump space :=
+  run _ctx input :=
+    let space := input.space
     let fs := FastSpace.ofSpace space
     { AnalyzerOutput.new "arrays" with
-      arrays := detect cfg fs (pointerScan space dump [PointerPattern.heapReferences]) }
+      arrays := detect cfg fs (pointerScan space input [PointerPattern.heapReferences]) }
 
 end Forensicator.Analyzer.Arrays

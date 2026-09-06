@@ -83,7 +83,7 @@ full run green 2026-08-13). Design authority:
 `docs/trace/2026-08-12-lazy-trace-proxy-design.md` (D1–D9 +
 Implementation notes). The trace model + views + theorems stay in
 `Forensicator/Model/Trace.lean` / `Forensicator/Spec/Timeline.lean`
-(`valueAt_agrees_with_fold`, `snapshot_isSome`). The eager `.ttfx` v1
+(`valueAt_agrees_with_fold`, `pointAt_isSome`). The eager `.ttfx` v1
 decoder/encoder/fixture were removed 2026-08-13; `docs/arch/ttfx-format.md`
 is historical (kept for a possible v2 jigsaw-persistence format, design §D8).
 
@@ -94,7 +94,7 @@ vectors in `Test/Spec.lean`), `Trace/Index.lean`
 anomalies), `Trace/Jigsaw.lean` (page cache with validity intervals, ABSENT
 points, LRU cap, p+1 clamp, P3 next-write fallback), `Trace/Client.lean`
 (the only IO: `IO.Process` spawn + request loop + two-phase commands).
-Two-phase snapshots (design D4) feed `inspect`/`analyze` at cursor.
+Execution points (2026-09-06 design) feed `inspect`/`analyze` at cursor.
 Mechanized: `Spec/JigSaw.lean` (validity-interval arithmetic —
 `history_agree`, the pure `CacheSound` half — plus `mergeRecords`/
 `mergeWindow` order/dedup/membership invariants, sorry-free). Live-verified
@@ -102,6 +102,23 @@ against `hostname01.run`: 435,030 index records == eager `.ttfx`, sampled
 payloads + 35/35 INITMEM regions byte-equal; the opt-in live gate
 (`FORENSICATOR_PROXY_RUN=… ./scripts/conformance-lean.sh`) replays those
 fixture facts.
+
+## Execution timeline interface (2026-09-06)
+
+For timeline views, analyzer inputs, or capture adaptation, read
+`docs/trace/2026-09-06-execution-timeline-design.md`; task/verification record:
+`Drafts/2026-09-06-execution-timeline-plan.md`.
+
+Use `Model.ExecutionPoint` for memory/events/thread knowledge and `AnalysisInput`
+for supporting context. `Dump` is the capture aggregate, adapted by
+`Model/Capture.lean`. Proxy `viewAt` is cache-only; `materializeRanges` and
+`prepareAnalysisAt` perform explicit acquisition. Preserve unknown versus absent
+memory and unavailable register/stack context. Events are exact-position;
+interval queries use `(a,b]`. `ExecutionState.tla` models stored knowledge;
+`Snapshot.tla` models partial execution-point materialization, and `SnapshotMBT`
+is its compatibility entry. Run `python3 scripts/test-execution-shell.py` after
+building when changing these paths; run `scripts/check-timeline-specs.sh` for
+TLA+ contract changes.
 
 ## Built-in pointer patterns
 
@@ -122,7 +139,7 @@ excluded from git.
 
 - TLA+ specs mechanized as Lean theorems about the *shipping* functions:
   `pack_unpack`, `addRegion` preservation, `regionAt_unique`,
-  `valueAt_agrees_with_fold`, `snapshot_isSome`,
+  `valueAt_agrees_with_fold`, `pointAt_isSome`,
   `buildAddressSpace_wellFormed`. No `sorry`/`partial`/`panic!`.
 - Golden gate: `scripts/conformance-lean.sh` (Lean vs `Case/golden/`:
   3 dumps × inspect/analyze/match + shell scripts; byte-exact text, JSON

@@ -45,7 +45,8 @@ structure Jigsaw where
 
 /-- Engine read position for a model query at `t` (p+1 write visibility,
     clamped at the frontier). -/
-def fetchPosition (t frontier : Position) : Position := min (t + 1) frontier
+def fetchPosition (t frontier : Position) : Position :=
+  UInt64.ofNat (min (t.toNat + 1) frontier.toNat)
 
 /-- Fallback read position for P3-suspect pages (page has a known write
     ≤ t but read not-committed): the next known write's materialization
@@ -53,7 +54,7 @@ def fetchPosition (t frontier : Position) : Position := min (t + 1) frontier
     frontier. -/
 def fallbackPosition (st : IndexState) (page : VA) (t frontier : Position) : Option Position :=
   let nw := st.nextKnownWrite page t
-  if nw ≤ frontier then some (min (nw + 1) frontier) else none
+  if nw < frontier then some (fetchPosition nw frontier) else none
 
 namespace Jigsaw
 
@@ -101,7 +102,9 @@ private def touch (c : Jigsaw) (page : VA) : Jigsaw :=
 def insertFetched (c : Jigsaw) (page : VA) (t : Position) (frontier : Position)
     (outcome : Option ByteArray) (st : IndexState) : Jigsaw :=
   let prov : Provenance := { streamType := PROXY_STREAM_TYPE }
-  if frontier < t then
+  if frontier == 0xFFFFFFFFFFFFFFFF then
+    { c with anomalies := c.anomalies ++ [Anomaly.ofProv prov "unsupported maximum frontier"] }
+  else if frontier < t then
     { c with anomalies := c.anomalies ++ [Anomaly.ofProv prov "piece outside frontier"] }
   else
     match outcome with
