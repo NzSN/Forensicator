@@ -11,9 +11,11 @@ import Test.Stack
 import Test.StackSession
 import Test.MemoryPayload
 import Test.Image
+import Test.Mcp
 
 def main (_args : List String) : IO UInt32 := do
   IO.FS.createDirAll "tmp"
+  let nMcp ← Test.Mcp.runAll
   let nExecution ← Test.Execution.runAll
   let nAnalyzers ← Test.ExecutionAnalyzers.runAll
   let nProxy ← Test.ExecutionProxy.runAll
@@ -27,4 +29,4 @@ def main (_args : List String) : IO UInt32 := do
   let nSpec ← Test.Spec.runAll
   let nPub ← Test.Publics.runAll
   let nSym ← Test.Symbols.runAll
-  pure (nExecution + nAnalyzers + nProxy + nTimeline + nDigest + nObservation + nStack + nStackSession + nMemoryPayload + nImage + nSpec + nPub + nSym)
+  pure (nMcp + nExecution + nAnalyzers + nProxy + nTimeline + nDigest + nObservation + nStack + nStackSession + nMemoryPayload + nImage + nSpec + nPub + nSym)

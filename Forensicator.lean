@@ -29,6 +29,7 @@ import Forensicator.Util.Unwind
 import Forensicator.Util.Image
 import Forensicator.Util.Pdb
 import Forensicator.Session
+import Forensicator.Report
 
 namespace Forensicator
 end Forensicator

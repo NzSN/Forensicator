@@ -19,9 +19,10 @@ namespace Json
 def hexDigit (d : Nat) : Char :=
   if d < 10 then Char.ofNat ('0'.toNat + d) else Char.ofNat ('a'.toNat + (d - 10))
 
-def escapeChars : List Char → String
-  | [] => ""
-  | c :: rest =>
+/-- Accumulate left-to-right: prepending each escaped character to a rendered
+    suffix is quadratic for long protocol IDs and forensic strings. -/
+def escapeChars (chars : List Char) : String :=
+  chars.foldl (fun out c =>
     let esc :=
       match c with
       | '"' => "\\\""
@@ -35,7 +36,7 @@ def escapeChars : List Char → String
         else if c.toNat < 0x20 then
           String.ofList ['\\', 'u', '0', '0', hexDigit (c.toNat / 16), hexDigit (c.toNat % 16)]
         else String.ofList [c]
-    esc ++ escapeChars rest
+    out ++ esc) ""
 
 def escape (s : String) : String := escapeChars s.toList
 

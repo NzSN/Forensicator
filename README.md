@@ -22,6 +22,7 @@ lake exe forensicator-test    # guard suite (decoder/model/analyzer units + fuzz
 python3 scripts/test-execution-shell.py # deterministic proxy shell integration
 python3 scripts/test-proxy-ssh.py # literal proxy paths through SSH shell layers
 python3 scripts/test-stack-shell.py # capture stack/session integration
+python3 scripts/test-mcp.py    # stdio MCP lifecycle, framing, and CLI parity
 ./scripts/check-timeline-specs.sh # bounded TLA+ contracts (Apalache required)
 ./scripts/check-workflow-spec.sh # bounded root parse/analyzer composition
 ./scripts/conformance-lean.sh # golden gate (~8 min: 1.2 GB fulldump checks)
@@ -36,9 +37,35 @@ forensicator match <dump.dmp>             # verify dump ↔ exe/PDB artifacts (-
 forensicator list-plugins                 # list available analyzers
 forensicator shell <dump.dmp>             # interactive session
 forensicator shell --proxy <trace.run>    # lazy TTD trace session via the proxy
+forensicator mcp                         # MCP server on stdin/stdout
 ```
 
 Two input kinds share an execution analysis interface. Minidumps are parsed as `Dump` captures and adapted into one observed point. TTD traces attach through the Windows proxy and expose lazy execution points containing address-space knowledge, exact events and thread state. Supporting module/system information stays in analysis context. `inspect` reads current knowledge; `read` acquires a targeted range; `analyze` explicitly prepares a partial region set. `events <from> <to>` and write queries support reasoning between positions. See [timeline architecture](docs/arch/timeline.md).
+
+## MCP
+
+`forensicator mcp` exposes four read-only tools: `inspect`, `analyze`, `match`,
+and `list_plugins`. It runs natively in Lean with no additional dependencies.
+The tools share the CLI's forensic reports and preserve confidence, evidence,
+and unknown results. Configure an MCP client to launch the built executable:
+
+```json
+{
+  "mcpServers": {
+    "forensicator": {
+      "command": "/absolute/path/to/Forensicator/.lake/build/bin/forensicator",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Paths in tool arguments refer to the server's filesystem. The server supports
+the initialization-based MCP revisions `2025-11-25`, `2025-06-18`, and
+`2024-11-05`; it processes calls sequentially. Large captures may require a
+longer client timeout. Trace/proxy sessions remain a shell interface.
+See [MCP tools and protocol limits](docs/workflow/mcp.md) for examples and
+compatibility details.
 
 ## What's proved
 
@@ -74,9 +101,11 @@ Forensicator/
   Model/                # execution views, capture adapter, Dump / Trace records
   Trace/                # proxy client: Proto + Index + Jigsaw (pure), Client (IO.Process)
   Analyzer/             # cause, strings, vtables, lists, arrays, chunks, shapes, v8
+  Mcp/                  # typed tools, pure JSON-RPC dispatch, stdio server
   Util/                 # disasm, unwind (.pdata), v8 layout, image (PE), pdb (MSF-7), json/text
   Pipeline.lean         # dump → AddressSpace, dump-kind classification
   Session.lean          # interactive shell state (incl. proxy attach)
+  Report.lean           # shared CLI/MCP JSON reports and artifact matching
 Main.lean               # CLI
 Test/                   # guard runner (lake exe forensicator-test)
 scripts/                # conformance-lean.sh (gate), capture-goldens.sh, build-static.sh
