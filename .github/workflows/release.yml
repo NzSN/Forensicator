@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to release (for example, v0.0.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Linux x86-64 static binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Validate version tag
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo 'Expected a version tag such as v0.0.1 or v0.0.1-rc.1' >&2
+            exit 1
+          fi
+
+      # A manual run can release a tag that predates this workflow.
+      - name: Check out the tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential binutils curl file zstd
+
+      - name: Install the pinned Lean toolchain
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz \
+            --output "$RUNNER_TEMP/elan.tar.gz"
+          echo "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63  $RUNNER_TEMP/elan.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/elan-installer"
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan-installer"
+          "$RUNNER_TEMP/elan-installer/elan-init" -y --no-modify-path --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+
+      - name: Build and test
+        run: |
+          lake build
+          .lake/build/bin/forensicator-test
+          python3 scripts/test-execution-shell.py
+          python3 scripts/test-proxy-ssh.py
+          python3 scripts/test-stack-shell.py
+          python3 scripts/test-mcp.py
+
+      - name: Build and verify the static binary
+        run: |
+          ./scripts/build-static.sh
+          file .lake/build/bin/forensicator-static
+          readelf --program-headers .lake/build/bin/forensicator-static > "$RUNNER_TEMP/program-headers.txt"
+          readelf --dynamic .lake/build/bin/forensicator-static > "$RUNNER_TEMP/dynamic-section.txt"
+          if grep -q INTERP "$RUNNER_TEMP/program-headers.txt" || grep -q NEEDED "$RUNNER_TEMP/dynamic-section.txt"; then
+            echo 'Release binary must not depend on a dynamic loader or shared libraries' >&2
+            exit 1
+          fi
+          .lake/build/bin/forensicator-static list-plugins
+
+      - name: Package release
+        run: |
+          package="forensicator-$RELEASE_TAG-linux-x86_64"
+          mkdir -p "dist/$package"
+          install -m 755 .lake/build/bin/forensicator-static "dist/$package/forensicator"
+          cp README.md lean-toolchain "dist/$package/"
+          printf 'tag=%s\ncommit=%s\n' "$RELEASE_TAG" "$(git rev-parse HEAD)" > "dist/$package/BUILD.txt"
+          tar -czf "dist/$package.tar.gz" -C dist "$package"
+          (cd dist && sha256sum "$package.tar.gz" > "$package.tar.gz.sha256")
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          package="forensicator-$RELEASE_TAG-linux-x86_64"
+          assets=("dist/$package.tar.gz" "dist/$package.tar.gz.sha256")
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            flags=()
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --verify-tag --title "Forensicator $RELEASE_TAG" --generate-notes "${flags[@]}"
+          fi

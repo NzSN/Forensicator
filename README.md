@@ -28,6 +28,27 @@ python3 scripts/test-mcp.py    # stdio MCP lifecycle, framing, and CLI parity
 ./scripts/conformance-lean.sh # golden gate (~8 min: 1.2 GB fulldump checks)
 ```
 
+## Releases
+
+Pushing a version tag such as `v0.0.2` runs the
+[release workflow](.github/workflows/release.yml). It builds the tagged source
+with the toolchain in `lean-toolchain`, runs the guard suite and deterministic
+shell/MCP integration checks, and publishes a GitHub Release containing a
+**Linux x86-64 static binary** archive and its SHA-256 checksum. The archive
+contains `forensicator`, `README.md`, `lean-toolchain`, and `BUILD.txt` with the
+tag and source commit. Lean is not required to run the released binary.
+
+```sh
+git tag -a v0.0.2 -m "Forensicator v0.0.2"
+git push origin v0.0.2
+```
+
+For an existing tag, select **Actions → Release → Run workflow** on `master`
+and enter the tag, or use `gh workflow run release.yml --ref master -f tag=v0.0.1`.
+This also builds `v0.0.1`, whose source commit predates the workflow. Re-running
+a release replaces its uploaded assets. The private `Case/` golden/fuzz gate
+and live Windows proxy gate remain opt-in local checks.
+
 ## CLI
 
 ```
