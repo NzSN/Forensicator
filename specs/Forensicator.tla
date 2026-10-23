@@ -122,7 +122,7 @@ S == INSTANCE Symbolizer WITH
 
 CONSTANTS
     \* @type: Set(Int);
-    StreamTypeSet,        \* {1,2,3,4,5,6} — known stream type identifiers
+    StreamTypeSet,        \* finite fixture domain, including known/unsupported stream identifiers
     \* @type: Set(Str);
     AnalyzerPool          \* set of analyzer names (e.g. {"strings","vtables","lists","arrays","chunks","shapes"})
 
@@ -144,15 +144,17 @@ VARIABLES
 
 \* ---- Helper: all sub-module variables (for UNCHANGED lists) ----
 
-SubVars ==
+ModelVars ==
     <<m_sysinfo, m_mod_va, m_mod_sz, m_mod_prov_sid, m_mod_prov_off, m_mod_prov_rva,
       m_thr_id, m_thr_stack_va, m_thr_stack_sz, m_thr_prov_sid, m_thr_prov_off, m_thr_prov_rva,
       m_mem_va, m_mem_sz, m_mem_prot, m_mem_state, m_mem_type, m_mem_cls,
       m_mem_prov_sid, m_mem_prov_off, m_mem_prov_rva, m_exc_info, m_anomalies,
-      m_ann_key, m_ann_val,
-      a_reg_va, a_reg_sz, a_reg_cl, a_anomalies,
-      r_regs, r_anomalies,
-      s_sym_modules, s_sym_tables, s_sym_anomalies>>
+      m_ann_key, m_ann_val>>
+
+AddressSpaceVars == <<a_reg_va, a_reg_sz, a_reg_cl, a_anomalies>>
+ArchVars == <<r_regs, r_anomalies>>
+SymbolizerVars == <<s_sym_modules, s_sym_tables, s_sym_anomalies>>
+SubVars == <<ModelVars, AddressSpaceVars, ArchVars, SymbolizerVars>>
 
 \* ---- S2: Analyzer Pipeline ----
 
@@ -199,10 +201,9 @@ ParseHeader ==
 ParseDirectory ==
     /\ p_header_parsed = 1
     /\ p_dir_parsed = 0
-    /\ LET count == Cardinality(StreamTypeSet)
-       IN /\ p_stream_types'  = CHOOSE s \in [1..MaxStreams -> StreamTypeSet] : TRUE
-          /\ p_stream_parsed' = [i \in 1..MaxStreams |-> IF i <= count THEN 0 ELSE 0]
-          /\ p_dir_parsed'    = 1
+    /\ p_stream_types' \in [1..MaxStreams -> StreamTypeSet]
+    /\ p_stream_parsed' = [i \in 1..MaxStreams |-> 0]
+    /\ p_dir_parsed' = 1
     /\ UNCHANGED <<p_header_parsed, s1_complete,
                    pipeline, completed, failed,
                    catalog_strings, catalog_vtables, catalog_lists,
@@ -215,19 +216,20 @@ DecodeStream(stream_type) ==
          /\ idx \in DOMAIN p_stream_types
          /\ p_stream_types[idx] = stream_type
          /\ p_stream_parsed[idx] = 0
-         /\ \/ (stream_type = 1 /\ M!SetSysInfo(0, 1, 0, 0, 0, 0, 1, 0, 0))
+         /\ \/ (stream_type = 1 /\ M!SetSysInfo(0, 1, 0, 0, 0, 0, 1, 1, 0))
             \/ (stream_type = 2 /\ M!AddModule(0, 1, 1, 0, 0))
             \/ (stream_type = 3 /\ M!AddThread(0, 0, 1, 1, 0, 0))
             \/ (stream_type = 4 /\ M!AddRegion(0, 1, 3, 0, 0, 0, 1, 0, 0))
             \/ (stream_type = 5 /\ M!SetException(0, 0, 0, 0, 1, 0, 0))
             \/ (stream_type = 6 /\ M!AddAnomaly("truncated"))
             \/ (stream_type = 7 /\ M!AddAnnotation("key", "val"))
-            \/ TRUE
+            \/ (stream_type \notin 1..7 /\ UNCHANGED ModelVars)
          /\ p_stream_parsed' = [p_stream_parsed EXCEPT ![idx] = 1]
     /\ UNCHANGED <<p_header_parsed, p_dir_parsed, p_stream_types, s1_complete,
                    pipeline, completed, failed,
                    catalog_strings, catalog_vtables, catalog_lists,
-                   catalog_arrays, catalog_chunks, catalog_shapes>>
+                   catalog_arrays, catalog_chunks, catalog_shapes,
+                   AddressSpaceVars, ArchVars, SymbolizerVars>>
 
 BuildAddressSpace ==
     /\ p_dir_parsed = 1
@@ -242,7 +244,8 @@ BuildAddressSpace ==
     /\ UNCHANGED <<p_header_parsed, p_dir_parsed, p_stream_types, p_stream_parsed,
                    pipeline, completed, failed,
                    catalog_strings, catalog_vtables, catalog_lists,
-                   catalog_arrays, catalog_chunks, catalog_shapes>>
+                   catalog_arrays, catalog_chunks, catalog_shapes,
+                   ModelVars, ArchVars, SymbolizerVars>>
 
 \* ── Symbolizer Integration ──
 
@@ -261,7 +264,8 @@ LoadSymbolizer ==
     /\ UNCHANGED <<p_header_parsed, p_dir_parsed, p_stream_types, p_stream_parsed, s1_complete,
                    pipeline, completed, failed,
                    catalog_strings, catalog_vtables, catalog_lists,
-                   catalog_arrays, catalog_chunks, catalog_shapes>>
+                   catalog_arrays, catalog_chunks, catalog_shapes,
+                   ModelVars, AddressSpaceVars, ArchVars>>
 
 \* ── S2 Operations ──
 
@@ -361,7 +365,7 @@ Init ==
 Next ==
     \/ ParseHeader
     \/ ParseDirectory
-    \/ \E t \in {1,2,3,4,5,6}: DecodeStream(t)
+    \/ \E t \in StreamTypeSet: DecodeStream(t)
     \/ BuildAddressSpace
     \/ LoadSymbolizer
     \/ \E name \in AnalyzerPool: RegisterAnalyzer(name)

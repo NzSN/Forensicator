@@ -9,6 +9,8 @@ import Test.Digest
 import Test.Observation
 import Test.Stack
 import Test.StackSession
+import Test.MemoryPayload
+import Test.Image
 
 def main (_args : List String) : IO UInt32 := do
   IO.FS.createDirAll "tmp"
@@ -20,7 +22,9 @@ def main (_args : List String) : IO UInt32 := do
   let nObservation ← Test.Observation.runAll
   let nStack ← Test.Stack.runAll
   let nStackSession ← Test.StackSession.runAll
+  let nMemoryPayload ← Test.MemoryPayload.runAll
+  let nImage ← Test.Image.runAll
   let nSpec ← Test.Spec.runAll
   let nPub ← Test.Publics.runAll
   let nSym ← Test.Symbols.runAll
-  pure (nExecution + nAnalyzers + nProxy + nTimeline + nDigest + nObservation + nStack + nStackSession + nSpec + nPub + nSym)
+  pure (nExecution + nAnalyzers + nProxy + nTimeline + nDigest + nObservation + nStack + nStackSession + nMemoryPayload + nImage + nSpec + nPub + nSym)

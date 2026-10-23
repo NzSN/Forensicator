@@ -178,14 +178,15 @@ def decodeModuleList (data fullData : ByteArray) (prov : Provenance) :
                              rva := UInt64.ofNat i } })
 
 -- ── memory lists ────────────────────────────────────────────────────
-/-- Memory range payload: full slice, or tail + zero-fill, or zeros
-    (memory.rs's three-way fallback). -/
-private def fillRange (src : ByteArray) (rva size : Nat) : ByteArray :=
-  if rva + size ≤ src.size then src.extract rva (rva + size)
-  else if rva < src.size then
-    let avail := src.size - rva
-    src.extract rva (rva + avail) ++ ByteArray.mk (Array.replicate (size - avail) 0)
-  else ByteArray.mk (Array.replicate (min size 0x1000) 0)
+/-- A descriptor establishes captured bytes only when its entire payload is
+    present. Missing bytes are unknown, never implicit zeros. Check the
+    Nat-lifted range before extracting or allocating from a declared length;
+    malformed payloads reject their stream instead of publishing partial facts. -/
+private def readMemoryPayload (fullData : ByteArray) (rva size : Nat)
+    (prov : Provenance) (streamName : String) : Except Anomaly ByteArray :=
+  if rva + size ≤ fullData.size then .ok (fullData.extract rva (rva + size))
+  else .error (.ofProv prov
+    s!"{streamName} payload at RVA {rva} size {size} extends beyond file (len {fullData.size})")
 
 structure RawMemoryRange where
   vaStart : VA
@@ -228,24 +229,28 @@ def clipRanges (base priority : List RawMemoryRange) : List RawMemoryRange :=
 
 def decodeMemoryList (fullData data : ByteArray) (prov : Provenance) :
     Except Anomaly (List RawMemoryRange) :=
-  if data.size < 4 then .ok []
+  if data.size < 4 then .error (.ofProv prov "truncated MemoryList header")
   else
     let count := (u32le data 0).toNat
     let expectedLen := 4 + count * 16
     if data.size < expectedLen then
       .error (.ofProv prov
         s!"truncated MemoryList: expected {expectedLen}, got {data.size}")
-    else .ok ((List.range count).map fun i =>
+    else (List.range count).mapM fun i => do
       let off := 4 + i * 16
-      { vaStart := u64le data off
-        data := fillRange fullData ((u32le data (off + 12)).toNat) ((u32le data (off + 8)).toNat)
-        provenance := { streamType := prov.streamType
-                        fileOffset := prov.fileOffset + UInt64.ofNat off
-                        rva := UInt64.ofNat i } })
+      let rangeProv : Provenance :=
+        { streamType := prov.streamType
+          fileOffset := prov.fileOffset + UInt64.ofNat off
+          rva := UInt64.ofNat i }
+      let bytes ← readMemoryPayload fullData ((u32le data (off + 12)).toNat)
+        ((u32le data (off + 8)).toNat) rangeProv "MemoryList"
+      pure { vaStart := u64le data off, data := bytes, provenance := rangeProv }
 
-def decodeMemory64 (data : ByteArray) (prov : Provenance) :
+/-- Memory64List descriptors are stream-relative, but BaseRva and all
+    consecutive payload offsets are relative to the complete dump file. -/
+def decodeMemory64 (data fullData : ByteArray) (prov : Provenance) :
     Except Anomaly (List RawMemoryRange) :=
-  if data.size < 16 then .ok []
+  if data.size < 16 then .error (.ofProv prov "truncated Memory64List header")
   else
     let count := (u64le data 0).toNat
     let baseRva := (u64le data 8).toNat
@@ -254,20 +259,23 @@ def decodeMemory64 (data : ByteArray) (prov : Provenance) :
       .error (.ofProv prov
         s!"truncated Memory64List: expected {expectedLen}, got {data.size}")
     else
-      let rec go (i dataOff : Nat) (acc : List RawMemoryRange) : List RawMemoryRange :=
+      let rec go (i dataOff : Nat) (acc : List RawMemoryRange) :
+          Except Anomaly (List RawMemoryRange) := do
         if _h : i < count then
           let off := 16 + i * 16
           let size := (u64le data (off + 8)).toNat
+          let rangeProv : Provenance :=
+            { streamType := prov.streamType
+              fileOffset := prov.fileOffset + UInt64.ofNat off
+              rva := UInt64.ofNat i }
+          let bytes ← readMemoryPayload fullData dataOff size rangeProv "Memory64List"
           let r : RawMemoryRange :=
             { vaStart := u64le data off
-              data := fillRange data dataOff size
-              provenance := { streamType := prov.streamType
-                              fileOffset := prov.fileOffset + UInt64.ofNat off
-                              rva := UInt64.ofNat i } }
+              data := bytes, provenance := rangeProv }
           go (i + 1) (dataOff + size) (r :: acc)
-        else acc
+        else pure acc.reverse
       termination_by count - i
-      .ok (go 0 baseRva []).reverse
+      go 0 baseRva []
 
 -- ── memory_info_list ────────────────────────────────────────────────
 /-- Native MINIDUMP_MEMORY_INFO constants, distinct from the internal enum
@@ -627,7 +635,7 @@ def fromBytes (data : ByteArray) : Except Fatal Dump := do
     let threads ← (decodeOptionalDump data dir ST_THREAD_LIST decodeThreadList).map (·.getD [])
 
     let ranges64 ←
-      (decodeOptional data dir ST_MEMORY_64_LIST decodeMemory64).map (·.getD [])
+      (decodeOptionalDump data dir ST_MEMORY_64_LIST decodeMemory64).map (·.getD [])
     let mutRanges ←
       if ranges64.isEmpty then
         match dir.find ST_MEMORY_LIST with

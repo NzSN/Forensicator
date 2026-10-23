@@ -4,7 +4,7 @@
 
 | Spec | Models | Checked by |
 |---|---|---|
-| `Forensicator.tla` | Root workflow composition (S1 parse latches → S2 analyzer pipeline) | Apalache |
+| `Forensicator.tla` | Root workflow composition (S1 parse latches → S2 analyzer pipeline) | Apalache (depth 12; `scripts/check-workflow-spec.sh`) |
 | `Model.tla` | Decoded `Dump` facts (append-only, provenance, bounded counts) | Apalache |
 | `ParsePipeline.tla` | S1 phase machine (Init→…→Built/Done/Fatal) | Apalache |
 | `AddressSpace.tla` | Region map invariants (`NoOverlap`, classify totality) | TLC + Apalache |
@@ -19,6 +19,15 @@
 Conventions: tiny model-checking bounds, flat parallel sequences, `@type`
 annotations, constant quantifier domains with `Len` guards (Apalache's
 dynamic-range limitation), safety invariants only.
+
+The root workflow gate retains all composed invariants and covers four-stream
+directories drawn from stream types 1–8: decoded facts (1–5), a decode anomaly
+(6), an annotation (7), and an unsupported stream skipped without changing the
+decoded model (8). The twelve-transition bound reaches address-space building,
+symbol loading, and successful/failed analyzer runs. A negative control marks a
+successful analyzer as failed and requires an invariant counterexample after
+S1; configuration or assignment errors cannot pass that control. This is
+bounded safety evidence, not a proof of liveness or runtime decoder fidelity.
 
 ## Mechanized theorems (Lean, `Forensicator/Spec/` + in-module)
 
@@ -88,13 +97,12 @@ documented P3 fail-closed record (all pinned against fixture facts).
 lake build                          # library + CLI + forensicator-test
 .lake/build/bin/forensicator-test   # guard suite (FORENSICATOR_CASE_DIR=Case for fuzz)
 ./scripts/conformance-lean.sh       # golden gate
+./scripts/check-workflow-spec.sh    # root workflow safety, 12 transitions
 FORENSICATOR_PROXY_RUN=… FORENSICATOR_PROXY_SSH=windows-dev ./scripts/conformance-lean.sh  # + live proxy gate
 ```
 
 ## Known spec hygiene issues
 
-- `specs/Forensicator.cfg` references a nonexistent `RootInvariant` (the
-  invariant is `ForensicatorInvariant`).
 - `specs/PointerGraph.cfg` is orphaned — its spec was removed in `bf94b03`.
 - `specs/ParsePipeline.tla`'s `INSTANCE Model WITH` predates Model's
   `ann_key`/`ann_val` variables and may not check as-is.

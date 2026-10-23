@@ -71,13 +71,24 @@ private def optOff (img : ImageFile) : Nat :=
 def peChecksum (img : ImageFile) : Option UInt32 :=
   r32 img.data (optOff img + 64)
 
-private def rvaToOff (img : ImageFile) (rva : UInt32) : Option Nat :=
-  if rva.toNat < img.headerSize.toNat then some rva.toNat
+/-- Map a whole RVA slice to bytes actually present in the file. A virtual
+    section tail is not evidence of captured zero bytes, and adjacent file
+    bytes need not be adjacent in the loaded image. Nat arithmetic keeps bad
+    PE offsets and range endpoints from wrapping into valid file offsets. -/
+private def rvaToOff (img : ImageFile) (rva len : Nat) : Option Nat := do
+  if rva ≥ img.sizeOfImage.toNat || rva ≥ 0x100000000
+      || rva + len > img.sizeOfImage.toNat || rva + len > 0x100000000 then none
+  else if rva < img.headerSize.toNat then
+    if rva + len ≤ img.headerSize.toNat && rva + len ≤ img.data.size then some rva
+    else none
   else
-    (img.sections.find? fun (s : Section) =>
+    let s ← img.sections.find? fun (s : Section) =>
       let span := max s.vaSize s.rawSize
-      decide (s.vaStart ≤ rva ∧ rva.toNat < s.vaStart.toNat + span.toNat)).map
-      fun (s : Section) => (s.rawPtr + (rva - s.vaStart)).toNat
+      decide (s.vaStart.toNat ≤ rva ∧ rva < s.vaStart.toNat + span.toNat)
+    let delta := rva - s.vaStart.toNat
+    let off := s.rawPtr.toNat + delta
+    if delta + len ≤ s.rawSize.toNat && off + len ≤ img.data.size then some off
+    else none
 
 /-- RSDS record from the PE debug directory. -/
 structure Rsds where
@@ -92,7 +103,7 @@ def rsds (img : ImageFile) : Option Rsds := do
   let dirSize ← r32 img.data (opt + 112 + 6 * 8 + 4)
   if dirRva == 0 then none
   else
-    let dirOff ← rvaToOff img dirRva
+    let dirOff ← rvaToOff img dirRva.toNat dirSize.toNat
     let rec scan (i : Nat) : Option Rsds :=
       if i < dirSize.toNat / 28 then
         let e := dirOff + i * 28
@@ -117,14 +128,10 @@ def rsds (img : ImageFile) : Option Rsds := do
 
 /-- Read `len` bytes at `va` through the section table (full slice or none). -/
 def read (img : ImageFile) (va : VA) (len : Nat) : Option ByteArray :=
-  if va < img.baseVa then none
+  if va < img.baseVa || va.toNat + len > 0x10000000000000000 then none
   else
-    let rva := (va - img.baseVa).toUInt32
-    match rvaToOff img rva with
-    | none => none
-    | some off =>
-      if off + len ≤ img.data.size then some (img.data.extract off (off + len))
-      else none
+    let rva := va.toNat - img.baseVa.toNat
+    (rvaToOff img rva len).map fun off => img.data.extract off (off + len)
 
 end ImageFile
 

@@ -13,10 +13,12 @@
    * local  — `FORENSICATOR_PROXY_EXE` (default
      `/mnt/d/Codebase/JigsawSpawner/target/release/ttfx-proxy.exe`); trace
      path translated `/mnt/<drive>/…` → `<drive>:/…`.
-   * remote — `FORENSICATOR_PROXY_SSH=<host>`: spawns
-     `ssh <host> "bash -c '<exe> --stdio <trace>'"`; the stdio protocol rides
-     the ssh pipes. `FORENSICATOR_PROXY_EXE` then names the *remote* exe
-     (default `D:/Codebase/JigsawSpawner/target/release/ttfx-proxy.exe`). -/
+   * remote — `FORENSICATOR_PROXY_SSH=<host>`: spawns ssh with a command
+     for a POSIX-compatible remote login shell and `bash` on its PATH.
+     Bash receives the exe/trace as literal positional arguments; the
+     stdio protocol rides the ssh pipes. `FORENSICATOR_PROXY_EXE` then
+     names the *remote* exe (default
+     `D:/Codebase/JigsawSpawner/target/release/ttfx-proxy.exe`). -/
 import Forensicator.Model.Trace
 import Forensicator.Trace.Proto
 import Forensicator.Trace.Index
@@ -32,6 +34,19 @@ def windowsPath (p : String) : String :=
   | '/' :: 'm' :: 'n' :: 't' :: '/' :: d :: '/' :: rest =>
     String.ofList (d.toUpper :: ':' :: '/' :: rest)
   | _ => p
+
+/-- One literal argument for the POSIX-compatible remote login shell.
+    Apostrophes end the quoted segment, emit an escaped apostrophe, and
+    resume it. Whitespace, substitutions, and newlines remain literal. -/
+private def shellQuote (arg : String) : String :=
+  "'" ++ arg.replace "'" "'\\''" ++ "'"
+
+/-- SSH sends command text through the remote login shell before Bash.
+    Only this static script is parsed by Bash: neither path becomes shell
+    source at either layer. `--` is Bash's $0, then exe/trace are $1/$2. -/
+private def remoteProxyCommand (exe tracePath : String) : String :=
+  "bash -c " ++ shellQuote "exec -- \"$1\" --stdio \"$2\"" ++ " -- "
+    ++ shellQuote exe ++ " " ++ shellQuote (windowsPath tracePath)
 
 /-- The child config for a proxy process: stdin/stdout piped (the binary
     protocol), stderr inherited (proxy diagnostics are useful and must not
@@ -303,7 +318,7 @@ def spawn (tracePath : String) : IO ProxySession := do
   let (cmd, args) ← match (← IO.getEnv "FORENSICATOR_PROXY_SSH") with
     | some host =>
       let exe := exe?.getD "D:/Codebase/JigsawSpawner/target/release/ttfx-proxy.exe"
-      pure ("ssh", #[host, s!"bash -c '{exe} --stdio {windowsPath tracePath}'"])
+      pure ("ssh", #[host, remoteProxyCommand exe tracePath])
     | none =>
       pure (exe?.getD "/mnt/d/Codebase/JigsawSpawner/target/release/ttfx-proxy.exe",
         #["--stdio", windowsPath tracePath])

@@ -108,9 +108,34 @@ def UnwindTables.lookup (t : UnwindTables) (space : AddressSpace) (va : VA) :
       ((bin (mu.funcs.size + 1) 0 mu.funcs.size).map (base, ·), { t with modules := modules' })
 
 /-- One unwind step: simulate prolog unwind codes + return-address pop.
-    Functional: returns the updated register set, none on failure. -/
+    Functional: returns the updated register set, none on failure. Supplying
+    `stackBounds` confines every stack read and intermediate RSP to that
+    range, rejects wrap/backward transitions, and disables image fallback
+    for stack bytes. Metadata still uses the complete address space. -/
 def unwindStep (regs : RegisterSet) (space : AddressSpace) (moduleBase : VA)
-    (rt : RuntimeFunction) : Option RegisterSet := do
+    (rt : RuntimeFunction) (stackBounds : Option (VA × UInt64) := none) : Option RegisterSet := do
+  let validStackPointer (rsp : VA) : Bool := match stackBounds with
+    | none => true
+    | some (base, size) => size != 0 && base.toNat + size.toNat ≤ 2^64
+        && base ≤ rsp && rsp.toNat ≤ base.toNat + size.toNat
+  let stackAddress (base : VA) (offset : Nat) : Option VA := match stackBounds with
+    | none => some (base + UInt64.ofNat offset)
+    | some _ =>
+      if base.toNat + offset < 2^64 then some (UInt64.ofNat (base.toNat + offset)) else none
+  let readStack (va : VA) : Option UInt64 := match stackBounds with
+    | none => readU64S space va
+    | some (base, size) =>
+      if validStackPointer va && va.toNat + 8 ≤ base.toNat + size.toNat then
+        readU64S { space with backing := none } va
+      else none
+  let moveStack (regs : RegisterSet) (rsp : VA) : Option RegisterSet :=
+    if validStackPointer rsp && (stackBounds.isNone || rsp ≥ regs.rsp) then
+      some (regs.set X64.RSP rsp)
+    else none
+  let advanceStack (regs : RegisterSet) (offset : Nat) : Option RegisterSet := do
+    let rsp ← stackAddress regs.rsp offset
+    moveStack regs rsp
+  if !validStackPointer regs.rsp then none else
   let rec loop (cur : RuntimeFunction) (regs : RegisterSet) (fuel : Nat) : Option RegisterSet :=
     match fuel with
     | 0 => none
@@ -150,48 +175,60 @@ def unwindStep (regs : RegisterSet) (space : AddressSpace) (moduleBase : VA)
               let rsp := regs.rsp
               match op with
               | 0 =>  -- PUSH_NONVOL
-                match readU64S space rsp with
-                | none => none
-                | some v =>
-                  codes (consumed + 1) ((regs.set (uwregMap info) v).set X64.RSP (rsp + 8))
+                do
+                  let v ← readStack rsp
+                  let next ← advanceStack regs 8
+                  codes (consumed + 1) ((regs.set (uwregMap info) v).set X64.RSP next.rsp)
               | 1 =>  -- ALLOC_LARGE
                 if info == 0 then
                   match slot (consumed + 1) with
                   | none => none
-                  | some n => codes (consumed + 2) (regs.set X64.RSP (rsp + 8 * n.toUInt64))
+                  | some n => do
+                    let next ← advanceStack regs (8 * n.toNat)
+                    codes (consumed + 2) next
                 else
                   match slot (consumed + 1), slot (consumed + 2) with
-                  | some lo, some hi =>
-                    codes (consumed + 3)
-                      (regs.set X64.RSP (rsp + (lo ||| (hi <<< 16)).toUInt64))
+                  | some lo, some hi => do
+                    let next ← advanceStack regs (lo ||| (hi <<< 16)).toNat
+                    codes (consumed + 3) next
                   | _, _ => none
               | 2 =>  -- ALLOC_SMALL
-                codes (consumed + 1) (regs.set X64.RSP (rsp + 8 * (UInt64.ofNat info + 1)))
+                do
+                  let next ← advanceStack regs (8 * (info + 1))
+                  codes (consumed + 1) next
               | 3 =>  -- SET_FPREG
-                let frame := regs.get (uwregMap frameReg.toNat)
-                codes (consumed + 1)
-                  (regs.set X64.RSP (frame - 16 * frameOffScaled.toUInt64))
+                do
+                  let frame := regs.get (uwregMap frameReg.toNat)
+                  let offset := 16 * frameOffScaled.toNat
+                  if stackBounds.isSome && frame.toNat < offset then none else
+                  let next ← moveStack regs (frame - UInt64.ofNat offset)
+                  codes (consumed + 1) next
               | 4 =>  -- SAVE_NONVOL
                 match slot (consumed + 1) with
                 | none => none
-                | some n =>
-                  match readU64S space (rsp + 8 * n.toUInt64) with
-                  | none => none
-                  | some v => codes (consumed + 2) (regs.set (uwregMap info) v)
+                | some n => do
+                  let va ← stackAddress rsp (8 * n.toNat)
+                  let v ← readStack va
+                  let next := regs.set (uwregMap info) v
+                  let _ ← moveStack regs next.rsp
+                  codes (consumed + 2) next
               | 5 =>  -- SAVE_NONVOL_FAR
                 match slot (consumed + 1), slot (consumed + 2) with
-                | some lo, some hi =>
-                  match readU64S space (rsp + (lo ||| (hi <<< 16)).toUInt64) with
-                  | none => none
-                  | some v => codes (consumed + 3) (regs.set (uwregMap info) v)
+                | some lo, some hi => do
+                  let va ← stackAddress rsp (lo ||| (hi <<< 16)).toNat
+                  let v ← readStack va
+                  let next := regs.set (uwregMap info) v
+                  let _ ← moveStack regs next.rsp
+                  codes (consumed + 3) next
                 | _, _ => none
               | 6 => codes (consumed + 2) regs  -- EPILOG
               | 7 => codes (consumed + 1) regs  -- SPARE
               | 8 => codes (consumed + 2) regs  -- SAVE_XMM128
               | 9 => codes (consumed + 3) regs  -- SAVE_XMM128_FAR
               | 10 =>  -- PUSH_MACHFRAME
-                codes (consumed + 1)
-                  (regs.set X64.RSP (rsp + if info == 1 then 0x30 else 0x28))
+                do
+                  let next ← advanceStack regs (if info == 1 then 0x30 else 0x28)
+                  codes (consumed + 1) next
               | _ => none
         termination_by count + 1 - consumed
       match codes 0 regs with
@@ -207,10 +244,11 @@ def unwindStep (regs : RegisterSet) (space : AddressSpace) (moduleBase : VA)
                    unwindInfo := readU32leAt b 8 } regs' fuel
         else
           -- standard return-address pop
-          match readU64S space regs'.rsp with
+          match readStack regs'.rsp with
           | none => none
-          | some ret =>
-            some ((regs'.set X64.RIP ret).set X64.RSP (regs'.rsp + 8))
+          | some ret => do
+            let next ← advanceStack regs' 8
+            some (next.set X64.RIP ret)
   loop rt regs 64
 
 end Forensicator.Util

@@ -32,14 +32,25 @@ structure V8StackFrame where
 
 -- Shared cage-walking helpers now live in Util/V8Obj.lean.
 -- These local aliases keep the rest of V8.lean unchanged.
-private def readU64 := @Util.readU64
 private def readU32o := @Util.readU32o
 private def readU64o := @Util.readU64o
-private def wadd := @Util.wadd
 private def decompress := @Util.decompress
 private def smi := @Util.smi
 private def instanceType := @Util.instanceType
 private def readV8String := @Util.readV8String
+
+/-- Stack endpoints stay in Nat: a captured range must never wrap at 2^64.
+    A zero-length check admits the one-past RSP after a final valid pop. -/
+private def stackContains (base : VA) (stop : Nat) (va : VA) (len : Nat) : Bool :=
+  base.toNat < stop && stop ≤ 2^64 && base ≤ va && va.toNat + len ≤ stop
+
+private def stackWord (space : AddressSpace) (base : VA) (stop : Nat)
+    (fp : VA) (offset : Int := 0) : Option UInt64 := do
+  let address := Int.ofNat fp.toNat + offset
+  if address < 0 || address ≥ Int.ofNat (2^64) then none else
+  let va := UInt64.ofNat address.toNat
+  if !stackContains base stop va 8 then none
+  else readU64o { space with backing := none } va
 
 private def readExternalChars (space : AddressSpace) (ptr : VA) (len : UInt32) (oneByte : Bool) :
     Option String := do
@@ -332,8 +343,9 @@ private structure JsCandidate where
     type in [itypeJsFunctionFirst, itypeJsFunctionLast]. none on any
     failure (fail closed; try next candidate, then none). -/
 private def jsCandidateAt (space : AddressSpace) (fp : VA) (slot : Int)
-    (cageHint : Option VA) (layout : V8Layout) : Option JsCandidate := do
-  let tagged := readU64 space (wadd fp slot)
+    (cageHint : Option VA) (layout : V8Layout) (stackVa : VA) (stackEnd : Nat) :
+    Option JsCandidate := do
+  let tagged ← stackWord space stackVa stackEnd fp slot
   if tagged &&& 1 != 1 then none
   else
     let heap := tagged &&& 0xFFFFFFFFFFFFFFFE
@@ -363,7 +375,7 @@ private def jsCandidateAt (space : AddressSpace) (fp : VA) (slot : Int)
     threaded in/out (the Rust version shares a Cell across frames). -/
 private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA)
     (isolateVa : Option VA) (moduleRanges : List (VA × UInt64)) (eptBase : Option VA)
-    (layout : V8Layout) : Option (JsFrameInfo × Option VA) :=
+    (layout : V8Layout) (stackVa : VA) (stackEnd : Nat) : Option (JsFrameInfo × Option VA) :=
   let decodeAt (heap cage : VA) : Option (JsFrameInfo × Option VA) := do
     match readU32o space (heap + layout.jsfunctionSharedFunctionInfo) with
     | none => none
@@ -414,7 +426,7 @@ private def decodeJsFrame (space : AddressSpace) (fp : VA) (cageHint : Option VA
     match slots with
     | [] => none
     | slot :: rest =>
-      match jsCandidateAt space fp slot cageHint layout with
+      match jsCandidateAt space fp slot cageHint layout stackVa stackEnd with
       | none => trySlot rest
       | some c => decodeAt c.heap c.cage
   -- fixed offsets first, then the bounded fallback scan [rbp-0x30 … rbp-0x8]
@@ -462,7 +474,7 @@ private structure WalkCtx where
   moduleBase : Option VA
   thread : Thread
   stackVa : VA
-  stackEnd : VA
+  stackEnd : Nat
 
 /-- Walker state: current registers + metadata. -/
 private structure WalkState where
@@ -488,9 +500,10 @@ private def walkGo (ctx : WalkCtx) (st : WalkState) (acc : List V8StackFrame)
         decide (rip ≥ b ∧ rip.toNat < b.toNat + s.toNat)
       if !inModule && (space.regionAt rip).isNone && st.viaLeaf then (acc, st.tables)
       else
-        let marker := readU64 space (wadd rbp ctx.layout.kMarkerOffset)
+        let marker := (stackWord space ctx.stackVa ctx.stackEnd rbp ctx.layout.kMarkerOffset).getD 0
         let frameType := classifyFrame rip ctx.moduleRanges space marker ctx.layout
         let js := decodeJsFrame space rbp ctx.cage ctx.isolateVa ctx.moduleRanges st.eptBase ctx.layout
+          ctx.stackVa ctx.stackEnd
         let (jsInfo, ept') := match js with
           | some (i, e) => (some i, e)
           | none => (none, st.eptBase)
@@ -519,29 +532,40 @@ private def walkGo (ctx : WalkCtx) (st : WalkState) (acc : List V8StackFrame)
         let st2 := { st1 with tables := tables' }
         match hit with
         | some (base, rt) =>
-          match unwindStep st.regs space base rt with
-          | some regs' => walkGo ctx { st2 with regs := regs', viaLeaf := false } (acc ++ [frame]) fuel
+          match unwindStep st.regs space base rt (some (ctx.stackVa, ctx.thread.stackSize)) with
+          | some regs' =>
+            if regs'.rsp > rsp && stackContains ctx.stackVa ctx.stackEnd regs'.rsp 0 then
+              walkGo ctx { st2 with regs := regs', viaLeaf := false } (acc ++ [frame]) fuel
+            else (acc ++ [frame], tables')
           | none => fpOrLeaf ctx st2 frame acc fuel rip rsp rbp
         | none => fpOrLeaf ctx st2 frame acc fuel rip rsp rbp
 where
   fpOrLeaf (ctx : WalkCtx) (st : WalkState) (frame : V8StackFrame) (acc : List V8StackFrame)
       (fuel : Nat) (_rip rsp rbp : VA) : List V8StackFrame × UnwindTables :=
     let space := ctx.space
-    let savedRbp := readU64 space rbp
-    let fpRet := readU64 space (rbp + 8)
-    let fpChain := rbp ≥ ctx.stackVa && savedRbp > rbp && savedRbp < ctx.stackEnd
-    let terminalLink := !fpChain && rbp ≥ ctx.stackVa && rbp < ctx.stackEnd && fpRet != 0
-      && (ctx.moduleRanges.any (fun (b, s) => decide (fpRet ≥ b ∧ fpRet.toNat < b.toNat + s.toNat))
-        || ((space.regionAt fpRet).map (fun r => r.protection &&& Protection.EXECUTE != 0)).getD false)
-    if fpRet != 0 && (fpChain || terminalLink) then
-      let regs' := ((st.regs.set X64.RIP fpRet).set X64.RBP savedRbp).set X64.RSP (rbp + 16)
+    let fpStep : Option RegisterSet := do
+      if !stackContains ctx.stackVa ctx.stackEnd rsp 0 || rbp < rsp
+          || rbp.toNat + 16 ≥ 2^64 then none else
+      let savedRbp ← stackWord space ctx.stackVa ctx.stackEnd rbp
+      let fpRet ← stackWord space ctx.stackVa ctx.stackEnd rbp 8
+      let fpChain := savedRbp > rbp && savedRbp.toNat < ctx.stackEnd
+      let terminalLink := !fpChain &&
+        (ctx.moduleRanges.any (fun (b, s) => decide (fpRet ≥ b ∧ fpRet.toNat < b.toNat + s.toNat))
+          || ((space.regionAt fpRet).map (fun r => r.protection &&& Protection.EXECUTE != 0)).getD false)
+      if fpRet == 0 || !(fpChain || terminalLink) then none else
+      some (((st.regs.set X64.RIP fpRet).set X64.RBP savedRbp).set X64.RSP (rbp + 16))
+    match fpStep with
+    | some regs' =>
       walkGo ctx { st with regs := regs', viaLeaf := false } (acc ++ [frame]) fuel
-    else
-      let leafRet := readU64 space rsp
-      if leafRet != 0 then
-        let regs' := (st.regs.set X64.RIP leafRet).set X64.RSP (rsp + 8)
-        walkGo ctx { st with regs := regs', viaLeaf := true } (acc ++ [frame]) fuel
-      else (acc ++ [frame], st.tables)
+    | none =>
+      let leafStep : Option RegisterSet := do
+        if rsp.toNat + 8 ≥ 2^64 then none else
+        let leafRet ← stackWord space ctx.stackVa ctx.stackEnd rsp
+        if leafRet == 0 then none else
+        some ((st.regs.set X64.RIP leafRet).set X64.RSP (rsp + 8))
+      match leafStep with
+      | some regs' => walkGo ctx { st with regs := regs', viaLeaf := true } (acc ++ [frame]) fuel
+      | none => (acc ++ [frame], st.tables)
 
 private def walkThread (ctx : WalkCtx) (init : UnwindTables) :
     List V8StackFrame × UnwindTables :=
@@ -584,7 +608,7 @@ def walkThreadStacks (publics : Option Util.Publics) (input : AnalysisInput)
       let ctx : WalkCtx :=
         { input := input, space := space, isolateVa := isolateVa, layout := layout
           moduleRanges := moduleRanges, cage := cage, publics := publics, moduleBase, thread := t
-          stackVa := t.stackVa, stackEnd := t.stackVa + t.stackSize }
+          stackVa := t.stackVa, stackEnd := t.stackVa.toNat + t.stackSize.toNat }
       let (frames, tables') := walkThread ctx tables
       go rest tables' (acc ++ frames)
   go (input.point.threads.filterMap (stackThread input)) (UnwindTables.new input.modules) []
